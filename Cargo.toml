@@ -1,0 +1,12 @@
+[package]
+name = "repo-sniff"
+version = "0.1.0"
+edition = "2024"
+description = "Static scanner that flags malicious or suspicious code in GitHub repositories"
+license = "AGPL-3.0-only"
+repository = "https://github.com/z3nghoul/repo-sniff"
+readme = "README.md"
+keywords = ["security", "scanner", "malware", "static-analysis", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
