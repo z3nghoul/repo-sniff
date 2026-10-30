@@ -1,4 +1,7 @@
+mod clone;
 mod target;
+
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -39,9 +42,19 @@ fn scan(target: Target) -> Result<()> {
             if !root.is_dir() {
                 bail!("{} is not a directory", root.display());
             }
-            println!("Scanning {}", root.display());
-            Ok(())
+            scan_dir(&root)
         }
-        Target::Remote(url) => bail!("remote targets are not supported yet: {url}"),
+        Target::Remote(url) => {
+            println!("Cloning {url}");
+            // `checkout` must stay alive until the scan ends: dropping it
+            // deletes the cloned files.
+            let checkout = clone::shallow_clone(&url)?;
+            scan_dir(checkout.path())
+        }
     }
+}
+
+fn scan_dir(root: &Path) -> Result<()> {
+    println!("Scanning {}", root.display());
+    Ok(())
 }
