@@ -143,10 +143,11 @@ fn skip_rank(reason: &SkipReason) -> u8 {
         SkipReason::Executable { .. } => 0,
         SkipReason::TooLarge { .. } => 1,
         SkipReason::Unreadable { .. } => 2,
-        SkipReason::GitMetadata { nested: true } => 3,
-        SkipReason::Binary => 4,
-        SkipReason::Symlink { .. } => 5,
-        SkipReason::GitMetadata { nested: false } => 6,
+        SkipReason::LineTooLong { .. } => 3,
+        SkipReason::GitMetadata { nested: true } => 4,
+        SkipReason::Binary => 5,
+        SkipReason::Symlink { .. } => 6,
+        SkipReason::GitMetadata { nested: false } => 7,
     }
 }
 
@@ -159,6 +160,9 @@ fn skip_text(reason: &SkipReason) -> String {
             format!("executable binary ({format}), not analyzed")
         }
         SkipReason::Unreadable { error } => format!("unreadable: {error}"),
+        SkipReason::LineTooLong { line } => {
+            format!("line {line} is too long to analyze, the rest was not read")
+        }
         SkipReason::GitMetadata { nested: false } => "git metadata, not analyzed".to_string(),
         SkipReason::GitMetadata { nested: true } => {
             "nested git repository, not analyzed".to_string()
@@ -184,6 +188,10 @@ fn skip_breakdown(report: &Report) -> String {
         (
             count(|r| matches!(r, SkipReason::Unreadable { .. })),
             "unreadable",
+        ),
+        (
+            count(|r| matches!(r, SkipReason::LineTooLong { .. })),
+            "line too long",
         ),
         (
             count(|r| matches!(r, SkipReason::Symlink { .. })),
@@ -236,6 +244,12 @@ fn completeness(report: &Report) -> String {
     if unread > 0 {
         reasons.push(format!(
             "{unread} files could not be read (too large or unreadable)"
+        ));
+    }
+    let long_lines = count(|r| matches!(r, SkipReason::LineTooLong { .. }));
+    if long_lines > 0 {
+        reasons.push(format!(
+            "{long_lines} files have a line too long to analyze"
         ));
     }
     let executables = count(|r| matches!(r, SkipReason::Executable { .. }));
@@ -338,6 +352,29 @@ mod tests {
             text.contains(
                 "Scan: INCONCLUSIVE (1 files could not be read (too large or unreadable))"
             ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_line_too_long_to_analyze_is_a_cause_of_inconclusive_and_is_named() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("dist/min.js"),
+                reason: SkipReason::LineTooLong { line: 7 },
+            }],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(
+            text.contains("dist/min.js  line 7 is too long to analyze, the rest was not read"),
+            "{text}"
+        );
+        assert!(text.contains("Make the scan INCONCLUSIVE (1):"), "{text}");
+        assert!(
+            text.contains("1 files have a line too long to analyze"),
             "{text}"
         );
     }
