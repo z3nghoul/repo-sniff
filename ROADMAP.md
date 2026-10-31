@@ -49,6 +49,7 @@ Rule families, each in its own branch and PR, fixtures approved first:
 - [ ] IDE: VS Code tasks/settings, devcontainer, `.idea` run configurations, `.envrc`
 - [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
 - [ ] npm and Python install hooks: lifecycle scripts, `setup.py`, `.pth`, build backends
+- [ ] Rule written by the author, reviewed by Claude (candidate: `.pth` files with executable `import` lines, a one-pattern `line-regex` rule with a `files` glob)
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
 - [ ] Build scripts: `build.rs`, Rust proc-macros, `.vcxproj` build events, CMake, Makefile, Gradle wrapper and tasks
 - [ ] GitHub Actions workflows
