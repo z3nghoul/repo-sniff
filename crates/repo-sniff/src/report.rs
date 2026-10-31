@@ -18,9 +18,6 @@ const SEVERITIES_DESC: [Severity; 5] = [
 /// Skip reasons can quote OS error text that contains file names.
 const MAX_REASON_CHARS: usize = 300;
 
-/// At most this many skipped paths are listed; the rest are only counted.
-const MAX_SKIPPED_SHOWN: usize = 10;
-
 /// Renders `report` as plain text. `target` is what the user asked to scan
 /// (a path or URL), shown instead of a temporary clone directory.
 pub fn render(report: &Report, target: &str) -> String {
@@ -90,32 +87,29 @@ pub fn render(report: &Report, target: &str) -> String {
             report.skipped.len(),
             skip_breakdown(report)
         );
-        for skipped in report.skipped.iter().take(MAX_SKIPPED_SHOWN) {
-            let reason = match &skipped.reason {
-                SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
-                SkipReason::Symlink { .. } => "symlink, not followed".to_string(),
-                SkipReason::Binary => "binary format, ASCII rules only".to_string(),
-                SkipReason::Executable { format } => {
-                    format!("executable binary ({format}), not analyzed")
-                }
-                SkipReason::Unreadable { error } => format!("unreadable: {error}"),
-                SkipReason::GitMetadata { nested: false } => {
-                    "git metadata, not analyzed".to_string()
-                }
-                SkipReason::GitMetadata { nested: true } => {
-                    "nested git repository, not analyzed".to_string()
-                }
-            };
+        // Every entry is listed, never a prefix. The ones that make the scan
+        // inconclusive come first, so the reader sees what to deal with.
+        let mut skipped: Vec<_> = report.skipped.iter().collect();
+        skipped
+            .sort_by(|a, b| (skip_rank(&a.reason), &a.path).cmp(&(skip_rank(&b.reason), &b.path)));
+        let causes = skipped
+            .iter()
+            .filter(|s| s.reason.makes_scan_inconclusive())
+            .count();
+        for (index, entry) in skipped.iter().enumerate() {
+            if causes > 0 && index == 0 {
+                let _ = writeln!(out, "Make the scan INCONCLUSIVE ({causes}):");
+            }
+            if causes > 0 && index == causes {
+                let others = skipped.len() - causes;
+                let _ = writeln!(out, "Do not change the result ({others}):");
+            }
             let _ = writeln!(
                 out,
                 "  {}  {}",
-                display_path(&skipped.path),
-                display_safe(&reason, MAX_REASON_CHARS)
+                display_path(&entry.path),
+                display_safe(&skip_text(&entry.reason), MAX_REASON_CHARS)
             );
-        }
-        if report.skipped.len() > MAX_SKIPPED_SHOWN {
-            let hidden = report.skipped.len() - MAX_SKIPPED_SHOWN;
-            let _ = writeln!(out, "  ... and {hidden} more");
         }
         let _ = writeln!(out);
     }
@@ -140,6 +134,36 @@ pub fn render(report: &Report, target: &str) -> String {
     let _ = writeln!(out, "Summary: {}", counts.join(", "));
     let _ = writeln!(out, "{}", completeness(report));
     out
+}
+
+/// Sort key for the list of skipped files: the reasons that make the scan
+/// inconclusive first, then the rest, each kind together.
+fn skip_rank(reason: &SkipReason) -> u8 {
+    match reason {
+        SkipReason::Executable { .. } => 0,
+        SkipReason::TooLarge { .. } => 1,
+        SkipReason::Unreadable { .. } => 2,
+        SkipReason::GitMetadata { nested: true } => 3,
+        SkipReason::Binary => 4,
+        SkipReason::Symlink { .. } => 5,
+        SkipReason::GitMetadata { nested: false } => 6,
+    }
+}
+
+fn skip_text(reason: &SkipReason) -> String {
+    match reason {
+        SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
+        SkipReason::Symlink { .. } => "symlink, not followed".to_string(),
+        SkipReason::Binary => "binary format, ASCII rules only".to_string(),
+        SkipReason::Executable { format } => {
+            format!("executable binary ({format}), not analyzed")
+        }
+        SkipReason::Unreadable { error } => format!("unreadable: {error}"),
+        SkipReason::GitMetadata { nested: false } => "git metadata, not analyzed".to_string(),
+        SkipReason::GitMetadata { nested: true } => {
+            "nested git repository, not analyzed".to_string()
+        }
+    }
 }
 
 /// A short count of what was skipped, by reason.
@@ -428,6 +452,60 @@ mod tests {
         assert!(text.contains("big.txt  too large (99 bytes)"), "{text}");
         assert!(text.contains("link  symlink, not followed"), "{text}");
         assert!(text.contains("locked  unreadable: denied"), "{text}");
+    }
+
+    #[test]
+    fn every_skipped_file_is_listed_and_the_ones_behind_inconclusive_come_first() {
+        let mut skipped: Vec<Skipped> = (0..30)
+            .map(|n| Skipped {
+                path: PathBuf::from(format!("img/{n:02}.png")),
+                reason: SkipReason::Binary,
+            })
+            .collect();
+        for name in ["vendor/z.dll", "a.exe"] {
+            skipped.push(Skipped {
+                path: PathBuf::from(name),
+                reason: SkipReason::Executable { format: "PE" },
+            });
+        }
+        let report = Report {
+            skipped,
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(!text.contains("more"), "{text}");
+        for n in 0..30 {
+            assert!(text.contains(&format!("img/{n:02}.png")), "{n}: {text}");
+        }
+        let position = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {text}"))
+        };
+        assert!(position("Make the scan INCONCLUSIVE (2):") < position("a.exe"));
+        assert!(position("a.exe") < position("vendor/z.dll"));
+        assert!(position("vendor/z.dll") < position("Do not change the result (30):"));
+        assert!(position("Do not change the result (30):") < position("img/00.png"));
+    }
+
+    #[test]
+    fn without_a_cause_of_inconclusive_the_list_has_no_headings() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("a.png"),
+                reason: SkipReason::Binary,
+            }],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(
+            text.contains("  a.png  binary format, ASCII rules only"),
+            "{text}"
+        );
+        assert!(!text.contains("Make the scan"), "{text}");
     }
 
     #[test]
