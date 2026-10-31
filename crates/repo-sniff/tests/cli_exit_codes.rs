@@ -211,3 +211,64 @@ fn credentials_in_a_refused_target_are_not_repeated() {
     assert_eq!(code(&output), 2);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("TOKEN789"));
 }
+
+/// A directory that holds a binary file next to clean source.
+fn clean_dir_with_a_binary_file() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+    dir
+}
+
+#[test]
+fn an_unread_binary_file_makes_a_clean_looking_scan_inconclusive() {
+    let dir = clean_dir_with_a_binary_file();
+
+    let output = run(dir.path(), &["scan", "."]);
+
+    assert_eq!(code(&output), 3);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Not scanned (1): 1 binary"), "{stdout}");
+    assert!(stdout.contains("Scan: INCONCLUSIVE"), "{stdout}");
+    assert!(stdout.contains("1 files were not read"), "{stdout}");
+}
+
+#[test]
+fn an_oversized_file_makes_the_scan_inconclusive() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("big.txt"), vec![b'x'; 6 * 1024 * 1024]).unwrap();
+
+    let output = run(dir.path(), &["scan", "."]);
+
+    assert_eq!(code(&output), 3);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 too large"));
+}
+
+#[test]
+fn findings_at_the_threshold_win_over_an_incomplete_scan() {
+    let dir = high_only_dir();
+    fs::write(dir.path().join("blob.bin"), [0u8, 1]).unwrap();
+
+    assert_eq!(code(&run(dir.path(), &["scan", "."])), 1);
+}
+
+#[test]
+fn fail_on_none_does_not_turn_an_incomplete_scan_into_a_pass() {
+    let dir = clean_dir_with_a_binary_file();
+
+    assert_eq!(
+        code(&run(dir.path(), &["scan", ".", "--fail-on", "none"])),
+        3
+    );
+}
+
+#[test]
+fn a_complete_scan_says_so_and_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+    let output = run(dir.path(), &["scan", "."]);
+
+    assert_eq!(code(&output), 0);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Scan: complete"));
+}

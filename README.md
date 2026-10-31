@@ -109,11 +109,15 @@ Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
 
 | Status | Meaning |
 |---|---|
-| 0 | The scan ran and nothing reached the `--fail-on` threshold |
-| 1 | The scan ran and found something at or above the threshold |
+| 0 | The scan read every file and nothing reached the `--fail-on` threshold |
+| 1 | The scan found something at or above the threshold |
 | 2 | The scan could not run (bad target, clone failure, wrong options) |
+| 3 | Nothing reached the threshold, but the scan was **incomplete** (the file limit was reached, or binary, oversized or unreadable files were not read) |
 
-This makes `repo-sniff scan . --fail-on high` usable as a CI check.
+An incomplete scan is never reported as clean: the report ends with
+`Scan: INCONCLUSIVE` and says what was not read, and the exit status is 3 even
+with `--fail-on none`. This makes `repo-sniff scan . --fail-on high` usable as
+a CI check without mistaking "nothing found in what was read" for "safe".
 
 ## Development
 

@@ -36,6 +36,24 @@ pub struct Report {
     pub truncated: bool,
 }
 
+impl Report {
+    /// Whether every file was read. A report with no findings is only a clean
+    /// bill of health when this is true: a payload may sit in a file the scan
+    /// never opened, or past the file limit.
+    pub fn is_complete(&self) -> bool {
+        !self.truncated && self.unread_count() == 0
+    }
+
+    /// Number of files whose content was not read (binary, oversized,
+    /// unreadable). Symlinks are not counted, see `SkipReason`.
+    pub fn unread_count(&self) -> usize {
+        self.skipped
+            .iter()
+            .filter(|skipped| skipped.reason.leaves_content_unread())
+            .count()
+    }
+}
+
 /// Scans every file under `root` with every rule.
 ///
 /// All rules always run; hiding findings by severity, stage or family is
@@ -468,6 +486,77 @@ mod tests {
         let report = scan(dir.path(), &rules, Limits::default());
 
         assert_eq!(report.findings[0].line, 3);
+    }
+
+    #[test]
+    fn a_scan_that_read_everything_is_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", b"fine\n");
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(report.is_complete());
+        assert_eq!(report.unread_count(), 0);
+    }
+
+    #[test]
+    fn a_skipped_binary_oversized_or_unreadable_file_makes_the_scan_incomplete() {
+        let skip = |reason| Skipped {
+            path: PathBuf::from("x"),
+            reason,
+        };
+        for reason in [
+            SkipReason::Binary,
+            SkipReason::TooLarge { size: 9 },
+            SkipReason::Unreadable {
+                error: "denied".to_string(),
+            },
+        ] {
+            let report = Report {
+                skipped: vec![skip(reason.clone())],
+                ..Report::default()
+            };
+            assert!(!report.is_complete(), "{reason:?}");
+            assert_eq!(report.unread_count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_symlink_alone_does_not_make_the_scan_incomplete() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("link"),
+                reason: SkipReason::Symlink { target: None },
+            }],
+            ..Report::default()
+        };
+
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn a_payload_past_the_file_limit_is_missed_and_the_scan_is_not_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        // Padding sorts before the payload, so the limit cuts the payload off.
+        for name in ["a1.txt", "a2.txt", "a3.txt", "a4.txt"] {
+            write(dir.path(), name, b"padding\n");
+        }
+        write(dir.path(), "z-payload.txt", b"TODO payload\n");
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+        let limits = Limits {
+            max_files: 4,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &rules, limits);
+
+        assert!(report.findings.is_empty(), "the payload was never read");
+        assert!(report.truncated);
+        assert!(
+            !report.is_complete(),
+            "no findings must not mean clean here"
+        );
     }
 
     #[test]

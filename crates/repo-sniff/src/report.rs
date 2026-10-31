@@ -56,7 +56,12 @@ pub fn render(report: &Report, target: &str) -> String {
     }
 
     if !report.skipped.is_empty() {
-        let _ = writeln!(out, "Not scanned ({}):", report.skipped.len());
+        let _ = writeln!(
+            out,
+            "Not scanned ({}): {}",
+            report.skipped.len(),
+            skip_breakdown(report)
+        );
         for skipped in report.skipped.iter().take(MAX_SKIPPED_SHOWN) {
             let reason = match &skipped.reason {
                 SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
@@ -96,7 +101,55 @@ pub fn render(report: &Report, target: &str) -> String {
         })
         .collect();
     let _ = writeln!(out, "Summary: {}", counts.join(", "));
+    let _ = writeln!(out, "{}", completeness(report));
     out
+}
+
+/// A short count of what was skipped, by reason.
+fn skip_breakdown(report: &Report) -> String {
+    let count = |wanted: fn(&SkipReason) -> bool| {
+        report.skipped.iter().filter(|s| wanted(&s.reason)).count()
+    };
+    let parts = [
+        (count(|r| matches!(r, SkipReason::Binary)), "binary"),
+        (
+            count(|r| matches!(r, SkipReason::TooLarge { .. })),
+            "too large",
+        ),
+        (
+            count(|r| matches!(r, SkipReason::Unreadable { .. })),
+            "unreadable",
+        ),
+        (
+            count(|r| matches!(r, SkipReason::Symlink { .. })),
+            "symlink",
+        ),
+    ];
+    parts
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The last line of the report: says whether "no findings" can be trusted.
+fn completeness(report: &Report) -> String {
+    if report.is_complete() {
+        return "Scan: complete (every file was read)".to_string();
+    }
+    let mut reasons = Vec::new();
+    if report.truncated {
+        reasons.push("the file limit was reached".to_string());
+    }
+    if report.unread_count() > 0 {
+        reasons.push(format!("{} files were not read", report.unread_count()));
+    }
+    format!(
+        "Scan: INCONCLUSIVE ({}). Findings above may be incomplete, and a result without \
+         findings does not mean the repository is clean.",
+        reasons.join("; ")
+    )
 }
 
 #[cfg(test)]
@@ -131,6 +184,49 @@ mod tests {
             text.contains("HIGH      src/lib.rs:3  test.rule  [run]"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_complete_scan_says_so() {
+        let text = render(&Report::default(), "repo");
+
+        assert!(text.contains("Scan: complete"), "{text}");
+        assert!(!text.contains("INCONCLUSIVE"), "{text}");
+    }
+
+    #[test]
+    fn an_incomplete_scan_says_why_and_warns_that_no_findings_is_not_clean() {
+        let report = Report {
+            truncated: true,
+            skipped: vec![Skipped {
+                path: PathBuf::from("a.bin"),
+                reason: SkipReason::Binary,
+            }],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(text.contains("Scan: INCONCLUSIVE"), "{text}");
+        assert!(text.contains("the file limit was reached"), "{text}");
+        assert!(text.contains("1 files were not read"), "{text}");
+        assert!(
+            text.contains("does not mean the repository is clean"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_lone_symlink_does_not_make_the_report_inconclusive() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("link"),
+                reason: SkipReason::Symlink { target: None },
+            }],
+            ..Report::default()
+        };
+
+        assert!(render(&report, "repo").contains("Scan: complete"));
     }
 
     #[test]
@@ -169,7 +265,10 @@ mod tests {
 
         let text = render(&report, "repo");
 
-        assert!(text.contains("Not scanned (4):"), "{text}");
+        assert!(
+            text.contains("Not scanned (4): 1 binary, 1 too large, 1 unreadable, 1 symlink"),
+            "{text}"
+        );
         assert!(text.contains("a.bin  binary file"), "{text}");
         assert!(text.contains("big.txt  too large (99 bytes)"), "{text}");
         assert!(text.contains("link  symlink, not followed"), "{text}");
