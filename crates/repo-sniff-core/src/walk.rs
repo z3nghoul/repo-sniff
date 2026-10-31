@@ -18,16 +18,29 @@ use ignore::WalkBuilder;
 /// Upper bounds for one scan.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// Files larger than this many bytes are skipped.
+    /// Files larger than this many bytes are not read at all.
     pub max_file_size: u64,
+    /// Files up to this size are read into memory and given to every rule.
+    /// Larger ones (up to `max_file_size`) are read as a stream, line by line,
+    /// and only the line rules look at them.
+    pub max_buffered_size: u64,
+    /// A line longer than this is not analysed by the line rules of a
+    /// streamed file, which makes the scan inconclusive.
+    pub max_line_size: usize,
     /// The walk stops after this many files.
     pub max_files: usize,
 }
 
 impl Default for Limits {
+    /// 100 MiB is the size at which GitHub refuses a push, so on a hosted
+    /// repository the hard limit leaves nothing out; streaming keeps the memory
+    /// of a scan at one line of that file (up to `max_line_size`, and up to three
+    /// times that for data read as ASCII), not the whole file.
     fn default() -> Self {
         Limits {
-            max_file_size: 5 * 1024 * 1024,
+            max_file_size: 100 * 1024 * 1024,
+            max_buffered_size: 5 * 1024 * 1024,
+            max_line_size: 16 * 1024 * 1024,
             max_files: 100_000,
         }
     }
@@ -43,17 +56,24 @@ pub enum SkipReason {
     Symlink {
         target: Option<PathBuf>,
     },
-    /// The file contains NUL bytes. It was read, but no rule looks inside a
-    /// binary of this kind yet, so it is reported as "binary, not analyzed".
+    /// The file has a known binary header, or NUL bytes and contents that do
+    /// not read as text. The line rules ran on its ASCII only, with the NUL
+    /// bytes removed, because a shell can still source such a file; nothing
+    /// looked inside the binary format itself.
     Binary,
-    /// Like `Binary`, and the magic bytes say it is an executable format
-    /// (ELF, PE, Mach-O, including fat binaries). It is code that runs, and
-    /// nothing analyzes it yet.
+    /// The magic bytes say it is an executable format (ELF, PE, Mach-O,
+    /// including fat binaries). It is code that runs, and nothing analyzes it
+    /// yet.
     Executable {
         format: &'static str,
     },
     Unreadable {
         error: String,
+    },
+    /// A line of a streamed file is longer than `Limits::max_line_size`, so
+    /// the line rules did not look at it (or at the rest of the file).
+    LineTooLong {
+        line: usize,
     },
     /// A `.git` folder (or a `.git` file of a worktree or submodule). Its
     /// contents are not scanned. The one at the root is the repository's own
@@ -85,6 +105,7 @@ impl SkipReason {
             self,
             SkipReason::TooLarge { .. }
                 | SkipReason::Unreadable { .. }
+                | SkipReason::LineTooLong { .. }
                 | SkipReason::Executable { .. }
                 | SkipReason::GitMetadata { nested: true }
         )
