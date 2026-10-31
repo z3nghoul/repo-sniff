@@ -55,10 +55,38 @@ pub fn render(report: &Report, target: &str) -> String {
         let _ = writeln!(out);
     }
 
+    // Findings cut by the per-file limit, one line per file with the levels.
+    let mut files: Vec<&std::path::Path> = Vec::new();
+    for unlisted in &report.unlisted {
+        if !files.contains(&unlisted.file.as_path()) {
+            files.push(&unlisted.file);
+        }
+    }
+    for file in files {
+        let of_file = || report.unlisted.iter().filter(|u| u.file == file);
+        let total: usize = of_file().map(|u| u.count).sum();
+        let levels: Vec<String> = SEVERITIES_DESC
+            .iter()
+            .filter_map(|&severity| {
+                let n: usize = of_file()
+                    .filter(|u| u.severity == severity)
+                    .map(|u| u.count)
+                    .sum();
+                (n > 0).then(|| format!("{n} {}", severity.code()))
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "{}  {total} more findings in this file not shown ({})\n",
+            display_path(file),
+            levels.join(", ")
+        );
+    }
+
     if !report.skipped.is_empty() {
         let _ = writeln!(
             out,
-            "Not analyzed ({}): {}",
+            "Not fully analyzed ({}): {}",
             report.skipped.len(),
             skip_breakdown(report)
         );
@@ -66,7 +94,7 @@ pub fn render(report: &Report, target: &str) -> String {
             let reason = match &skipped.reason {
                 SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
                 SkipReason::Symlink { .. } => "symlink, not followed".to_string(),
-                SkipReason::Binary => "binary, not analyzed".to_string(),
+                SkipReason::Binary => "binary format, ASCII rules only".to_string(),
                 SkipReason::Executable { format } => {
                     format!("executable binary ({format}), not analyzed")
                 }
@@ -160,7 +188,7 @@ fn completeness(report: &Report) -> String {
         let git = count(|r| matches!(r, SkipReason::GitMetadata { .. }));
         let mut notes = Vec::new();
         if binaries > 0 {
-            notes.push(format!("{binaries} binary files were not analyzed"));
+            notes.push(format!("{binaries} binary files were read as ASCII only"));
         }
         if git > 0 {
             notes.push("git metadata was not analyzed".to_string());
@@ -303,12 +331,34 @@ mod tests {
 
         let text = render(&report, "repo");
 
-        assert!(text.contains("Not analyzed (2): 2 binary"), "{text}");
+        assert!(text.contains("Not fully analyzed (2): 2 binary"), "{text}");
         assert!(
-            text.contains("Scan: complete (every file was read; 2 binary files were not analyzed)"),
+            text.contains(
+                "Scan: complete (every file was read; 2 binary files were read as ASCII only)"
+            ),
             "{text}"
         );
         assert!(!text.contains("INCONCLUSIVE"), "{text}");
+    }
+
+    #[test]
+    fn findings_cut_by_the_per_file_limit_are_counted_in_the_report() {
+        let report = Report {
+            unlisted: vec![repo_sniff_core::Unlisted {
+                file: PathBuf::from("src/big.js"),
+                rule_id: "test.rule".to_string(),
+                severity: Severity::Low,
+                count: 42,
+            }],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(
+            text.contains("src/big.js  42 more findings in this file not shown (42 LOW)"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -363,11 +413,14 @@ mod tests {
 
         assert!(
             text.contains(
-                "Not analyzed (5): 1 binary, 1 executable, 1 too large, 1 unreadable, 1 symlink"
+                "Not fully analyzed (5): 1 binary, 1 executable, 1 too large, 1 unreadable, 1 symlink"
             ),
             "{text}"
         );
-        assert!(text.contains("a.bin  binary, not analyzed"), "{text}");
+        assert!(
+            text.contains("a.bin  binary format, ASCII rules only"),
+            "{text}"
+        );
         assert!(
             text.contains("tool  executable binary (ELF), not analyzed"),
             "{text}"
