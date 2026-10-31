@@ -11,6 +11,7 @@
 //!   and every skip is reported so nothing disappears silently.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use ignore::WalkBuilder;
 
@@ -54,6 +55,13 @@ pub enum SkipReason {
     Unreadable {
         error: String,
     },
+    /// A `.git` folder (or a `.git` file of a worktree or submodule). Its
+    /// contents are not scanned. The one at the root is the repository's own
+    /// metadata; a nested one belongs to a vendored repository whose files
+    /// and hooks nobody looked at.
+    GitMetadata {
+        nested: bool,
+    },
 }
 
 impl SkipReason {
@@ -66,6 +74,9 @@ impl SkipReason {
     ///   nothing analyzes it yet. This goes away when the "committed
     ///   binaries" rule exists, because then such a file is a finding.
     ///
+    /// - A nested `.git` folder: a whole repository inside the one that was
+    ///   scanned, and none of it was read. The root `.git` is not counted.
+    ///
     /// Not counted: other binary data (images, archives, compressed files)
     /// that was read but has no rules, and symlinks, which are not content
     /// (their target is scanned when it is inside the repository).
@@ -75,6 +86,7 @@ impl SkipReason {
             SkipReason::TooLarge { .. }
                 | SkipReason::Unreadable { .. }
                 | SkipReason::Executable { .. }
+                | SkipReason::GitMetadata { nested: true }
         )
     }
 }
@@ -98,11 +110,23 @@ pub struct WalkResult {
 
 /// Lists the files under `root` that should be scanned.
 pub fn walk(root: &Path, limits: Limits) -> WalkResult {
+    // `.git` entries are not walked into, but each one is remembered so the
+    // report can list it instead of dropping it.
+    let git_entries = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&git_entries);
     let walker = WalkBuilder::new(root)
         .standard_filters(false) // no .gitignore, .ignore, hidden-file filtering
         .follow_links(false)
         .sort_by_file_name(|a, b| a.cmp(b))
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(move |entry| {
+            if entry.file_name() != ".git" {
+                return true;
+            }
+            if let Ok(mut list) = seen.lock() {
+                list.push((entry.path().to_path_buf(), entry.depth() > 1));
+            }
+            false
+        })
         .build();
 
     let mut result = WalkResult::default();
@@ -167,6 +191,17 @@ pub fn walk(root: &Path, limits: Limits) -> WalkResult {
         result.files.push(path);
     }
 
+    let git_entries = git_entries
+        .lock()
+        .map(|list| list.clone())
+        .unwrap_or_default();
+    for (path, nested) in git_entries {
+        result.skipped.push(Skipped {
+            path: relative(root, &path),
+            reason: SkipReason::GitMetadata { nested },
+        });
+    }
+
     result
 }
 
@@ -212,14 +247,38 @@ mod tests {
     }
 
     #[test]
-    fn git_directory_is_skipped() {
+    fn git_directories_are_not_scanned_but_are_listed() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), ".git/config", "[core]");
+        write(dir.path(), "vendor/lib/.git/hooks/post-checkout", "x");
         write(dir.path(), "main.rs", "fn main() {}");
 
         let result = walk(dir.path(), Limits::default());
 
         assert_eq!(result.files, [PathBuf::from("main.rs")]);
+        let mut skipped: Vec<_> = result
+            .skipped
+            .iter()
+            .map(|s| (s.path.clone(), s.reason.clone()))
+            .collect();
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            skipped,
+            [
+                (
+                    PathBuf::from(".git"),
+                    SkipReason::GitMetadata { nested: false }
+                ),
+                (
+                    PathBuf::from("vendor/lib/.git"),
+                    SkipReason::GitMetadata { nested: true }
+                ),
+            ]
+        );
+        assert!(
+            result.skipped[0].reason.makes_scan_inconclusive()
+                || result.skipped[1].reason.makes_scan_inconclusive()
+        );
     }
 
     #[cfg(unix)]
