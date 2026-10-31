@@ -23,7 +23,7 @@ these steps can run code from the repository on your machine, and fake
 
 `repo-sniff` **never executes code from the scanned repository**. No install,
 no build, no scripts — it only reads files. Remote repositories are cloned
-shallowly, over `https` or `ssh` only, with hooks, Git LFS filters, submodules
+shallowly, over `https` only, with hooks, Git LFS filters, submodules
 and credential prompts disabled. Symlinks are never followed, and file names
 and text taken from the repository are cleaned before they are printed, so a
 hostile repository cannot paint over the report.

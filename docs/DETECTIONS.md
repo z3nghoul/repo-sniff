@@ -235,7 +235,7 @@ scanner itself:
   protection against ReDoS);
 - no file is skipped silently: binary, oversized, symlinked and unreadable files are all listed in the report; rules that select files by name (such as `.pth` and `.start`) run on the raw bytes before the binary check, and also see oversized files and symlinks, so "too big" or "a link" is not a way around them;
 - work per line and per file is bounded (a line is analysed up to 4096 bytes, a longer one is CRITICAL by itself; at most 100 findings per file per rule), so a hostile file cannot make the scan quadratic or flood the report;
-- remote repositories are cloned shallowly over `https` or `ssh` only
+- remote repositories are cloned shallowly over `https` only (`ssh`, `http://` and `git://` are refused; a private repository is cloned by its owner and the folder scanned)
   (`http://` and `git://` are refused), with hooks redirected to an empty
   directory, Git LFS filters skipped, submodules not fetched and credential
   prompts disabled; the `--ref` value is passed to git as a single argument

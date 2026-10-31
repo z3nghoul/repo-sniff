@@ -147,3 +147,20 @@ fn option_like_ref_is_rejected_before_any_network_access() {
     assert_eq!(code(&output), 2);
     assert!(String::from_utf8_lossy(&output.stderr).contains("--ref must not start with"));
 }
+
+#[test]
+fn ssh_targets_are_a_runtime_error_that_explains_how_to_scan_a_local_clone() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for target in [
+        "ssh://git@example.invalid/owner/repo.git",
+        "git@example.invalid:owner/repo.git",
+    ] {
+        let output = run(dir.path(), &["scan", target]);
+
+        assert_eq!(code(&output), 2, "{target}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("ssh targets are not supported"), "{stderr}");
+        assert!(stderr.contains("repo-sniff scan some-folder"), "{stderr}");
+    }
+}
