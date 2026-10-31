@@ -256,13 +256,18 @@ fn compressed_test_files_are_listed_but_do_not_change_the_exit_status() {
 
     assert_eq!(code(&output), 0);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Not analyzed (3): 3 binary"), "{stdout}");
     assert!(
-        stdout.contains("data/a.gz  binary, not analyzed"),
+        stdout.contains("Not fully analyzed (3): 3 binary"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("Scan: complete (every file was read; 3 binary files were not analyzed)"),
+        stdout.contains("data/a.gz  binary format, ASCII rules only"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Scan: complete (every file was read; 3 binary files were read as ASCII only)"
+        ),
         "{stdout}"
     );
     assert!(!stdout.contains("INCONCLUSIVE"), "{stdout}");
@@ -306,7 +311,9 @@ fn every_executable_format_makes_the_scan_inconclusive() {
 #[test]
 fn an_oversized_file_makes_the_scan_inconclusive() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("big.txt"), vec![b'x'; 6 * 1024 * 1024]).unwrap();
+    // Just over the 100 MiB limit; set_len makes the file without writing it.
+    let big = fs::File::create(dir.path().join("big.txt")).unwrap();
+    big.set_len(100 * 1024 * 1024 + 1).unwrap();
 
     let output = run(dir.path(), &["scan", "."]);
 
@@ -317,6 +324,20 @@ fn an_oversized_file_makes_the_scan_inconclusive() {
         stdout.contains("1 files could not be read (too large or unreadable)"),
         "{stdout}"
     );
+}
+
+#[test]
+fn a_file_over_5_mib_is_read_as_a_stream_and_the_scan_stays_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = "an ordinary line of a large fixture\n";
+    let text = line.repeat(6 * 1024 * 1024 / line.len() + 1);
+    fs::write(dir.path().join("fixture.txt"), text).unwrap();
+
+    let output = run(dir.path(), &["scan", "."]);
+
+    assert_eq!(code(&output), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Scan: complete"), "{stdout}");
 }
 
 #[test]
