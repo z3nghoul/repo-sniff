@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::checks::{FileCheck, FileCtx, FileIssue, RepoIndex};
-use crate::finding::Finding;
+use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
 use crate::sanitize::{display_safe, to_slash};
 use crate::walk::{self, Limits, SkipReason, Skipped};
@@ -66,6 +66,10 @@ pub struct Report {
 pub struct Unlisted {
     pub file: PathBuf,
     pub rule_id: String,
+    /// The level of the rule: every finding of one rule has the same level, and
+    /// the limit applies per rule, so a flood of LOW findings from one rule can
+    /// never push a CRITICAL one from another rule out of the list.
+    pub severity: Severity,
     pub count: usize,
 }
 
@@ -158,7 +162,6 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         let script = is_script(&slash_path, &bytes);
         let nul_line = script.then(|| first_nul_line(&bytes)).flatten();
         let mut utf16_text = None;
-        let mut binary = false;
         let mut binary_looking = false;
 
         if looks_binary(&bytes) {
@@ -182,34 +185,26 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     // Windows PowerShell and WSH read UTF-16 scripts.
                     utf16_text = Some(decode_utf16_bom(&bytes));
                 } else if known_binary_magic(&bytes) {
-                    binary = true;
+                    binary_looking = true;
                 }
             }
         }
-        // A file with NUL bytes that does not read as text is not a known
-        // binary, and a shell can still source it: `dash` drops the NULs and
-        // runs the rest, whatever else is in the file. So it goes to the line
+        // Any other file with a NUL byte that does not read as text, and any
+        // file with a known binary header, may still be sourced by a shell:
+        // `dash` drops the NULs and runs the rest, whatever else is in the
+        // file (`GIF89a=1` is a valid assignment). So it goes to the line
         // rules too, but only as ASCII (see `ascii_only_text`), because on
         // data such as icons and audio a rule that looks for a non-ASCII
-        // character matches by chance.
-        if !binary
-            && !script
-            && utf16_text.is_none()
-            && bytes.contains(&0)
-            && !nul_file_is_text(&bytes)
-        {
+        // character matches by chance. It is listed, so the report shows
+        // that its binary contents were not looked at.
+        if !script && utf16_text.is_none() && bytes.contains(&0) && !nul_file_is_text(&bytes) {
             binary_looking = true;
         }
-        if binary {
-            if checked.examined {
-                report.files_scanned += 1;
-            } else {
-                skipped.push(Skipped {
-                    path: relative.clone(),
-                    reason: SkipReason::Binary,
-                });
-            }
-            continue;
+        if binary_looking {
+            skipped.push(Skipped {
+                path: relative.clone(),
+                reason: SkipReason::Binary,
+            });
         }
 
         report.files_scanned += 1;
@@ -417,6 +412,7 @@ fn scan_text(
                     unlisted.push(Unlisted {
                         file: relative.to_path_buf(),
                         rule_id: rule.id.clone(),
+                        severity: rule.severity,
                         count: hidden,
                     });
                 }
@@ -746,15 +742,20 @@ mod tests {
     }
 
     #[test]
-    fn binary_files_are_not_line_scanned_but_are_reported_as_skipped() {
+    fn binary_files_are_line_scanned_as_ascii_and_listed() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "blob.bin", b"\x1f\x8b\0\0TODO");
         let rules = parse_rules(RULES, "test.toml").unwrap();
 
         let report = scan(dir.path(), &rules, Limits::default());
 
-        assert_eq!(report.files_scanned, 0);
-        assert!(report.findings.is_empty());
+        assert_eq!(report.files_scanned, 1);
+        assert_eq!(report.findings.len(), 1);
+        assert!(
+            report.findings[0]
+                .explanation
+                .ends_with("(found in a binary-looking file)")
+        );
         assert_eq!(
             report.skipped,
             [Skipped {
@@ -941,9 +942,9 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "x.pth");
         assert!(found[0].1.contains("bytes=22 issue=None"), "{}", found[0].1);
-        // The file a rule examined counts as scanned and is not listed as a
-        // binary skip; the file nobody examined is listed.
-        assert_eq!(report.files_scanned, 1);
+        // The text file a rule examined is not listed; the binary one is
+        // read as ASCII by the line rules and listed.
+        assert_eq!(report.files_scanned, 2);
         assert_eq!(
             report.skipped,
             [Skipped {
@@ -1376,7 +1377,12 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 1, "{:?}", report.findings);
         assert_eq!(found[0].line, line);
-        assert!(report.skipped.is_empty());
+        assert!(
+            report
+                .skipped
+                .iter()
+                .all(|s| s.reason == SkipReason::Binary)
+        );
         assert!(report.is_complete());
     }
 
@@ -1432,6 +1438,95 @@ mod tests {
 
         assert_payload_found_on_line(&report, 2);
         assert!(!report.findings[0].explanation.contains("binary-looking"));
+        assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_known_header_does_not_hide_a_sourced_payload() {
+        // `GIF89a=1` is a valid shell assignment; the rest of the file runs.
+        for header in [&b"GIF89a=1\n"[..], b"%PDF-1.4\n", b"PK\x03\x04\n"] {
+            let report = scan_sourced(&payload_with(header, b"\0\n"));
+
+            assert_payload_found_on_line(&report, 2);
+            assert!(
+                report.findings[0]
+                    .explanation
+                    .ends_with("(found in a binary-looking file)")
+            );
+            assert!(report.is_complete());
+        }
+    }
+
+    #[test]
+    fn real_binary_formats_give_no_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let formats: [(&str, &[u8]); 5] = [
+            ("a.png", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+            ("b.zip", b"PK\x03\x04\x14\0\0\0\x08\0"),
+            ("c.gz", &[0x1F, 0x8B, 8, 0, 0, 0, 0, 0]),
+            ("d.icns", b"icns\0\0\x10\0"),
+            ("e.mp3", b"ID3\x03\0\0\0\0\x0a\0"),
+        ];
+        for (name, header) in formats {
+            write(dir.path(), name, &noise_with_bidi(header));
+        }
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(CURL_SH, "test.toml").unwrap());
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.skipped.len(), 5);
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn a_flood_of_low_findings_cannot_hide_a_critical_one() {
+        const DECOY_AND_PAYLOAD: &str = r#"
+            [[rule]]
+            id = "test.decoy"
+            engine = "line-regex"
+            family = "test"
+            stage = "run"
+            severity = "low"
+            description = "Decoy"
+            example = "a:1"
+            pattern = 'DECOY'
+
+            [[rule]]
+            id = "test.payload"
+            engine = "line-regex"
+            family = "test"
+            stage = "run"
+            severity = "critical"
+            description = "Payload"
+            example = "a:1"
+            pattern = 'PAYLOAD'
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let mut contents = "DECOY\n".repeat(150);
+        contents.push_str("PAYLOAD\n");
+        write(dir.path(), "x.txt", contents.as_bytes());
+        let rules = parse_rules(DECOY_AND_PAYLOAD, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let critical: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Critical)
+            .map(|f| f.line)
+            .collect();
+        assert_eq!(critical, [151]);
+        assert_eq!(
+            report.unlisted,
+            [Unlisted {
+                file: PathBuf::from("x.txt"),
+                rule_id: "test.decoy".to_string(),
+                severity: Severity::Low,
+                count: 50,
+            }]
+        );
     }
 
     #[test]
@@ -1475,6 +1570,7 @@ mod tests {
             [Unlisted {
                 file: PathBuf::from("todo.txt"),
                 rule_id: "test.everywhere".to_string(),
+                severity: Severity::Low,
                 count: 30,
             }]
         );
