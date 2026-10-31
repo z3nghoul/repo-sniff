@@ -5,6 +5,7 @@
 //! ```toml
 //! [[rule]]
 //! id          = "deception.bidi-control"
+//! engine      = "line-regex"
 //! family      = "trojan-source"
 //! stage       = "deception"
 //! severity    = "critical"
@@ -29,11 +30,20 @@ use crate::finding::{Severity, Stage};
 const BUILTIN_RULE_FILES: &[(&str, &str)] =
     &[("deception.toml", include_str!("../rules/deception.toml"))];
 
+/// How a rule looks for its target. Every rule names its engine explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Engine {
+    /// A regular expression matched against each line of a text file.
+    LineRegex,
+}
+
 /// A rule as written in TOML, before validation.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRule {
     id: String,
+    engine: Engine,
     family: String,
     stage: Stage,
     severity: Severity,
@@ -41,7 +51,7 @@ struct RawRule {
     attack: Vec<String>,
     description: String,
     example: String,
-    pattern: String,
+    pattern: Option<String>,
     #[serde(default)]
     files: Vec<String>,
 }
@@ -51,6 +61,12 @@ struct RawRule {
 struct RuleFile {
     #[serde(default)]
     rule: Vec<RawRule>,
+}
+
+/// The compiled, ready-to-run form of a rule's engine.
+#[derive(Debug, Clone)]
+pub enum Matcher {
+    LineRegex(Regex),
 }
 
 /// A validated rule, ready to run.
@@ -64,7 +80,7 @@ pub struct Rule {
     pub attack: Vec<String>,
     pub description: String,
     pub example: String,
-    pub pattern: Regex,
+    pub matcher: Matcher,
     /// Which files the rule applies to; `None` means every file.
     pub files: Option<GlobSet>,
 }
@@ -87,6 +103,8 @@ pub enum RuleError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("rule `{id}`: engine `line-regex` requires a `pattern`")]
+    MissingPattern { id: String },
     #[error("rule `{id}`: invalid pattern: {source}")]
     Pattern {
         id: String,
@@ -143,10 +161,18 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
         });
     }
 
-    let pattern = Regex::new(&raw.pattern).map_err(|source| RuleError::Pattern {
-        id: raw.id.clone(),
-        source,
-    })?;
+    let matcher = match raw.engine {
+        Engine::LineRegex => {
+            let pattern = raw
+                .pattern
+                .ok_or_else(|| RuleError::MissingPattern { id: raw.id.clone() })?;
+            let regex = Regex::new(&pattern).map_err(|source| RuleError::Pattern {
+                id: raw.id.clone(),
+                source,
+            })?;
+            Matcher::LineRegex(regex)
+        }
+    };
 
     let files = if raw.files.is_empty() {
         None
@@ -172,7 +198,7 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
         attack: raw.attack,
         description: raw.description,
         example: raw.example,
-        pattern,
+        matcher,
         files,
     })
 }
@@ -196,6 +222,7 @@ mod tests {
     const VALID: &str = r#"
         [[rule]]
         id = "test.example"
+        engine = "line-regex"
         family = "example"
         stage = "build"
         severity = "high"
@@ -214,7 +241,8 @@ mod tests {
         assert_eq!(rule.id, "test.example");
         assert_eq!(rule.stage, Stage::Build);
         assert_eq!(rule.severity, Severity::High);
-        assert!(rule.pattern.is_match(r#"Command::new("sh")"#));
+        let Matcher::LineRegex(pattern) = &rule.matcher;
+        assert!(pattern.is_match(r#"Command::new("sh")"#));
         assert!(rule.applies_to("build.rs"));
         assert!(!rule.applies_to("src/main.rs"));
     }
@@ -242,6 +270,33 @@ mod tests {
         assert!(matches!(
             parse_rules(&source, "test.toml"),
             Err(RuleError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn engine_is_required() {
+        let source = VALID.replace(r#"engine = "line-regex""#, "");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_engine_is_rejected() {
+        let source = VALID.replace("line-regex", "magic");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn line_regex_rule_without_pattern_is_rejected() {
+        let source = VALID.replace("pattern = 'Command::new'", "");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::MissingPattern { .. })
         ));
     }
 
