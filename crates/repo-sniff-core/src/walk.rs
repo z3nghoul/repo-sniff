@@ -42,20 +42,40 @@ pub enum SkipReason {
     Symlink {
         target: Option<PathBuf>,
     },
-    /// The file contains NUL bytes, so line rules do not apply to it.
+    /// The file contains NUL bytes. It was read, but no rule looks inside a
+    /// binary of this kind yet, so it is reported as "binary, not analyzed".
     Binary,
+    /// Like `Binary`, and the magic bytes say it is an executable format
+    /// (ELF, PE, Mach-O, including fat binaries). It is code that runs, and
+    /// nothing analyzes it yet.
+    Executable {
+        format: &'static str,
+    },
     Unreadable {
         error: String,
     },
 }
 
 impl SkipReason {
-    /// Whether the scan did not get to read this file's content. A symlink is
-    /// not content: it is listed, and its target is scanned if it is inside
-    /// the repository. A binary, an oversized or an unreadable file is
-    /// content nobody looked at.
-    pub fn leaves_content_unread(&self) -> bool {
-        !matches!(self, SkipReason::Symlink { .. })
+    /// Whether this skip means the scan cannot vouch for the repository, so a
+    /// result without findings must not be called clean.
+    ///
+    /// - A file that was too large or could not be opened: its bytes were
+    ///   not read.
+    /// - An executable binary: it was read, but it is code that runs and
+    ///   nothing analyzes it yet. This goes away when the "committed
+    ///   binaries" rule exists, because then such a file is a finding.
+    ///
+    /// Not counted: other binary data (images, archives, compressed files)
+    /// that was read but has no rules, and symlinks, which are not content
+    /// (their target is scanned when it is inside the repository).
+    pub fn makes_scan_inconclusive(&self) -> bool {
+        matches!(
+            self,
+            SkipReason::TooLarge { .. }
+                | SkipReason::Unreadable { .. }
+                | SkipReason::Executable { .. }
+        )
     }
 }
 

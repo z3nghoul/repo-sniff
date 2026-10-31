@@ -37,19 +37,20 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether every file was read. A report with no findings is only a clean
-    /// bill of health when this is true: a payload may sit in a file the scan
-    /// never opened, or past the file limit.
+    /// Whether the scan can vouch for what it looked at. A report with no
+    /// findings is only a clean bill of health when this is true: a payload
+    /// may sit past the file limit, in a file that was too large or could not
+    /// be opened, or in an executable nobody analyzes yet.
     pub fn is_complete(&self) -> bool {
-        !self.truncated && self.unread_count() == 0
+        !self.truncated && self.inconclusive_count() == 0
     }
 
-    /// Number of files whose content was not read (binary, oversized,
-    /// unreadable). Symlinks are not counted, see `SkipReason`.
-    pub fn unread_count(&self) -> usize {
+    /// Number of skipped files that make the scan inconclusive, see
+    /// `SkipReason::makes_scan_inconclusive`.
+    pub fn inconclusive_count(&self) -> usize {
         self.skipped
             .iter()
-            .filter(|skipped| skipped.reason.leaves_content_unread())
+            .filter(|skipped| skipped.reason.makes_scan_inconclusive())
             .count()
     }
 }
@@ -125,9 +126,13 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             if checked.examined {
                 report.files_scanned += 1;
             } else {
+                let reason = match executable_format(&bytes) {
+                    Some(format) => SkipReason::Executable { format },
+                    None => SkipReason::Binary,
+                };
                 skipped.push(Skipped {
                     path: relative.clone(),
-                    reason: SkipReason::Binary,
+                    reason,
                 });
             }
             continue;
@@ -328,6 +333,22 @@ fn scan_text(relative: &Path, slash_path: &str, text: &str, rules: &[Rule]) -> V
     findings
 }
 
+/// Names the executable format a file starts with, by its magic bytes:
+/// ELF, PE (the `MZ` header), Mach-O in all four byte orders, and fat Mach-O
+/// binaries. The fat header `CAFEBABE` is also the header of a Java class
+/// file; both are code that runs, so both count.
+fn executable_format(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x7F, b'E', b'L', b'F', ..] => Some("ELF"),
+        [b'M', b'Z', ..] => Some("PE"),
+        [0xFE, 0xED, 0xFA, 0xCE | 0xCF, ..] | [0xCE | 0xCF, 0xFA, 0xED, 0xFE, ..] => Some("Mach-O"),
+        [0xCA, 0xFE, 0xBA, 0xBE, ..] | [0xBE, 0xBA, 0xFE, 0xCA, ..] => {
+            Some("Mach-O fat (or Java class)")
+        }
+        _ => None,
+    }
+}
+
 /// Same heuristic as git and ripgrep: a NUL byte near the start means binary.
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
@@ -497,29 +518,98 @@ mod tests {
         let report = scan(dir.path(), &rules, Limits::default());
 
         assert!(report.is_complete());
-        assert_eq!(report.unread_count(), 0);
+        assert_eq!(report.inconclusive_count(), 0);
     }
 
     #[test]
-    fn a_skipped_binary_oversized_or_unreadable_file_makes_the_scan_incomplete() {
+    fn unread_and_executable_files_make_the_scan_incomplete() {
         let skip = |reason| Skipped {
             path: PathBuf::from("x"),
             reason,
         };
         for reason in [
-            SkipReason::Binary,
             SkipReason::TooLarge { size: 9 },
             SkipReason::Unreadable {
                 error: "denied".to_string(),
             },
+            SkipReason::Executable { format: "ELF" },
         ] {
             let report = Report {
                 skipped: vec![skip(reason.clone())],
                 ..Report::default()
             };
             assert!(!report.is_complete(), "{reason:?}");
-            assert_eq!(report.unread_count(), 1);
+            assert_eq!(report.inconclusive_count(), 1);
         }
+    }
+
+    #[test]
+    fn a_binary_that_was_read_but_has_no_rules_does_not_make_the_scan_incomplete() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("data.gz"),
+                reason: SkipReason::Binary,
+            }],
+            ..Report::default()
+        };
+
+        assert!(report.is_complete());
+        assert_eq!(report.inconclusive_count(), 0);
+    }
+
+    #[test]
+    fn executable_formats_are_recognised_by_their_magic_bytes() {
+        let cases: [(&[u8], Option<&str>); 12] = [
+            (b"\x7fELF\x02\x01\x01\0", Some("ELF")),
+            (b"MZ\x90\0\x03\0", Some("PE")),
+            (&[0xFE, 0xED, 0xFA, 0xCE, 0, 0], Some("Mach-O")),
+            (&[0xFE, 0xED, 0xFA, 0xCF, 0, 0], Some("Mach-O")),
+            (&[0xCE, 0xFA, 0xED, 0xFE, 0, 0], Some("Mach-O")),
+            (&[0xCF, 0xFA, 0xED, 0xFE, 0, 0], Some("Mach-O")),
+            (
+                &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2],
+                Some("Mach-O fat (or Java class)"),
+            ),
+            (
+                &[0xBE, 0xBA, 0xFE, 0xCA, 2, 0, 0, 0],
+                Some("Mach-O fat (or Java class)"),
+            ),
+            (&[0x1F, 0x8B, 8, 0, 0], None),
+            (&[0x28, 0xB5, 0x2F, 0xFD, 0], None),
+            (b"\x89PNG\r\n\x1a\n\0", None),
+            (b"", None),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(executable_format(bytes), expected, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn an_elf_binary_is_listed_as_an_executable_and_a_gzip_file_as_plain_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tool", b"\x7fELF\x02\x01\x01\0\0\0\0\0");
+        write(dir.path(), "data.gz", &[0x1F, 0x8B, 8, 0, 0, 0, 0, 0]);
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let reasons: Vec<_> = report
+            .skipped
+            .iter()
+            .map(|s| (to_slash(&s.path), s.reason.clone()))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                ("data.gz".to_string(), SkipReason::Binary),
+                ("tool".to_string(), SkipReason::Executable { format: "ELF" }),
+            ]
+        );
+        assert!(
+            !report.is_complete(),
+            "the executable makes it inconclusive"
+        );
+        assert_eq!(report.inconclusive_count(), 1);
     }
 
     #[test]
