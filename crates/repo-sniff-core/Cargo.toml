@@ -1,0 +1,9 @@
+[package]
+name = "repo-sniff-core"
+description = "Scanning engine of repo-sniff: rules, file walking and findings, with no UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

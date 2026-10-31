@@ -20,7 +20,7 @@ agreed before it starts.
 Full path from `scan` to a report with two simple rules, to validate the
 architecture early.
 
-- [ ] Split into a cargo workspace: `repo-sniff-core` (no UI) + `repo-sniff` binary
+- [x] Split into a cargo workspace: `repo-sniff-core` (no UI) + `repo-sniff` binary
 - [ ] `Finding`, `Severity` and `Stage` model
 - [ ] Load rules from TOML with full metadata (id, family, stage, severity, ATT&CK, description, example)
 - [ ] Walk repository files with safety limits (no symlinks, size and count limits, `.gitignore` not honored)
