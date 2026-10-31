@@ -151,8 +151,8 @@ them (full list in
   off, symlinks written as plain files, submodules not fetched and no
   interactive prompts;
 - credentials in a URL are hidden in everything that is printed;
-- an incomplete scan (file limit reached, files not read) is never reported
-  as clean;
+- an inconclusive scan (file limit reached, a file not read, an executable
+  binary not analyzed) is never reported as clean;
 - nothing from the scanned repository (locales, configuration, rules) can
   silently change what the report shows: the scanner never loads locales or
   rules from it, and any exclusions it declares are surfaced in the report,
