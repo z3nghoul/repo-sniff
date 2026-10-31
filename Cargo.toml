@@ -1,15 +1,15 @@
-[package]
-name = "repo-sniff"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Static scanner that flags malicious or suspicious code in GitHub repositories"
 license = "AGPL-3.0-only"
 repository = "https://github.com/z3nghoul/repo-sniff"
-readme = "README.md"
-keywords = ["security", "scanner", "malware", "static-analysis", "cli"]
-categories = ["command-line-utilities", "development-tools"]
 
-[dependencies]
+[workspace.dependencies]
+repo-sniff-core = { path = "crates/repo-sniff-core" }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 tempfile = "3.27.0"
