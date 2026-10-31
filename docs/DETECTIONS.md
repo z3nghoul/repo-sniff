@@ -221,7 +221,13 @@ scanner itself:
 - limits on file size, decoding recursion depth and number of files;
 - never unpack archives (zip-bomb protection), only flag them;
 - regular expressions only through the `regex` crate (linear-time matching,
-  protection against ReDoS).
+  protection against ReDoS);
+- remote repositories are cloned shallowly over `https` or `ssh` only
+  (`http://` and `git://` are refused), with hooks redirected to an empty
+  directory, Git LFS filters skipped, submodules not fetched and credential
+  prompts disabled; the `--ref` value is passed to git as a single argument
+  and validated first, and error text coming back from a git server is
+  cleaned before it is printed;
 - text taken from the scanned repository (task labels, file names) is passed
   through `display_safe` before it is reported, so it cannot inject terminal
   escape sequences, forge extra lines or reorder text with bidi characters;
@@ -240,8 +246,8 @@ scanner itself:
 published in the README.
 
 **What we scan.** The branch or tag the user is going to build (the default
-branch unless told otherwise), not the whole history. The ref can be passed
-as an argument.
+branch unless told otherwise), not the whole history. For a remote
+repository the ref is chosen with `--ref` (a branch or tag).
 
 **Implementation order.** Stages 0–3 (automatic execution) and stage 6
 (Trojan Source, whitespace hiding) first, because they give the most value

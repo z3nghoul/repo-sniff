@@ -14,14 +14,29 @@ It is aimed at the moment right before you `npm install`, `pip install`,
 these steps can run code from the repository on your machine, and fake
 "cheats", "tools" and "PoCs" exploit exactly that.
 
-> **Early development.** Right now `repo-sniff` resolves and clones targets;
-> the analysis layers below are being built step by step.
+> **Early development.** The scanning pipeline works end to end, but only two
+> detections exist so far (see [What it detects today](#what-it-detects-today)).
+> The rest of the planned layers are being added step by step; progress is
+> tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Safety first
 
 `repo-sniff` **never executes code from the scanned repository**. No install,
 no build, no scripts — it only reads files. Remote repositories are cloned
-with hooks, Git LFS filters and submodules disabled.
+shallowly, over `https` or `ssh` only, with hooks, Git LFS filters, submodules
+and credential prompts disabled. Symlinks are never followed, and file names
+and text taken from the repository are cleaned before they are printed, so a
+hostile repository cannot paint over the report.
+
+## What it detects today
+
+| Rule | Level | What it catches |
+|---|---|---|
+| `deception.bidi-control` | CRITICAL | Unicode bidirectional control characters that make code look different from what it does (Trojan Source, CVE-2021-42574) |
+| `ide.vscode-folder-open-task` | HIGH, CRITICAL | VS Code tasks that run when a folder is opened, in `.vscode/tasks.json` and `*.code-workspace`; CRITICAL if the command downloads or runs code from a string |
+
+The full catalog of planned detections, with their levels and MITRE ATT&CK
+techniques, is in [docs/DETECTIONS.md](docs/DETECTIONS.md).
 
 ## Planned analysis layers
 
@@ -64,13 +79,51 @@ repo-sniff scan ./some-project
 repo-sniff scan https://github.com/owner/repo
 ```
 
+Scan a specific branch or tag of a remote repository:
+
+```sh
+repo-sniff scan https://github.com/owner/repo --ref v1.2.3
+```
+
+Example report (`repo-sniff scan .` in a project with a risky auto-run task):
+
+```text
+Scanned 1 files in .
+
+CRITICAL  .vscode/tasks.json:6  ide.vscode-folder-open-task  [ide]
+          task "setup" runs automatically when the folder is opened, and its command contains "curl"
+
+Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
+```
+
+### Options
+
+| Option | Meaning |
+|---|---|
+| `--fail-on <SEVERITY>` | Exit with status 1 if any finding is at least this severe: `info`, `low`, `medium`, `high` (default) or `critical`. `none` never fails because of findings. |
+| `--ref <REF>` | Branch or tag to scan. Only for remote repositories; the default branch is used otherwise. |
+
+### Exit status
+
+| Status | Meaning |
+|---|---|
+| 0 | The scan ran and nothing reached the `--fail-on` threshold |
+| 1 | The scan ran and found something at or above the threshold |
+| 2 | The scan could not run (bad target, clone failure, wrong options) |
+
+This makes `repo-sniff scan . --fail-on high` usable as a CI check.
+
 ## Development
 
 ```sh
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the rules about commits, fixtures
+and adding a detection, and [SECURITY.md](SECURITY.md) for reporting a
+vulnerability in the scanner itself.
 
 Test fixtures are synthetic, harmless files that only *imitate* suspicious
 patterns; each one is marked `SYNTHETIC TEST FIXTURE — not functional`.
