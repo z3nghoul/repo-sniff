@@ -15,4 +15,4 @@ positive/entry-points/unicode-name/demo.start	2	HIGH
 positive/inert/dot-prefixed/.hidden.start	2	LOW
 positive/inert/mixed-extension/Demo.Start	2	LOW
 positive/inert/upper-extension/DEMO.START	2	LOW
-positive/with-pth/foo.start	2	HIGH
+positive/pairs/with-pth/foo.start	2	HIGH
