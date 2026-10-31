@@ -236,12 +236,10 @@ scanner itself:
   protection against ReDoS);
 - no file is skipped silently: binary, oversized, symlinked and unreadable files are all listed in the report; rules that select files by name (such as `.pth` and `.start`) run on the raw bytes before the binary check, and also see oversized files and symlinks, so "too big" or "a link" is not a way around them;
 - work per line and per file is bounded (a line is analysed up to 4096 bytes, a longer one is CRITICAL by itself; at most 100 findings per file per rule), so a hostile file cannot make the scan quadratic or flood the report;
-- remote repositories are cloned shallowly over `https` only (`ssh`, `http://` and `git://` are refused; a private repository is cloned by its owner and the folder scanned)
-  (`http://` and `git://` are refused), with hooks redirected to an empty
-  directory, Git LFS filters skipped, submodules not fetched and credential
-  prompts disabled; the `--ref` value is passed to git as a single argument
-  and validated first, and error text coming back from a git server is
-  cleaned before it is printed;
+- remote repositories are cloned shallowly over `https` only (`ssh`, `http://` and `git://` are refused; a private repository is cloned by its owner and the folder scanned). `git` runs with an empty environment plus a short allow-list of variables and with its user and system configuration replaced by an empty file, so no filter, credential helper or fsmonitor from any configuration runs and `GIT_CONFIG_*` variables do not reach it. Hooks and templates are off, symlinks are written as plain files, objects are checked, submodules are not fetched, and nothing can ask a question interactively. The `--ref` value is passed to git as a single validated argument, and error text coming back from a git server is cleaned before it is printed;
+- credentials in a URL (`https://TOKEN@host/...`) are hidden in the notice, the report label and every error message, git's own text included;
+- an incomplete scan is never reported as clean: when the file limit was reached, or a binary, oversized or unreadable file was not read, the report ends with `Scan: INCONCLUSIVE` and the exit status is 3 even with `--fail-on none`;
+- a script (by extension or shebang) with a NUL byte is read as text, so the NUL does not hide what follows it, and the NUL itself is a finding;
 - text taken from the scanned repository (task labels, file names) is passed
   through `display_safe` before it is reported, so it cannot inject terminal
   escape sequences, forge extra lines or reorder text with bidi characters;
@@ -253,6 +251,11 @@ scanner itself:
   report says; third-party locale text is stripped of control, bidi and
   zero-width characters, cannot carry raw terminal escape sequences, and
   severity codes (CRITICAL, HIGH, ...) are always shown untranslated.
+
+The items above that exist in the code are design guarantees with tests; the
+localization item is a requirement for milestone 6. None of them is a proof that
+the scanner is free of bugs or that a repository is safe: a clean result means
+"no rule matched in what was read", and the report says what was not read.
 
 **False positives.** A `.repo-sniff.toml` file holds exclusions, each with a
 **mandatory justification** field. A benchmark on popular honest repositories

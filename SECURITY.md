@@ -38,8 +38,11 @@ can attack or mislead the scanner:
 - **Report spoofing:** content from the scanned repository or from a locale
   file that hides findings, forges findings, or injects terminal escape
   sequences into the output.
-- **Unsafe cloning:** a way to make the clone step run hooks or filters,
-  prompt for credentials, or fetch over an unencrypted transport.
+- **Unsafe cloning:** a way to make the clone step run a filter, hook or
+  helper, read the user's git configuration or environment, ask a question
+  interactively, fetch over anything but https, or print a credential.
+- **A false "clean":** a way to make an incomplete scan exit with status 0, or
+  to make a file the scanner did not read go unreported.
 - **Supply chain:** a weakness in the CI workflows, release process or
   dependency pinning.
 

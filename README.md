@@ -21,12 +21,27 @@ these steps can run code from the repository on your machine, and fake
 
 ## Safety first
 
-`repo-sniff` **never executes code from the scanned repository**. No install,
-no build, no scripts — it only reads files. Remote repositories are cloned
-shallowly, over `https` only, with hooks, Git LFS filters, submodules
-and credential prompts disabled. Symlinks are never followed, and file names
-and text taken from the repository are cleaned before they are printed, so a
-hostile repository cannot paint over the report.
+`repo-sniff` does not run code from the scanned repository: no install, no
+build, no scripts. It reads files. That is a design rule, not a promise of
+absolute safety. The scanner parses hostile input, so it can have bugs, and a
+clean result never proves that a repository is harmless.
+
+What it does to protect you:
+
+- **Cloning.** Remote repositories are cloned over `https` only, shallowly,
+  by a `git` that runs with an empty environment and an empty configuration.
+  No filter, credential helper or fsmonitor from your own or the system's git
+  configuration runs, hooks and templates are off, symlinks are written as
+  plain files, and submodules are not fetched. There are no interactive
+  prompts. For a private repository, clone it yourself and scan the folder.
+- **Secrets.** A token pasted into a URL is hidden in everything the tool
+  prints.
+- **Reading.** Symlinks are never followed. File names and text taken from the
+  repository are cleaned before they are printed, so a hostile repository
+  cannot paint over the report. The work per file is bounded.
+- **Honesty.** An incomplete scan is never reported as clean: if the file limit
+  was reached or files were not read, the report says `INCONCLUSIVE` and the
+  exit status is 3.
 
 ## What it detects today
 
