@@ -32,8 +32,8 @@ architecture early.
 - [ ] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag
 - [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
-- [ ] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
-- [ ] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
+- [x] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
+- [x] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
 - [ ] `SECURITY.md`: how to report vulnerabilities in the scanner
 - [x] `CONTRIBUTING.md`: commits, fixtures, scanner security and cross-platform rules
 - [ ] Update `DETECTIONS.md` and README
