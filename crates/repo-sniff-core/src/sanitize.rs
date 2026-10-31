@@ -1,9 +1,30 @@
-//! Making text from a scanned repository safe to show in a report.
+//! Making text and paths from a scanned repository safe to show in a report.
 //!
 //! Names and strings that come from the scanned repository are attacker
 //! controlled. Printed raw, they could carry terminal escape sequences (to
 //! recolor, overwrite or hide parts of the report), line breaks (to forge
 //! extra findings) or bidi characters (to reorder what the reader sees).
+
+use std::path::Path;
+
+/// Longest path shown in a report; longer ones are cut.
+const MAX_PATH_CHARS: usize = 300;
+
+/// Joins path components with `/`, whatever the operating system, so globs
+/// and reports behave the same everywhere. A backslash inside a Linux file
+/// name is left alone: only real separators are replaced.
+pub fn to_slash(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A path as shown to the user: `/`-separated and safe to print, because file
+/// names in a scanned repository are chosen by its author.
+pub fn display_path(path: &Path) -> String {
+    display_safe(&to_slash(path), MAX_PATH_CHARS)
+}
 
 /// Returns `text` with every dangerous character replaced by a visible
 /// `\u{XXXX}` escape, cut to about `max_chars` characters (`...` marks the cut).
@@ -72,6 +93,21 @@ mod tests {
     fn bidi_and_zero_width_characters_are_made_visible() {
         let safe = display_safe("a\u{202e}b\u{2066}c\u{200b}d", 100);
         assert_eq!(safe, "a\\u{202E}b\\u{2066}c\\u{200B}d");
+    }
+
+    #[test]
+    fn paths_use_forward_slashes() {
+        let path = Path::new("crates").join("core").join("lib.rs");
+        assert_eq!(display_path(&path), "crates/core/lib.rs");
+        assert_eq!(to_slash(&path), "crates/core/lib.rs");
+    }
+
+    #[test]
+    fn hostile_file_names_are_neutralized() {
+        let path = Path::new("dir").join("evil\u{1b}[2J\nFAKE.txt");
+        let shown = display_path(&path);
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(shown.starts_with("dir/evil\\u{001B}"));
     }
 
     #[test]

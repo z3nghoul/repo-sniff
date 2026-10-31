@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::finding::Finding;
 use crate::rule::{Matcher, Rule};
-use crate::sanitize::display_safe;
+use crate::sanitize::{display_safe, to_slash};
 use crate::walk::{self, Limits, SkipReason, Skipped};
 
 /// Explanations built from text in the scanned repository are cut to this.
@@ -121,14 +121,6 @@ fn scan_text(relative: &Path, text: &str, rules: &[Rule]) -> Vec<Finding> {
 /// Same heuristic as git and ripgrep: a NUL byte near the start means binary.
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
-}
-
-/// Joins path components with `/` so globs behave the same on Windows.
-fn to_slash(path: &Path) -> String {
-    path.components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 #[cfg(test)]
