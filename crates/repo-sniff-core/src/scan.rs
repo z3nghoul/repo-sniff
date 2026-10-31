@@ -123,17 +123,23 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         report.findings.extend(checked.findings);
 
         if looks_binary(&bytes) {
-            if checked.examined {
-                report.files_scanned += 1;
-            } else {
-                let reason = match executable_format(&bytes) {
-                    Some(format) => SkipReason::Executable { format },
-                    None => SkipReason::Binary,
-                };
+            // An executable is listed even when a file rule looked at it: the
+            // rule saw the bytes of a `.pth` or `.start` file, not the code
+            // of the program.
+            let executable = executable_format(&bytes);
+            if let Some(format) = executable {
                 skipped.push(Skipped {
                     path: relative.clone(),
-                    reason,
+                    reason: SkipReason::Executable { format },
                 });
+            } else if !checked.examined {
+                skipped.push(Skipped {
+                    path: relative.clone(),
+                    reason: SkipReason::Binary,
+                });
+            }
+            if checked.examined {
+                report.files_scanned += 1;
             }
             continue;
         }
@@ -335,16 +341,14 @@ fn scan_text(relative: &Path, slash_path: &str, text: &str, rules: &[Rule]) -> V
 
 /// Names the executable format a file starts with, by its magic bytes:
 /// ELF, PE (the `MZ` header), Mach-O in all four byte orders, and fat Mach-O
-/// binaries. The fat header `CAFEBABE` is also the header of a Java class
+/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The fat header `CAFEBABE` is also the header of a Java class
 /// file; both are code that runs, so both count.
 fn executable_format(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x7F, b'E', b'L', b'F', ..] => Some("ELF"),
         [b'M', b'Z', ..] => Some("PE"),
         [0xFE, 0xED, 0xFA, 0xCE | 0xCF, ..] | [0xCE | 0xCF, 0xFA, 0xED, 0xFE, ..] => Some("Mach-O"),
-        [0xCA, 0xFE, 0xBA, 0xBE, ..] | [0xBE, 0xBA, 0xFE, 0xCA, ..] => {
-            Some("Mach-O fat (or Java class)")
-        }
+        [0xCA, 0xFE, 0xBA, 0xBE | 0xBF, ..] => Some("Mach-O fat (or Java class)"),
         _ => None,
     }
 }
@@ -571,7 +575,7 @@ mod tests {
                 Some("Mach-O fat (or Java class)"),
             ),
             (
-                &[0xBE, 0xBA, 0xFE, 0xCA, 2, 0, 0, 0],
+                &[0xCA, 0xFE, 0xBA, 0xBF, 0, 0, 0, 2],
                 Some("Mach-O fat (or Java class)"),
             ),
             (&[0x1F, 0x8B, 8, 0, 0], None),
@@ -582,6 +586,19 @@ mod tests {
         for (bytes, expected) in cases {
             assert_eq!(executable_format(bytes), expected, "{bytes:?}");
         }
+    }
+
+    #[test]
+    fn an_executable_that_a_file_rule_examined_is_still_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "helper.start", b"\x7fELF\x02\x01\x01\0\0\0\0\0");
+        let rules = vec![file_rule("*.start", probe)];
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.inconclusive_count(), 1);
+        assert!(!report.is_complete());
     }
 
     #[test]
