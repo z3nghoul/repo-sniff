@@ -19,7 +19,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
@@ -179,10 +179,16 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
     } else {
         let mut builder = GlobSetBuilder::new();
         for glob in &raw.files {
-            builder.add(Glob::new(glob).map_err(|source| RuleError::Glob {
-                id: raw.id.clone(),
-                source,
-            })?);
+            // Case-insensitive on purpose: on Windows and macOS the file system
+            // is, so `.vscode/Tasks.json` is still the file VS Code reads.
+            let glob = GlobBuilder::new(glob)
+                .case_insensitive(true)
+                .build()
+                .map_err(|source| RuleError::Glob {
+                    id: raw.id.clone(),
+                    source,
+                })?;
+            builder.add(glob);
         }
         Some(builder.build().map_err(|source| RuleError::Glob {
             id: raw.id.clone(),
@@ -245,6 +251,18 @@ mod tests {
         assert!(pattern.is_match(r#"Command::new("sh")"#));
         assert!(rule.applies_to("build.rs"));
         assert!(!rule.applies_to("src/main.rs"));
+    }
+
+    #[test]
+    fn file_globs_ignore_case() {
+        let source = VALID.replace(
+            r#"files = ["build.rs"]"#,
+            r#"files = ["**/.vscode/tasks.json"]"#,
+        );
+        let rules = parse_rules(&source, "test.toml").unwrap();
+        assert!(rules[0].applies_to(".vscode/tasks.json"));
+        assert!(rules[0].applies_to("sub/.VSCode/Tasks.JSON"));
+        assert!(!rules[0].applies_to("sub/tasks.json"));
     }
 
     #[test]
