@@ -6,6 +6,7 @@
 
 mod pylines;
 pub mod python_pth;
+pub mod python_start;
 pub mod vscode_autorun;
 
 use std::collections::{BTreeSet, HashSet};
@@ -104,7 +105,10 @@ pub struct FileCtx<'a> {
 pub type FileCheck = fn(&FileCtx<'_>) -> Vec<Hit>;
 
 /// Every file check, keyed by the id of the rule it implements.
-const FILE_CHECKS: &[(&str, FileCheck)] = &[("deps.python-pth-exec", python_pth::check)];
+const FILE_CHECKS: &[(&str, FileCheck)] = &[
+    ("deps.python-pth-exec", python_pth::check),
+    ("deps.python-start-entrypoint", python_start::check),
+];
 
 /// Finds the file check registered for a rule id.
 pub fn file_check(rule_id: &str) -> Option<FileCheck> {
