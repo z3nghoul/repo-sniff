@@ -4,6 +4,7 @@
 //! carries metadata (id, stage, severity, ATT&CK IDs, descriptions). The code
 //! that decides what to report lives here and is looked up by the rule's id.
 
+pub mod python_pth;
 pub mod vscode_autorun;
 
 use std::collections::{BTreeSet, HashSet};
@@ -102,7 +103,7 @@ pub struct FileCtx<'a> {
 pub type FileCheck = fn(&FileCtx<'_>) -> Vec<Hit>;
 
 /// Every file check, keyed by the id of the rule it implements.
-const FILE_CHECKS: &[(&str, FileCheck)] = &[];
+const FILE_CHECKS: &[(&str, FileCheck)] = &[("deps.python-pth-exec", python_pth::check)];
 
 /// Finds the file check registered for a rule id.
 pub fn file_check(rule_id: &str) -> Option<FileCheck> {
