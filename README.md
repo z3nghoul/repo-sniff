@@ -113,11 +113,14 @@ Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
 | 0 | The scan read every file and nothing reached the `--fail-on` threshold |
 | 1 | The scan found something at or above the threshold |
 | 2 | The scan could not run (bad target, clone failure, wrong options) |
-| 3 | Nothing reached the threshold, but the scan was **incomplete** (the file limit was reached, or binary, oversized or unreadable files were not read) |
+| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, or an executable binary (ELF, PE, Mach-O) was not analyzed |
 
-An incomplete scan is never reported as clean: the report ends with
-`Scan: INCONCLUSIVE` and says what was not read, and the exit status is 3 even
-with `--fail-on none`. This makes `repo-sniff scan . --fail-on high` usable as
+Other binary files (images, archives, compressed test data) are read and listed
+as `binary, not analyzed`, and do not change the status. A scan is never
+reported as clean when it could not vouch for what it looked at: the report ends
+with `Scan: INCONCLUSIVE` and says why, and the exit status is 3 even with
+`--fail-on none`. The executable-binary case goes away when the "committed
+binaries" rule exists, because then such a file is a finding. This makes `repo-sniff scan . --fail-on high` usable as
 a CI check without mistaking "nothing found in what was read" for "safe".
 
 ## Development
