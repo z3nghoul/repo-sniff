@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use repo_sniff_core::{Limits, builtin_rules};
+use repo_sniff_core::{Limits, Report, builtin_rules};
 
 use crate::fail_on::FailOn;
 use crate::redact::redact_credentials;
@@ -20,17 +20,20 @@ const EXIT_FINDINGS: u8 = 1;
 /// Exit status when the scan could not run (bad target, clone failure, ...).
 /// clap also uses 2 for command-line mistakes.
 const EXIT_ERROR: u8 = 2;
-/// Exit status when nothing reached `--fail-on` but the scan was incomplete
-/// (the file limit was reached, or files were not read): not a pass.
+/// Exit status when nothing reached `--fail-on` but the scan was inconclusive
+/// (the walk was cut short, a file was not read, or an executable was not
+/// analyzed): not a pass.
 const EXIT_INCONCLUSIVE: u8 = 3;
 
 /// Statically scan a repository for signs of malicious or suspicious code.
 ///
 /// Exit status: 0 when the scan was complete and nothing reaches the
 /// --fail-on threshold, 1 when something does, 2 when the scan could not
-/// run, 3 when nothing reaches the threshold but the scan was incomplete
-/// (the file limit was reached, or binary, oversized or unreadable files
-/// were not read), so that a clean-looking result is never a pass.
+/// run, 3 when nothing reaches the threshold but the scan was inconclusive
+/// (the file limit was reached, a file was too large or unreadable, or an
+/// executable binary was not analyzed), so that a clean-looking result is
+/// never a pass. Other binary files, such as images and archives, are listed
+/// but do not change the status.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -124,11 +127,92 @@ fn scan_dir(root: &Path, label: &str, fail_on: FailOn) -> Result<ExitCode> {
     let report = repo_sniff_core::scan(root, &rules, Limits::default());
     print!("{}", report::render(&report, label));
 
-    Ok(if fail_on.is_triggered_by(&report) {
-        ExitCode::from(EXIT_FINDINGS)
+    Ok(ExitCode::from(exit_status(&report, fail_on)))
+}
+
+/// The exit status for a finished scan: findings at the threshold come first,
+/// then an inconclusive scan, otherwise success.
+fn exit_status(report: &Report, fail_on: FailOn) -> u8 {
+    if fail_on.is_triggered_by(report) {
+        EXIT_FINDINGS
     } else if !report.is_complete() {
-        ExitCode::from(EXIT_INCONCLUSIVE)
+        EXIT_INCONCLUSIVE
     } else {
-        ExitCode::SUCCESS
-    })
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use repo_sniff_core::{Finding, Severity, SkipReason, Skipped, Stage};
+
+    use super::*;
+
+    fn finding(severity: Severity) -> Finding {
+        Finding {
+            rule_id: "test.rule".to_string(),
+            severity,
+            stage: Stage::Run,
+            attack: vec![],
+            file: PathBuf::from("a"),
+            line: 1,
+            explanation: String::new(),
+        }
+    }
+
+    fn with_skip(reason: SkipReason) -> Report {
+        Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("x"),
+                reason,
+            }],
+            ..Report::default()
+        }
+    }
+
+    #[test]
+    fn a_clean_complete_scan_exits_zero() {
+        assert_eq!(
+            exit_status(&Report::default(), FailOn::AtLeast(Severity::High)),
+            0
+        );
+    }
+
+    #[test]
+    fn findings_at_the_threshold_exit_one_even_when_the_scan_is_incomplete() {
+        let report = Report {
+            findings: vec![finding(Severity::High)],
+            truncated: true,
+            ..Report::default()
+        };
+        assert_eq!(exit_status(&report, FailOn::AtLeast(Severity::High)), 1);
+    }
+
+    #[test]
+    fn a_walk_cut_short_is_inconclusive_even_with_fail_on_none() {
+        // A payload padded past the file limit leaves no findings at all.
+        let report = Report {
+            truncated: true,
+            ..Report::default()
+        };
+        assert_eq!(exit_status(&report, FailOn::AtLeast(Severity::High)), 3);
+        assert_eq!(exit_status(&report, FailOn::Never), 3);
+    }
+
+    #[test]
+    fn only_unread_or_executable_skips_are_inconclusive() {
+        let status = |reason| exit_status(&with_skip(reason), FailOn::AtLeast(Severity::High));
+        assert_eq!(status(SkipReason::TooLarge { size: 9 }), 3);
+        assert_eq!(
+            status(SkipReason::Unreadable {
+                error: "denied".to_string()
+            }),
+            3
+        );
+        assert_eq!(status(SkipReason::Executable { format: "ELF" }), 3);
+        assert_eq!(status(SkipReason::Binary), 0);
+        assert_eq!(status(SkipReason::Symlink { target: None }), 0);
+    }
 }
