@@ -16,6 +16,14 @@ const MAX_EXPLANATION_CHARS: usize = 300;
 /// How many leading bytes are checked to tell text from binary files.
 const BINARY_SNIFF_LEN: usize = 8 * 1024;
 
+/// Extensions of files that a shell, an interpreter or a script host reads as
+/// text. A NUL byte in one of them does not make it a binary: `bash`, `node`
+/// and the others still run it, so the line rules must still look at it.
+const SCRIPT_EXTENSIONS: &[&str] = &[
+    "sh", "bash", "zsh", "ksh", "csh", "fish", "py", "pyw", "js", "mjs", "cjs", "jsx", "ts", "tsx",
+    "rb", "pl", "pm", "php", "ps1", "psm1", "psd1", "bat", "cmd", "vbs", "wsf", "lua",
+];
+
 /// One file check may list at most this many findings for one file; the rest
 /// are summarized on the last one, so a hostile file cannot flood the report.
 const MAX_FINDINGS_PER_FILE_CHECK: usize = 100;
@@ -121,7 +129,12 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         let checked = env.run_file_checks(relative, &slash_path, &bytes, None);
         report.findings.extend(checked.findings);
 
-        if looks_binary(&bytes) {
+        // A script with a NUL byte is still a script (and the NUL is reported
+        // by its own rule); anything else with a NUL byte is a binary.
+        let script = is_script(&slash_path, &bytes);
+        let nul_line = script.then(|| first_nul_line(&bytes)).flatten();
+
+        if looks_binary(&bytes) && !script {
             if checked.examined {
                 report.files_scanned += 1;
             } else {
@@ -137,7 +150,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         let text = String::from_utf8_lossy(&bytes);
         report
             .findings
-            .extend(scan_text(relative, &slash_path, &text, rules));
+            .extend(scan_text(relative, &slash_path, &text, nul_line, rules));
     }
 
     // Entries the walk did not hand over still matter to a rule that asks for
@@ -279,7 +292,13 @@ fn resolve_inside(link: &Path, target: &Path) -> Option<PathBuf> {
 /// Runs line, JSONC and other text rules over one file's text. `relative` is
 /// the path shown in findings; `slash_path` is matched against each rule's
 /// `files` globs.
-fn scan_text(relative: &Path, slash_path: &str, text: &str, rules: &[Rule]) -> Vec<Finding> {
+fn scan_text(
+    relative: &Path,
+    slash_path: &str,
+    text: &str,
+    nul_line: Option<usize>,
+    rules: &[Rule],
+) -> Vec<Finding> {
     let applicable: Vec<&Rule> = rules
         .iter()
         .filter(|rule| rule.applies_to(slash_path))
@@ -323,9 +342,46 @@ fn scan_text(relative: &Path, slash_path: &str, text: &str, rules: &[Rule]) -> V
             }
             // File-level rules already ran on the raw bytes.
             Matcher::File(_) => {}
+            Matcher::NulByte => {
+                if let Some(line) = nul_line {
+                    findings.push(Finding {
+                        rule_id: rule.id.clone(),
+                        severity: rule.severity,
+                        stage: rule.stage,
+                        attack: rule.attack.clone(),
+                        file: relative.to_path_buf(),
+                        line,
+                        explanation: rule.description.clone(),
+                    });
+                }
+            }
         }
     }
     findings
+}
+
+/// Whether the file is meant to be read as a script: it has a script
+/// extension or starts with a shebang. A file with a UTF-16 byte order mark is
+/// not treated as one here, because UTF-16 text is full of NUL bytes by
+/// design (Windows PowerShell writes it by default); it stays a skipped
+/// binary until the scanner learns to decode it.
+fn is_script(slash_path: &str, bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        return false;
+    }
+    let extension = slash_path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    extension.is_some_and(|ext| SCRIPT_EXTENSIONS.contains(&ext.as_str()))
+        || bytes.starts_with(b"#!")
+}
+
+/// The 1-based line of the first NUL byte, counting `\n` as shells do.
+fn first_nul_line(bytes: &[u8]) -> Option<usize> {
+    let offset = bytes.iter().position(|&b| b == 0)?;
+    Some(1 + bytes[..offset].iter().filter(|&&b| b == b'\n').count())
 }
 
 /// Same heuristic as git and ripgrep: a NUL byte near the start means binary.
@@ -743,5 +799,148 @@ mod tests {
         );
         let last = report.findings.last().unwrap();
         assert!(last.explanation.contains("50 more"), "{}", last.explanation);
+    }
+
+    // ---- scripts with NUL bytes -------------------------------------------
+
+    use crate::rule::builtin_rules;
+
+    const NUL_RULE: &str = "deception.nul-byte-in-script";
+    const BIDI: &str = "\u{202e}";
+
+    fn builtin_findings(report: &Report, rule_id: &str) -> Vec<(String, usize)> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule_id)
+            .map(|f| (to_slash(&f.file), f.line))
+            .collect()
+    }
+
+    #[test]
+    fn a_shell_script_with_a_nul_in_a_comment_still_reaches_the_line_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        // The NUL is on line 1; a Trojan Source character sits on line 2.
+        write(
+            dir.path(),
+            "install.sh",
+            format!("# a\0b\necho {BIDI}\n").as_bytes(),
+        );
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(
+            builtin_findings(&report, NUL_RULE),
+            [("install.sh".to_string(), 1)]
+        );
+        assert_eq!(
+            builtin_findings(&report, "deception.bidi-control"),
+            [("install.sh".to_string(), 2)],
+            "the line rules must see what follows the NUL byte"
+        );
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(report.is_complete());
+        assert_eq!(report.files_scanned, 1);
+    }
+
+    #[test]
+    fn a_file_with_a_shebang_and_no_extension_is_a_script() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "configure", b"#!/bin/sh\n# x\0y\n");
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(
+            builtin_findings(&report, NUL_RULE),
+            [("configure".to_string(), 2)]
+        );
+        assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_nul_byte_far_from_the_start_of_a_script_is_still_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        // Past the 8 KiB window used to sniff for binaries.
+        let content = format!("{}\0\n", "echo hi\n".repeat(5000));
+        write(dir.path(), "late.sh", content.as_bytes());
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(
+            builtin_findings(&report, NUL_RULE),
+            [("late.sh".to_string(), 5001)]
+        );
+    }
+
+    #[test]
+    fn extensions_are_matched_without_regard_to_case() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "RUN.SH", b"# a\0b\n");
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(
+            builtin_findings(&report, NUL_RULE),
+            [("RUN.SH".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn files_that_are_not_scripts_with_a_nul_stay_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "data.bin", b"\0\0\0");
+        write(dir.path(), "notes.txt", b"a\0b");
+        write(dir.path(), "image.png", b"\x89PNG\0\0");
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(builtin_findings(&report, NUL_RULE).is_empty());
+        assert_eq!(report.skipped.len(), 3);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .all(|s| s.reason == SkipReason::Binary)
+        );
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn utf16_scripts_are_not_reported_as_concealment() {
+        let dir = tempfile::tempdir().unwrap();
+        // "Write-Host" in UTF-16LE with a byte order mark, as Windows PowerShell writes it.
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "Write-Host".encode_utf16() {
+            bytes.extend(unit.to_le_bytes());
+        }
+        write(dir.path(), "legit.ps1", &bytes);
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(builtin_findings(&report, NUL_RULE).is_empty());
+        // It is still a file nobody read as text, so the scan says so.
+        assert_eq!(report.skipped.len(), 1);
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn script_detection_and_nul_line_helpers() {
+        assert!(is_script("a/b/run.sh", b""));
+        assert!(is_script("a/RUN.PS1", b""));
+        assert!(is_script("tool", b"#!/usr/bin/env node\n"));
+        assert!(!is_script("a.txt", b"hello"));
+        assert!(!is_script("archive.sh.zip", b"PK"));
+        assert!(!is_script("x.ps1", &[0xFF, 0xFE, b'a', 0]));
+        assert!(!is_script("noext", b"plain"));
+
+        assert_eq!(first_nul_line(b"a\nb\0c"), Some(2));
+        assert_eq!(first_nul_line(b"a\r\nb\r\n\0"), Some(3));
+        assert_eq!(first_nul_line(b"no nul"), None);
     }
 }
