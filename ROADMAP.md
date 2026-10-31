@@ -73,8 +73,23 @@ Infrastructure:
 - [ ] Scanning screen: background thread, progress by stage over a channel, live finding count
 - [ ] Results screen: list, details with code snippet, review points tab, live filters, `/` search
 - [ ] Filters and rules screen (fastfetch-style): radio rows, stage × family checkbox grid, tri-state, presets, description line
-- [ ] Settings: UI language UA/EN, default filters, reset; stored in the OS config dir
+- [ ] Settings: UI language (shown as UK/EN), default filters, reset; stored in the OS config dir
 - [ ] Export filters to `.repo-sniff.toml`
+
+Localization:
+
+- [ ] TOML locale files; built-in `en` and `uk` embedded in the binary, third-party ones from `<config dir>/repo-sniff/locales/` only, never from the scanned repository
+- [ ] Mandatory `[meta]`: `code` (validated language tag, `uk` not `ua`), `name` (language name in that language), `description` (built-in note or author message), `schema` (format version)
+- [ ] Rule texts translated by rule ID under `[rules."<id>"]`; lookup order: active locale, then English, then the key itself
+- [ ] Plural forms via `intl_pluralrules` (CLDR categories)
+- [ ] Named placeholders (`{count}`, `{file}`)
+- [ ] Color markup (`[red]…[/]`, `[#rrggbb]`, `[b]`, `[i]`, `[u]`) with an escape for a literal bracket; parsed only in the template, substituted values (paths, code snippets) inserted afterwards as plain text
+- [ ] Sanitizing locale text: strip ANSI/control characters, bidi controls (U+202A–U+202E, U+2066–U+2069) and zero-width characters
+- [ ] Limits on locale file size and string length
+- [ ] Severity labels always include the untranslatable code (CRITICAL, HIGH, ...) next to the translation
+- [ ] Status bar shows when a third-party locale is active, with its path
+- [ ] Hot reload of third-party locales and language switching without restart; on error the last working version stays and a message is shown
+- [ ] `repo-sniff locale check <file>`: missing/extra keys, lost/extra placeholders, markup errors, overridden severity labels; run in CI for built-in locales
 - [ ] Non-interactive fallback when stdout is not a TTY or `--no-tui`/`--json`/`--sarif` is given
 
 ## Milestone 4 — Capabilities and AST
