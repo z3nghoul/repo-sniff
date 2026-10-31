@@ -31,7 +31,11 @@ architecture early.
 - [ ] Rule: `.vscode/tasks.json` with `runOn: folderOpen` (written by the author)
 - [ ] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag
-- [ ] CI matrix: ubuntu, windows, macos
+- [ ] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
+- [ ] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
+- [ ] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
+- [ ] `SECURITY.md`: how to report vulnerabilities in the scanner
+- [ ] `CONTRIBUTING.md`: commits, fixtures, scanner security and cross-platform rules
 - [ ] Update `DETECTIONS.md` and README
 
 ## Milestone 2 — Automatic execution (stages 0–3, 6)
@@ -144,7 +148,6 @@ Review points:
 
 - [ ] Demo GIF or screenshot of the report
 - [ ] Examples and "how to add your own rule"
-- [ ] `CONTRIBUTING.md`
 - [ ] Publish benchmark results in the README
 - [ ] Honest list of blind spots
 
