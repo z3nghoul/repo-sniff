@@ -135,7 +135,7 @@ Known gap: a payload kept under another name and renamed to `*.pth` while the pa
 |---|---|---|---|
 | Trojan Source: Unicode bidi control characters (CVE-2021-42574) | CRITICAL | — | `deception.bidi-control` |
 | Code hidden with whitespace past the edge of the screen (beyond ~column 200) or after hundreds of blank lines | CRITICAL | T1027 | — |
-| NUL byte inside a script (script extension or shebang; UTF-16 files are not meant here). Shells and interpreters still run the file, but tools that take NUL for the mark of a binary stop reading at it. The script is scanned like any other text file | HIGH | T1027 | `deception.nul-byte-in-script` |
+| NUL byte inside a script (script extension or shebang; UTF-16 files are not meant here: a UTF-16 `.ps1` or `.vbs` with a byte order mark is decoded and read by the line rules). Shells such as `dash` drop NUL bytes and run the rest, but tools that take NUL for the mark of a binary stop reading at it. The script is scanned like any other text file. A file with NUL bytes, no script name and no known binary header (archive, image, WebAssembly, font) is read by the line rules with the NUL bytes removed, because a script can source it; the NUL itself is reported only for scripts | HIGH | T1027 | `deception.nul-byte-in-script` |
 | Invisible (zero-width) characters and homoglyphs in identifiers (Cyrillic `а` instead of Latin `a`) | HIGH | T1036 | — |
 | README advising "disable your antivirus", "download the password-protected zip", `curl \| bash` | HIGH | T1204 | — |
 
@@ -234,14 +234,12 @@ scanner itself:
 - never unpack archives (zip-bomb protection), only flag them;
 - regular expressions only through the `regex` crate (linear-time matching,
   protection against ReDoS);
-- no file is skipped silently: binary, oversized, symlinked and unreadable files are all listed in the report; rules that select files by name (such as `.pth` and `.start`) run on the raw bytes before the binary check, and also see oversized files and symlinks, so "too big" or "a link" is not a way around them;
+- no file is skipped silently: binary, oversized, symlinked and unreadable files, and `.git` folders (not walked into; the one at the root is listed as git metadata, a nested one makes the scan inconclusive), are all listed in the report. Special files such as FIFOs and devices are not listed yet (roadmap); rules that select files by name (such as `.pth` and `.start`) run on the raw bytes before the binary check, and also see oversized files and symlinks, so "too big" or "a link" is not a way around them;
 - work per line and per file is bounded (a line is analysed up to 4096 bytes, a longer one is CRITICAL by itself; at most 100 findings per file per rule), so a hostile file cannot make the scan quadratic or flood the report;
-- remote repositories are cloned shallowly over `https` only (`ssh`, `http://` and `git://` are refused; a private repository is cloned by its owner and the folder scanned)
-  (`http://` and `git://` are refused), with hooks redirected to an empty
-  directory, Git LFS filters skipped, submodules not fetched and credential
-  prompts disabled; the `--ref` value is passed to git as a single argument
-  and validated first, and error text coming back from a git server is
-  cleaned before it is printed;
+- remote repositories are cloned shallowly over `https` only (`ssh`, `http://` and `git://` are refused; a private repository is cloned by its owner and the folder scanned). `git` runs with an empty environment plus a short allow-list of variables and with its user and system configuration replaced by an empty file, so no filter, credential helper or fsmonitor from any configuration runs and `GIT_CONFIG_*` variables do not reach it. Hooks and templates are off, symlinks are written as plain files, objects are checked, submodules are not fetched, and nothing can ask a question interactively. The `--ref` value is passed to git as a single validated argument, and error text coming back from a git server is cleaned before it is printed;
+- credentials in a URL (`https://TOKEN@host/...`) are hidden in the notice, the report label and error messages, git's own text included. Known gaps, tracked as hardening issues: a password that contains `?` or `#`, and scp-like targets with a user other than `git`;
+- an inconclusive scan is never reported as clean: when the file limit was reached, a file was too large or could not be read, a nested `.git` repository was not read, or an executable binary (ELF, PE, Mach-O including 64-bit fat binaries, found by magic bytes, whatever the file is called) was not analyzed, the report ends with `Scan: INCONCLUSIVE` and the exit status is 3 even with `--fail-on none`. Other binary files that were read are listed as "binary, not analyzed" and do not change the status. The executable exception is removed when the "committed binaries" rule exists, because then such a file is a finding;
+- a script (by extension or shebang) with a NUL byte is read as text, so the NUL does not hide what follows it, and the NUL itself is a finding;
 - text taken from the scanned repository (task labels, file names) is passed
   through `display_safe` before it is reported, so it cannot inject terminal
   escape sequences, forge extra lines or reorder text with bidi characters;
@@ -253,6 +251,11 @@ scanner itself:
   report says; third-party locale text is stripped of control, bidi and
   zero-width characters, cannot carry raw terminal escape sequences, and
   severity codes (CRITICAL, HIGH, ...) are always shown untranslated.
+
+The items above that exist in the code are design guarantees with tests; the
+localization item is a requirement for milestone 6. None of them is a proof that
+the scanner is free of bugs or that a repository is safe: a clean result means
+"no rule matched in what was read", and the report says what was not read.
 
 **False positives.** A `.repo-sniff.toml` file holds exclusions, each with a
 **mandatory justification** field. A benchmark on popular honest repositories
