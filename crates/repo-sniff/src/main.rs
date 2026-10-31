@@ -20,11 +20,17 @@ const EXIT_FINDINGS: u8 = 1;
 /// Exit status when the scan could not run (bad target, clone failure, ...).
 /// clap also uses 2 for command-line mistakes.
 const EXIT_ERROR: u8 = 2;
+/// Exit status when nothing reached `--fail-on` but the scan was incomplete
+/// (the file limit was reached, or files were not read): not a pass.
+const EXIT_INCONCLUSIVE: u8 = 3;
 
 /// Statically scan a repository for signs of malicious or suspicious code.
 ///
-/// Exit status: 0 when nothing reaches the --fail-on threshold, 1 when
-/// something does, 2 when the scan could not run.
+/// Exit status: 0 when the scan was complete and nothing reaches the
+/// --fail-on threshold, 1 when something does, 2 when the scan could not
+/// run, 3 when nothing reaches the threshold but the scan was incomplete
+/// (the file limit was reached, or binary, oversized or unreadable files
+/// were not read), so that a clean-looking result is never a pass.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -120,6 +126,8 @@ fn scan_dir(root: &Path, label: &str, fail_on: FailOn) -> Result<ExitCode> {
 
     Ok(if fail_on.is_triggered_by(&report) {
         ExitCode::from(EXIT_FINDINGS)
+    } else if !report.is_complete() {
+        ExitCode::from(EXIT_INCONCLUSIVE)
     } else {
         ExitCode::SUCCESS
     })

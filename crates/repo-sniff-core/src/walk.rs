@@ -49,6 +49,16 @@ pub enum SkipReason {
     },
 }
 
+impl SkipReason {
+    /// Whether the scan did not get to read this file's content. A symlink is
+    /// not content: it is listed, and its target is scanned if it is inside
+    /// the repository. A binary, an oversized or an unreadable file is
+    /// content nobody looked at.
+    pub fn leaves_content_unread(&self) -> bool {
+        !matches!(self, SkipReason::Symlink { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skipped {
     /// Path relative to the repository root.
