@@ -13,9 +13,10 @@ pub enum Target {
 
 /// Prefixes that mark an argument as a git URL rather than a filesystem path.
 ///
-/// `http://` and `git://` are recognized on purpose: they are classified as
-/// remote so that cloning can refuse them with a clear message, instead of
-/// the argument being mistaken for a missing local directory.
+/// `http://`, `git://`, `ssh://` and `git@host:path` are recognized on purpose:
+/// they are classified as remote so that cloning can refuse them with a clear
+/// message (and, for ssh, advice to clone the repository and scan the
+/// folder), instead of the argument being mistaken for a missing directory.
 const REMOTE_PREFIXES: &[&str] = &["https://", "http://", "git://", "ssh://", "git@"];
 
 impl Target {

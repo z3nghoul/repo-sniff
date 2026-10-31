@@ -21,8 +21,9 @@ use tempfile::TempDir;
 /// URL schemes that send the repository over the network unencrypted.
 const PLAIN_TEXT_SCHEMES: &[&str] = &["http://", "git://"];
 
-/// Transports git may use for a clone.
-const ALLOWED_PROTOCOLS: &str = "https:ssh";
+/// Transports git may use for a clone: https only. ssh would need the user's
+/// keys and agent, which the isolated environment deliberately does not have.
+const ALLOWED_PROTOCOLS: &str = "https";
 
 /// Error text from a git server is chosen by whoever runs the server, so it
 /// is cleaned and cut before it is shown.
@@ -66,7 +67,7 @@ const PASS_THROUGH: &[&str] = &[
 /// caller just has to keep it alive for as long as the scan runs.
 ///
 /// What this does to keep the clone from running anything:
-/// - unencrypted transports are refused, and only `https` and `ssh` are allowed;
+/// - only `https://` URLs are accepted (see `ensure_https_only`);
 /// - git runs with a minimal environment and with its user and system
 ///   configuration replaced by an empty file, so no filter, credential
 ///   helper, fsmonitor or alias defined there is used, and no variable such as
@@ -75,7 +76,7 @@ const PASS_THROUGH: &[&str] = &[
 ///   submodules are not fetched, objects are checked for corruption;
 /// - there are no interactive prompts.
 pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<TempDir> {
-    ensure_encrypted_transport(url)?;
+    ensure_https_only(url)?;
     if let Some(git_ref) = git_ref {
         validate_ref(git_ref)?;
     }
@@ -214,9 +215,17 @@ fn validate_ref(git_ref: &str) -> Result<()> {
     Ok(())
 }
 
-/// Rejects URLs that would be fetched without encryption.
-fn ensure_encrypted_transport(url: &str) -> Result<()> {
+/// Accepts only `https://` URLs.
+///
+/// Plain-text transports are refused because anyone on the network could alter
+/// the code being scanned. ssh is not supported at all: it would use the
+/// user's keys, and a private repository is better cloned by its owner, who
+/// then scans the folder. The messages say so instead of just refusing.
+fn ensure_https_only(url: &str) -> Result<()> {
     let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
     if let Some(scheme) = PLAIN_TEXT_SCHEMES
         .iter()
         .find(|scheme| lower.starts_with(**scheme))
@@ -226,7 +235,14 @@ fn ensure_encrypted_transport(url: &str) -> Result<()> {
              alter the code being scanned. Use an https:// URL instead"
         );
     }
-    Ok(())
+    if lower.starts_with("ssh://") || lower.starts_with("git@") {
+        bail!(
+            "ssh targets are not supported: repo-sniff fetches over https only. To scan a \
+             private or ssh-only repository, clone it yourself and scan the folder:\n  \
+             git clone <url> some-folder\n  repo-sniff scan some-folder"
+        );
+    }
+    bail!("unsupported URL: only https:// repositories can be cloned; scan a local folder instead")
 }
 
 #[cfg(test)]
@@ -275,20 +291,53 @@ mod tests {
             "git://github.com/owner/repo.git",
             "HTTP://github.com/owner/repo",
         ] {
-            let err = ensure_encrypted_transport(url).unwrap_err();
+            let err = ensure_https_only(url).unwrap_err();
             assert!(err.to_string().contains("unencrypted"), "{url}: {err}");
         }
     }
 
     #[test]
-    fn encrypted_urls_are_accepted() {
+    fn ssh_urls_are_rejected_with_advice_to_clone_locally() {
         for url in [
-            "https://github.com/owner/repo",
             "ssh://git@github.com/owner/repo.git",
             "git@github.com:owner/repo.git",
+            "SSH://git@github.com/owner/repo.git",
         ] {
-            ensure_encrypted_transport(url).unwrap();
+            let message = ensure_https_only(url).unwrap_err().to_string();
+            assert!(
+                message.contains("ssh targets are not supported"),
+                "{url}: {message}"
+            );
+            assert!(message.contains("clone it yourself"), "{url}: {message}");
+            assert!(
+                message.contains("repo-sniff scan some-folder"),
+                "{url}: {message}"
+            );
         }
+    }
+
+    #[test]
+    fn only_https_urls_are_accepted() {
+        for url in [
+            "https://github.com/owner/repo",
+            "HTTPS://github.com/owner/repo",
+        ] {
+            ensure_https_only(url).unwrap();
+        }
+        for url in [
+            "ftp://example.invalid/repo",
+            "file:///tmp/repo",
+            "/tmp/repo",
+            "owner/repo",
+        ] {
+            let message = ensure_https_only(url).unwrap_err().to_string();
+            assert!(message.contains("only https://"), "{url}: {message}");
+        }
+    }
+
+    #[test]
+    fn git_may_use_https_only() {
+        assert_eq!(ALLOWED_PROTOCOLS, "https");
     }
 
     #[test]
