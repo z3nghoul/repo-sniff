@@ -26,7 +26,8 @@ use thiserror::Error;
 use crate::finding::{Severity, Stage};
 
 /// Rule files shipped inside the binary, as `(file name, contents)`.
-const BUILTIN_RULE_FILES: &[(&str, &str)] = &[];
+const BUILTIN_RULE_FILES: &[(&str, &str)] =
+    &[("deception.toml", include_str!("../rules/deception.toml"))];
 
 /// A rule as written in TOML, before validation.
 #[derive(Debug, Deserialize)]
