@@ -490,9 +490,9 @@ fn decode_utf16_bom(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Headers of formats that are binary data by design and that no script
-/// engine reads as text: archives, compressed streams, images, documents,
-/// WebAssembly and fonts.
+/// Headers of formats that are binary data by design: archives, compressed
+/// streams, images, documents, WebAssembly and fonts. A file with one of them
+/// is still read as ASCII by the line rules (a shell may source it).
 fn known_binary_magic(bytes: &[u8]) -> bool {
     const MAGICS: [&[u8]; 17] = [
         &[0x1F, 0x8B],
