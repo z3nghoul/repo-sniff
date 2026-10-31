@@ -2,8 +2,10 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde::Deserialize;
+use thiserror::Error;
 
 /// How serious a finding is.
 ///
@@ -28,6 +30,27 @@ impl Severity {
             Severity::Medium => "MEDIUM",
             Severity::High => "HIGH",
             Severity::Critical => "CRITICAL",
+        }
+    }
+}
+
+/// The text is not the name of a severity level.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown severity `{0}`; expected one of: info, low, medium, high, critical")]
+pub struct UnknownSeverity(pub String);
+
+impl FromStr for Severity {
+    type Err = UnknownSeverity;
+
+    /// Accepts the level names in any letter case: `high`, `HIGH`, `High`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.to_ascii_lowercase().as_str() {
+            "info" => Ok(Severity::Info),
+            "low" => Ok(Severity::Low),
+            "medium" => Ok(Severity::Medium),
+            "high" => Ok(Severity::High),
+            "critical" => Ok(Severity::Critical),
+            _ => Err(UnknownSeverity(text.to_string())),
         }
     }
 }
@@ -108,6 +131,31 @@ mod tests {
         assert!(Severity::Low < Severity::Medium);
         assert!(Severity::Medium < Severity::High);
         assert!(Severity::High < Severity::Critical);
+    }
+
+    #[test]
+    fn severity_parses_names_in_any_case() {
+        assert_eq!("high".parse(), Ok(Severity::High));
+        assert_eq!("CRITICAL".parse(), Ok(Severity::Critical));
+        assert_eq!("Info".parse(), Ok(Severity::Info));
+        // The code shown in reports can be fed back as input.
+        for severity in [
+            Severity::Info,
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ] {
+            assert_eq!(severity.code().parse(), Ok(severity));
+        }
+    }
+
+    #[test]
+    fn unknown_severity_is_an_error_naming_the_input() {
+        let err = "urgent".parse::<Severity>().unwrap_err();
+        assert_eq!(err, UnknownSeverity("urgent".to_string()));
+        assert!(err.to_string().contains("`urgent`"));
+        assert!("".parse::<Severity>().is_err());
     }
 
     #[test]
