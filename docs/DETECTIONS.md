@@ -69,7 +69,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 |---|---|---|---|
 | npm `preinstall` / `install` / `postinstall` / `prepare` | HIGH, with network, exec or obfuscation CRITICAL | T1195.001 | — |
 | `setup.py` containing code other than the `setup()` call | HIGH | T1195.001 | — |
-| `.pth` files (executed on every Python start-up) | CRITICAL | T1546 | — |
+| `.pth` files with a line Python executes at start-up (a line starting with `import` followed by a space or tab). A line counts if any supported Python version would run it, so lines are split the way the most permissive version does it. Paths only: INFO. Known honest form (exact file name and content, e.g. setuptools): LOW. Any other executable line: HIGH. An executable line using `exec`, `eval`, `compile`, `__import__`, `base64`, `zlib`, `marshal`, `codecs`, `subprocess`, `os.system`, `socket`, `urllib` or `requests`, or a long or high-entropy one: CRITICAL | INFO to CRITICAL | T1546.018 | — |
 | Custom build backend inside the repo (pyproject.toml) | HIGH | T1195.001 | — |
 | Lockfile resolving a package from outside the official registry | HIGH | T1195.001 | — |
 | Typosquatted package names | HIGH | T1195.001 | — |

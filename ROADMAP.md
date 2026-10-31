@@ -29,7 +29,7 @@ architecture early.
 - [x] Report text from the scanned repository (file names, task labels) is cleaned of control, bidi and zero-width characters; paths are relative with `/` on every OS
 - [ ] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
 - [x] Rule: Trojan Source bidi characters
-- [x] Rule: `.vscode/tasks.json` / `*.code-workspace` with `runOn: folderOpen` (written by Claude in chat, reviewed by the author): JSONC parser, `engine` field, `jsonc` checks
+- [x] Rule: `.vscode/tasks.json` / `*.code-workspace` with `runOn: folderOpen`: JSONC parser, `engine` field, `jsonc` checks
 - [ ] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag
 - [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
@@ -48,8 +48,7 @@ Rule families, each in its own branch and PR, fixtures approved first:
 - [ ] Submodules pointing at third-party URLs
 - [ ] IDE: VS Code tasks/settings, devcontainer, `.idea` run configurations, `.envrc`
 - [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
-- [ ] npm and Python install hooks: lifecycle scripts, `setup.py`, `.pth`, build backends
-- [ ] Rule written by the author, reviewed by Claude (candidate: `.pth` files with executable `import` lines, a one-pattern `line-regex` rule with a `files` glob)
+- [ ] npm and Python install hooks: lifecycle scripts, `setup.py`, `.pth` (levels INFO to CRITICAL, Python-compatible line splitting), build backends
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
 - [ ] Build scripts: `build.rs`, Rust proc-macros, `.vcxproj` build events, CMake, Makefile, Gradle wrapper and tasks
 - [ ] GitHub Actions workflows
