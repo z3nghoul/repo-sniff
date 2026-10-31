@@ -41,8 +41,9 @@ can attack or mislead the scanner:
 - **Unsafe cloning:** a way to make the clone step run a filter, hook or
   helper, read the user's git configuration or environment, ask a question
   interactively, fetch over anything but https, or print a credential.
-- **A false "clean":** a way to make an incomplete scan exit with status 0, or
-  to make a file the scanner did not read go unreported.
+- **A false "clean":** a way to make an inconclusive scan (file limit reached,
+  a file not read, an executable binary not analyzed) exit with status 0, or to
+  make a file the scanner did not analyze go unreported.
 - **Supply chain:** a weakness in the CI workflows, release process or
   dependency pinning.
 

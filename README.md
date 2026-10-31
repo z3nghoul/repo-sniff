@@ -39,9 +39,12 @@ What it does to protect you:
 - **Reading.** Symlinks are never followed. File names and text taken from the
   repository are cleaned before they are printed, so a hostile repository
   cannot paint over the report. The work per file is bounded.
-- **Honesty.** An incomplete scan is never reported as clean: if the file limit
-  was reached or files were not read, the report says `INCONCLUSIVE` and the
-  exit status is 3.
+- **Honesty.** A scan is never reported as clean when it cannot vouch for what
+  it looked at: if the file limit was reached, a file was too large or could
+  not be read, or an executable binary (ELF, PE, Mach-O) was not analyzed, the
+  report says `INCONCLUSIVE` and the exit status is 3. Other binary files
+  (images, archives, compressed data) are read and listed as `binary, not
+  analyzed`: no rule looks inside them yet.
 
 ## What it detects today
 
