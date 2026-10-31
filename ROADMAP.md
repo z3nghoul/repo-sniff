@@ -35,7 +35,7 @@ architecture early.
 - [ ] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
 - [ ] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
 - [ ] `SECURITY.md`: how to report vulnerabilities in the scanner
-- [ ] `CONTRIBUTING.md`: commits, fixtures, scanner security and cross-platform rules
+- [x] `CONTRIBUTING.md`: commits, fixtures, scanner security and cross-platform rules
 - [ ] Update `DETECTIONS.md` and README
 
 ## Milestone 2 — Automatic execution (stages 0–3, 6)
