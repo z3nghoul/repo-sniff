@@ -28,7 +28,7 @@ architecture early.
 - [x] Plain-text report showing severity, stage and ATT&CK ID per finding
 - [ ] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
 - [x] Rule: Trojan Source bidi characters
-- [ ] Rule: `.vscode/tasks.json` with `runOn: folderOpen` (written by the author)
+- [x] Rule: `.vscode/tasks.json` / `*.code-workspace` with `runOn: folderOpen` (written by Claude in chat, reviewed by the author): JSONC parser, `engine` field, `jsonc` checks
 - [ ] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag
 - [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests

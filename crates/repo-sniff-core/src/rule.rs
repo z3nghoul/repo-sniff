@@ -24,11 +24,14 @@ use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::checks::{self, JsoncCheck};
 use crate::finding::{Severity, Stage};
 
 /// Rule files shipped inside the binary, as `(file name, contents)`.
-const BUILTIN_RULE_FILES: &[(&str, &str)] =
-    &[("deception.toml", include_str!("../rules/deception.toml"))];
+const BUILTIN_RULE_FILES: &[(&str, &str)] = &[
+    ("deception.toml", include_str!("../rules/deception.toml")),
+    ("ide.toml", include_str!("../rules/ide.toml")),
+];
 
 /// How a rule looks for its target. Every rule names its engine explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -36,6 +39,9 @@ const BUILTIN_RULE_FILES: &[(&str, &str)] =
 pub enum Engine {
     /// A regular expression matched against each line of a text file.
     LineRegex,
+    /// Rust code that parses a structured (JSONC) file. The code is looked up
+    /// by the rule's id; the TOML only supplies its metadata.
+    Jsonc,
 }
 
 /// A rule as written in TOML, before validation.
@@ -67,6 +73,7 @@ struct RuleFile {
 #[derive(Debug, Clone)]
 pub enum Matcher {
     LineRegex(Regex),
+    Jsonc(JsoncCheck),
 }
 
 /// A validated rule, ready to run.
@@ -105,6 +112,10 @@ pub enum RuleError {
     },
     #[error("rule `{id}`: engine `line-regex` requires a `pattern`")]
     MissingPattern { id: String },
+    #[error("rule `{id}`: engine `jsonc` does not take a `pattern`")]
+    UnexpectedPattern { id: String },
+    #[error("rule `{id}`: engine `jsonc` needs a check registered in the code under this id")]
+    UnknownCheck { id: String },
     #[error("rule `{id}`: invalid pattern: {source}")]
     Pattern {
         id: String,
@@ -171,6 +182,14 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
                 source,
             })?;
             Matcher::LineRegex(regex)
+        }
+        Engine::Jsonc => {
+            if raw.pattern.is_some() {
+                return Err(RuleError::UnexpectedPattern { id: raw.id });
+            }
+            let check = checks::jsonc_check(&raw.id)
+                .ok_or_else(|| RuleError::UnknownCheck { id: raw.id.clone() })?;
+            Matcher::Jsonc(check)
         }
     };
 
@@ -247,7 +266,9 @@ mod tests {
         assert_eq!(rule.id, "test.example");
         assert_eq!(rule.stage, Stage::Build);
         assert_eq!(rule.severity, Severity::High);
-        let Matcher::LineRegex(pattern) = &rule.matcher;
+        let Matcher::LineRegex(pattern) = &rule.matcher else {
+            panic!("expected a line-regex matcher");
+        };
         assert!(pattern.is_match(r#"Command::new("sh")"#));
         assert!(rule.applies_to("build.rs"));
         assert!(!rule.applies_to("src/main.rs"));
@@ -315,6 +336,41 @@ mod tests {
         assert!(matches!(
             parse_rules(&source, "test.toml"),
             Err(RuleError::MissingPattern { .. })
+        ));
+    }
+
+    const JSONC_RULE: &str = r#"
+        [[rule]]
+        id = "ide.vscode-folder-open-task"
+        engine = "jsonc"
+        family = "vscode-autorun"
+        stage = "ide"
+        severity = "high"
+        description = "Example"
+        example = ".vscode/tasks.json:1"
+    "#;
+
+    #[test]
+    fn jsonc_rule_with_a_registered_check_is_loaded() {
+        let rules = parse_rules(JSONC_RULE, "test.toml").unwrap();
+        assert!(matches!(rules[0].matcher, Matcher::Jsonc(_)));
+    }
+
+    #[test]
+    fn jsonc_rule_without_a_registered_check_is_rejected() {
+        let source = JSONC_RULE.replace("ide.vscode-folder-open-task", "ide.no-such-check");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::UnknownCheck { .. })
+        ));
+    }
+
+    #[test]
+    fn jsonc_rule_with_a_pattern_is_rejected() {
+        let source = format!("{JSONC_RULE}\npattern = 'x'");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::UnexpectedPattern { .. })
         ));
     }
 

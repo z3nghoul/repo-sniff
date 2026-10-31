@@ -56,7 +56,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| `.vscode/tasks.json` with `"runOn": "folderOpen"` | HIGH, with network or shell CRITICAL | — | — |
+| `.vscode/tasks.json` or `*.code-workspace` with a task using `"runOn": "folderOpen"` (parsed as JSONC, so comments, line breaks and `\u` escapes cannot hide it; the per-OS `windows`/`linux`/`osx` overrides are checked too) | HIGH, with network or shell CRITICAL | — | `ide.vscode-folder-open-task` |
 | `.vscode/settings.json` overriding the interpreter, terminal or environment | HIGH | — | — |
 | `Directory.Build.props` / `Directory.Build.targets`, custom MSBuild tasks (Visual Studio evaluates them on project load) | HIGH | T1127.001 | — |
 | .NET analyzers / source generators shipped as DLLs in the repo (a binary runs inside the IDE) | CRITICAL | — | — |
@@ -222,6 +222,12 @@ scanner itself:
 - never unpack archives (zip-bomb protection), only flag them;
 - regular expressions only through the `regex` crate (linear-time matching,
   protection against ReDoS).
+- text taken from the scanned repository (task labels, file names) is passed
+  through `display_safe` before it is reported, so it cannot inject terminal
+  escape sequences, forge extra lines or reorder text with bidi characters;
+- structured files (JSON-like) are parsed rather than matched line by line,
+  with a nesting limit, so comments and escapes cannot hide a setting and a
+  deeply nested file cannot overflow the stack;
 - localizations load only from the built-in set and the OS config directory,
   never from the scanned repository, so a repository cannot change what the
   report says; third-party locale text is stripped of control, bidi and
