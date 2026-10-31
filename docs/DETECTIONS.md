@@ -19,15 +19,15 @@ program", not only in the program's own code.
 
 | Level | Meaning |
 |---|---|
-| 🔴 Critical | Almost certainly malicious, or a dangerous action runs automatically |
-| 🟠 High | A dangerous capability in a suspicious context |
-| 🟡 Medium | Worth a human look |
-| 🔵 Low | Ordinary thing, but useful for the overall picture |
-| ⚪ Info | Context (languages, build system) |
+| CRITICAL | Almost certainly malicious, or a dangerous action runs automatically |
+| HIGH | A dangerous capability in a suspicious context |
+| MEDIUM | Worth a human look |
+| LOW | Ordinary thing, but useful for the overall picture |
+| INFO | Context (languages, build system) |
 
 **Combination rule:** severity goes up when signals combine. "Spawns a
-process" alone is 🔵, while "runs automatically at build time + network +
-obfuscation" is 🔴. Scoring uses three axes:
+process" alone is LOW, while "runs automatically at build time + network +
+obfuscation" is CRITICAL. Scoring uses three axes:
 
 - **Trigger** — how automatically the code runs (on IDE open, on install, on
   build, only when the user runs the program).
@@ -42,90 +42,90 @@ obfuscation" is 🔴. Scoring uses three axes:
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| File with an image/text extension that is actually PE/ELF/Mach-O (magic bytes) | 🔴 | T1036 | — |
-| Binary "test files" referenced by a build script (the xz backdoor pattern) | 🔴 | T1195.001 | — |
-| Committed binaries (.exe, .dll, .so, .dylib, .jar, .pyc, .wasm, .node) | 🟠 | — | — |
-| Windows "droppers": .lnk, .scr, .hta | 🟠 | T1204.002 | — |
-| .bat, .cmd, .ps1, .vbs, .js (Windows Script Host) | 🟡 | T1059 | — |
-| Password-protected archives | 🟠 | T1027 | — |
-| Symlinks pointing outside the repository | 🟠 | — | — |
-| Submodules pointing at third-party URLs | 🟡 | — | — |
-| Large high-entropy files of unknown format | 🟡 | T1027 | — |
+| File with an image/text extension that is actually PE/ELF/Mach-O (magic bytes) | CRITICAL | T1036 | — |
+| Binary "test files" referenced by a build script (the xz backdoor pattern) | CRITICAL | T1195.001 | — |
+| Committed binaries (.exe, .dll, .so, .dylib, .jar, .pyc, .wasm, .node) | HIGH | — | — |
+| Windows "droppers": .lnk, .scr, .hta | HIGH | T1204.002 | — |
+| .bat, .cmd, .ps1, .vbs, .js (Windows Script Host) | MEDIUM | T1059 | — |
+| Password-protected archives | HIGH | T1027 | — |
+| Symlinks pointing outside the repository | HIGH | — | — |
+| Submodules pointing at third-party URLs | MEDIUM | — | — |
+| Large high-entropy files of unknown format | MEDIUM | T1027 | — |
 
 ### Stage 1: opening in an IDE
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| `.vscode/tasks.json` with `"runOn": "folderOpen"` | 🟠, with network or shell 🔴 | — | — |
-| `.vscode/settings.json` overriding the interpreter, terminal or environment | 🟠 | — | — |
-| `Directory.Build.props` / `Directory.Build.targets`, custom MSBuild tasks (Visual Studio evaluates them on project load) | 🟠 | T1127.001 | — |
-| .NET analyzers / source generators shipped as DLLs in the repo (a binary runs inside the IDE) | 🔴 | — | — |
-| `.devcontainer` with `postCreateCommand` / `postStartCommand` | 🟡, with network 🟠 | — | — |
-| `.idea` run configurations, `.envrc` (direnv) | 🟡 | — | — |
+| `.vscode/tasks.json` with `"runOn": "folderOpen"` | HIGH, with network or shell CRITICAL | — | — |
+| `.vscode/settings.json` overriding the interpreter, terminal or environment | HIGH | — | — |
+| `Directory.Build.props` / `Directory.Build.targets`, custom MSBuild tasks (Visual Studio evaluates them on project load) | HIGH | T1127.001 | — |
+| .NET analyzers / source generators shipped as DLLs in the repo (a binary runs inside the IDE) | CRITICAL | — | — |
+| `.devcontainer` with `postCreateCommand` / `postStartCommand` | MEDIUM, with network HIGH | — | — |
+| `.idea` run configurations, `.envrc` (direnv) | MEDIUM | — | — |
 
 ### Stage 2: installing dependencies
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| npm `preinstall` / `install` / `postinstall` / `prepare` | 🟠, with network, exec or obfuscation 🔴 | T1195.001 | — |
-| `setup.py` containing code other than the `setup()` call | 🟠 | T1195.001 | — |
-| `.pth` files (executed on every Python start-up) | 🔴 | T1546 | — |
-| Custom build backend inside the repo (pyproject.toml) | 🟠 | T1195.001 | — |
-| Lockfile resolving a package from outside the official registry | 🟠 | T1195.001 | — |
-| Typosquatted package names | 🟠 | T1195.001 | — |
-| Dependencies from git or a URL instead of the registry | 🟡 | — | — |
-| Known vulnerabilities via OSV | 🟡, critical CVE 🟠 | — | — |
-| binding.gyp, composer scripts, Rakefile / Gemfile with code | 🟡 | — | — |
-| Dockerfile with `curl \| sh` | 🟡 | T1105 | — |
+| npm `preinstall` / `install` / `postinstall` / `prepare` | HIGH, with network, exec or obfuscation CRITICAL | T1195.001 | — |
+| `setup.py` containing code other than the `setup()` call | HIGH | T1195.001 | — |
+| `.pth` files (executed on every Python start-up) | CRITICAL | T1546 | — |
+| Custom build backend inside the repo (pyproject.toml) | HIGH | T1195.001 | — |
+| Lockfile resolving a package from outside the official registry | HIGH | T1195.001 | — |
+| Typosquatted package names | HIGH | T1195.001 | — |
+| Dependencies from git or a URL instead of the registry | MEDIUM | — | — |
+| Known vulnerabilities via OSV | MEDIUM, critical CVE HIGH | — | — |
+| binding.gyp, composer scripts, Rakefile / Gemfile with code | MEDIUM | — | — |
+| Dockerfile with `curl \| sh` | MEDIUM | T1105 | — |
 
 ### Stage 3: building
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| `gradle-wrapper.jar` not matching the official hash, or `distributionUrl` not on services.gradle.org | 🔴 | T1195.001 | — |
-| Rust proc-macro doing I/O or networking (runs at compile time) | 🔴 | T1195.001 | — |
-| `build.rs` with networking, process spawning or writes outside `OUT_DIR` | 🟠, with obfuscation 🔴 | T1195.001 | — |
-| `.vcxproj` Pre/PostBuildEvent, MSBuild `<Exec>` | 🟠, with `powershell -enc` or a download 🔴 | T1127.001 | — |
-| CMake: `execute_process`, `file(DOWNLOAD)`, `ExternalProject` / `FetchContent` from a third-party URL | 🟠 | T1105 | — |
-| Makefile or configure with `curl \| sh`, base64 | 🟠 | T1105 | — |
-| Gradle tasks with exec or download, Maven exec-plugin | 🟡 to 🟠 | — | — |
-| `go:generate` (only runs when invoked manually) | 🔵 | — | — |
+| `gradle-wrapper.jar` not matching the official hash, or `distributionUrl` not on services.gradle.org | CRITICAL | T1195.001 | — |
+| Rust proc-macro doing I/O or networking (runs at compile time) | CRITICAL | T1195.001 | — |
+| `build.rs` with networking, process spawning or writes outside `OUT_DIR` | HIGH, with obfuscation CRITICAL | T1195.001 | — |
+| `.vcxproj` Pre/PostBuildEvent, MSBuild `<Exec>` | HIGH, with `powershell -enc` or a download CRITICAL | T1127.001 | — |
+| CMake: `execute_process`, `file(DOWNLOAD)`, `ExternalProject` / `FetchContent` from a third-party URL | HIGH | T1105 | — |
+| Makefile or configure with `curl \| sh`, base64 | HIGH | T1105 | — |
+| Gradle tasks with exec or download, Maven exec-plugin | MEDIUM to HIGH | — | — |
+| `go:generate` (only runs when invoked manually) | LOW | — | — |
 
 ### Stage 4: tests
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| `conftest.py` or pytest plugins with network or exec (pytest loads them automatically) | 🟠 | — | — |
-| npm `test` script with suspicious commands | 🟡 | — | — |
+| `conftest.py` or pytest plugins with network or exec (pytest loads them automatically) | HIGH | — | — |
+| npm `test` script with suspicious commands | MEDIUM | — | — |
 
 ### Stage 5: running the program (code capabilities)
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| Chain "download → write → make executable → run" | 🔴 | T1105 | — |
-| Shellcode and injection: `VirtualAlloc`/`VirtualAllocEx` with RWX, `WriteProcessMemory`, `CreateRemoteThread`, `mprotect(PROT_EXEC)`, `ptrace` | 🔴 | T1055 | — |
-| Disabling defenses: Defender exclusions (`Add-MpPreference`, `Set-MpPreference`), AMSI bypass | 🔴 | T1562.001 | — |
-| Crypto mining (`stratum+tcp://`, xmrig) | 🔴 | T1496 | — |
-| Ransomware behavior: `vssadmin delete shadows`, mass file enumeration and encryption | 🔴 | T1490, T1486 | — |
-| Data theft: browser passwords and cookies (`Login Data`, `Cookies`), Discord tokens, Telegram `tdata`, crypto wallets, `~/.ssh`, `~/.aws` | 🟠, with network 🔴 | T1555.003, T1539, T1552 | — |
-| Exfiltration via Discord/Telegram webhooks or bot API, pastebin, ngrok, .onion, hard-coded IPs | 🟠 | T1567 | — |
-| Persistence: registry Run keys, schtasks, services, cron, systemd, LaunchAgents, `.bashrc`/`.profile`, Startup folder, WMI subscriptions | 🟠 | T1547.001, T1053, T1543, T1546.004, T1546.003 | — |
-| Keylogging (`SetWindowsHookEx`, `GetAsyncKeyState`), clipboard address swapping (clipper) | 🟠 | T1056.001, T1115 | — |
-| UAC bypass (fodhelper / eventvwr registry keys) | 🟠 | T1548.002 | — |
-| Anti-VM and anti-debugging (VM, sandbox and debugger checks) | 🟠 | T1497, T1622 | — |
-| Loading code from bytes (`Assembly.Load(byte[])`, `defineClass`, `marshal.loads`) | 🟠 | T1620 | — |
-| Screenshots | 🟡 | T1113 | — |
-| Auto-update without signature or hash verification | 🟡 | — | — |
-| Plain process spawning | 🔵 | T1106 | — |
+| Chain "download → write → make executable → run" | CRITICAL | T1105 | — |
+| Shellcode and injection: `VirtualAlloc`/`VirtualAllocEx` with RWX, `WriteProcessMemory`, `CreateRemoteThread`, `mprotect(PROT_EXEC)`, `ptrace` | CRITICAL | T1055 | — |
+| Disabling defenses: Defender exclusions (`Add-MpPreference`, `Set-MpPreference`), AMSI bypass | CRITICAL | T1562.001 | — |
+| Crypto mining (`stratum+tcp://`, xmrig) | CRITICAL | T1496 | — |
+| Ransomware behavior: `vssadmin delete shadows`, mass file enumeration and encryption | CRITICAL | T1490, T1486 | — |
+| Data theft: browser passwords and cookies (`Login Data`, `Cookies`), Discord tokens, Telegram `tdata`, crypto wallets, `~/.ssh`, `~/.aws` | HIGH, with network CRITICAL | T1555.003, T1539, T1552 | — |
+| Exfiltration via Discord/Telegram webhooks or bot API, pastebin, ngrok, .onion, hard-coded IPs | HIGH | T1567 | — |
+| Persistence: registry Run keys, schtasks, services, cron, systemd, LaunchAgents, `.bashrc`/`.profile`, Startup folder, WMI subscriptions | HIGH | T1547.001, T1053, T1543, T1546.004, T1546.003 | — |
+| Keylogging (`SetWindowsHookEx`, `GetAsyncKeyState`), clipboard address swapping (clipper) | HIGH | T1056.001, T1115 | — |
+| UAC bypass (fodhelper / eventvwr registry keys) | HIGH | T1548.002 | — |
+| Anti-VM and anti-debugging (VM, sandbox and debugger checks) | HIGH | T1497, T1622 | — |
+| Loading code from bytes (`Assembly.Load(byte[])`, `defineClass`, `marshal.loads`) | HIGH | T1620 | — |
+| Screenshots | MEDIUM | T1113 | — |
+| Auto-update without signature or hash verification | MEDIUM | — | — |
+| Plain process spawning | LOW | T1106 | — |
 
 ### Stage 6: deceiving the human
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| Trojan Source: Unicode bidi control characters (CVE-2021-42574) | 🔴 | — | — |
-| Code hidden with whitespace past the edge of the screen (beyond ~column 200) or after hundreds of blank lines | 🔴 | T1027 | — |
-| Invisible (zero-width) characters and homoglyphs in identifiers (Cyrillic `а` instead of Latin `a`) | 🟠 | T1036 | — |
-| README advising "disable your antivirus", "download the password-protected zip", `curl \| bash` | 🟠 | T1204 | — |
+| Trojan Source: Unicode bidi control characters (CVE-2021-42574) | CRITICAL | — | — |
+| Code hidden with whitespace past the edge of the screen (beyond ~column 200) or after hundreds of blank lines | CRITICAL | T1027 | — |
+| Invisible (zero-width) characters and homoglyphs in identifiers (Cyrillic `а` instead of Latin `a`) | HIGH | T1036 | — |
+| README advising "disable your antivirus", "download the password-protected zip", `curl \| bash` | HIGH | T1204 | — |
 
 ---
 
@@ -175,7 +175,7 @@ Related technique: T1027 (Obfuscated Files or Information), T1140
 
 ---
 
-## 4. 🔍 Review points
+## 4. Review points
 
 Besides **findings**, the report has a separate **"Needs manual review"**
 section for places where static analysis cannot reach a verdict but a human
@@ -199,7 +199,7 @@ Rules for this section:
 | Malicious logic on ordinary APIs | **Capability map**: a short summary of what the program can do (network, files in the home directory, processes) compared with the README |
 | Logic bombs | Conditions guarding dangerous actions: hard-coded future dates, hostname or username checks, environment variables, **system language and keyboard layout** (malware often switches on or off by locale; T1480, T1614.001) |
 | Binary contents | Import tables of PE/ELF/Mach-O (crate `goblin`), e.g. a `.dll` importing `VirtualAllocEx` + `WriteProcessMemory`; SHA-256; presence of a code signature; strings from the binary (URLs, IPs). Optional: VirusTotal hash lookup with the user's own key (hash only, the file is never uploaded) |
-| Bugdoors | Risky spots at 🔵: `strcpy`, `sprintf`, `gets`, `memcpy` without a size check, `unsafe` blocks in Rust |
+| Bugdoors | Risky spots at LOW: `strcpy`, `sprintf`, `gets`, `memcpy` without a size check, `unsafe` blocks in Rust |
 | Dependency code | Via registry APIs (npm, crates.io, PyPI): packages published a few days ago, with tiny download counts, or with a changed owner. Committed `vendor/` and `node_modules/` are scanned as ordinary code |
 | Binaries in Releases | Via the GitHub API: whether releases contain exe/zip files and whether the README says to download releases instead of building. Marked "binary not verified against the source" |
 | Custom VM / bytecode | Large numeric arrays + a loop with `switch`/`match` over "opcodes": "possible code virtualization" |

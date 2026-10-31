@@ -5,7 +5,7 @@ of detections lives in [docs/DETECTIONS.md](docs/DETECTIONS.md); detection
 milestones below only name rule families, and the exact set for each one is
 agreed before it starts.
 
-## Milestone 0 — Scaffold ✅
+## Milestone 0 — Scaffold (done)
 
 - [x] Local git identity, cargo project, license
 - [x] `scan <path|url>` CLI with clap
