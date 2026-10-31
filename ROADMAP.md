@@ -26,6 +26,7 @@ architecture early.
 - [x] Walk repository files with safety limits (no symlinks, size and count limits, `.gitignore` not honored)
 - [x] Line-based regex rule engine
 - [x] Plain-text report showing severity, stage and ATT&CK ID per finding
+- [x] Report text from the scanned repository (file names, task labels) is cleaned of control, bidi and zero-width characters; paths are relative with `/` on every OS
 - [ ] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
 - [x] Rule: Trojan Source bidi characters
 - [x] Rule: `.vscode/tasks.json` / `*.code-workspace` with `runOn: folderOpen` (written by Claude in chat, reviewed by the author): JSONC parser, `engine` field, `jsonc` checks

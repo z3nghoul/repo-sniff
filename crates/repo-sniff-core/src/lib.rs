@@ -14,6 +14,6 @@ pub mod walk;
 
 pub use finding::{Finding, Severity, Stage};
 pub use rule::{Engine, Matcher, Rule, RuleError, builtin_rules, parse_rules};
-pub use sanitize::display_safe;
+pub use sanitize::{display_path, display_safe};
 pub use scan::{Report, scan};
 pub use walk::{Limits, SkipReason, Skipped, WalkResult, walk};
