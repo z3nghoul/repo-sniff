@@ -1,0 +1,16 @@
+# Stage: ide. Code that can run when a project is opened in an IDE.
+
+[[rule]]
+id          = "ide.vscode-folder-open-task"
+engine      = "jsonc"
+family      = "vscode-autorun"
+stage       = "ide"
+# Baseline for an ordinary auto-run task. The check raises it to critical when
+# the task's command downloads or runs code from a string, and lowers it to
+# medium for a file it cannot parse and cannot confirm.
+severity    = "high"
+attack      = []
+description = "A VS Code task is set to run automatically as soon as the folder is opened, before the user has done anything"
+example     = '.vscode/tasks.json:8 sets "runOn": "folderOpen" on task "build"'
+# Both files VS Code reads tasks from. The check itself decides how to read each.
+files       = ["**/.vscode/tasks.json", "**/*.code-workspace"]

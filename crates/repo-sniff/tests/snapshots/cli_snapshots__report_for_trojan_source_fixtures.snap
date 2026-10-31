@@ -1,0 +1,16 @@
+---
+source: crates/repo-sniff/tests/cli_snapshots.rs
+expression: "scan_dot(&core_fixtures(\"trojan-source\"))"
+---
+Scanned 7 files in .
+
+CRITICAL  positive/commenting_out.c:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+CRITICAL  positive/early_return.py:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+CRITICAL  positive/stretched_string.js:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+Summary: 3 critical, 0 high, 0 medium, 0 low, 0 info

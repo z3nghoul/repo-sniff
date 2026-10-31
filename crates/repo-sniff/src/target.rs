@@ -12,13 +12,21 @@ pub enum Target {
 }
 
 /// Prefixes that mark an argument as a git URL rather than a filesystem path.
-const REMOTE_PREFIXES: &[&str] = &["https://", "http://", "ssh://", "git@"];
+///
+/// `http://` and `git://` are recognized on purpose: they are classified as
+/// remote so that cloning can refuse them with a clear message, instead of
+/// the argument being mistaken for a missing local directory.
+const REMOTE_PREFIXES: &[&str] = &["https://", "http://", "git://", "ssh://", "git@"];
 
 impl Target {
     /// Classifies a raw CLI argument. This never touches the filesystem or
     /// network, so it is cheap and easy to unit test.
     pub fn parse(raw: &str) -> Self {
-        if REMOTE_PREFIXES.iter().any(|prefix| raw.starts_with(prefix)) {
+        let lower = raw.to_ascii_lowercase();
+        if REMOTE_PREFIXES
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+        {
             Target::Remote(raw.to_string())
         } else {
             Target::Local(PathBuf::from(raw))
@@ -44,6 +52,20 @@ mod tests {
         ] {
             assert_eq!(Target::parse(raw), Target::Remote(raw.to_string()));
         }
+    }
+
+    #[test]
+    fn unencrypted_urls_are_still_remote() {
+        // They must reach the clone step, which refuses them with a clear error.
+        for raw in ["http://example.com/repo", "git://example.com/repo.git"] {
+            assert_eq!(Target::parse(raw), Target::Remote(raw.to_string()));
+        }
+    }
+
+    #[test]
+    fn scheme_matching_ignores_case() {
+        let raw = "HTTPS://example.com/repo";
+        assert_eq!(Target::parse(raw), Target::Remote(raw.to_string()));
     }
 
     #[test]
