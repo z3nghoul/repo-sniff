@@ -505,16 +505,6 @@ fn scan_streamed(
         out.skipped.push(unreadable(err));
         return out;
     }
-    if looks_binary(&head)
-        && let Some(format) = executable_format(&head)
-    {
-        out.skipped.push(Skipped {
-            path: relative.to_path_buf(),
-            reason: SkipReason::Executable { format },
-        });
-        return out;
-    }
-
     let applicable: Vec<&Rule> = rules
         .iter()
         .filter(|rule| rule.applies_to(slash_path))
@@ -527,6 +517,21 @@ fn scan_streamed(
         path: relative.to_path_buf(),
         reason: SkipReason::TooLarge { size },
     };
+    // A rule that selects the file by name gets to see it as too large (that
+    // happens after the walk), executable or not, as for a file over the limit.
+    if looks_binary(&head)
+        && let Some(format) = executable_format(&head)
+    {
+        if whole_file_rule {
+            out.skipped.push(too_large);
+        }
+        out.skipped.push(Skipped {
+            path: relative.to_path_buf(),
+            reason: SkipReason::Executable { format },
+        });
+        return out;
+    }
+
     let script = is_script(slash_path, &head);
     if has_utf16_bom(&head) && has_script_extension(slash_path) {
         // Decoding UTF-16 needs the whole file; nothing can be said about it.
@@ -592,7 +597,7 @@ fn scan_streamed(
         let mut number = 0;
         loop {
             line.clear();
-            let cap = limits.max_line_size as u64 + 1;
+            let cap = limits.max_line_size as u64 + 2;
             match (&mut reader).take(cap).read_until(b'\n', &mut line) {
                 Ok(0) => break,
                 Ok(_) => {}
@@ -602,7 +607,7 @@ fn scan_streamed(
                 }
             }
             number += 1;
-            if line.len() > limits.max_line_size && line.last() != Some(&b'\n') {
+            if line.last() != Some(&b'\n') && line.len() > limits.max_line_size {
                 out.skipped.push(Skipped {
                     path: relative.to_path_buf(),
                     reason: SkipReason::LineTooLong { line: number },
@@ -1983,6 +1988,100 @@ mod tests {
             }]
         ));
         assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn a_streamed_executable_still_lets_a_rule_that_selects_it_by_name_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = b"MZ\x90\0\nimport os\n".to_vec();
+        bytes.extend_from_slice(&[b'#'; 100]);
+        write(dir.path(), "x.pth", &bytes);
+        let rules = [file_rule("**/*.pth", probe)];
+
+        let report = scan(dir.path(), &rules, streaming());
+
+        let found = explanations(&report);
+        assert_eq!(found.len(), 1, "the rule runs once");
+        assert!(found[0].1.contains("issue=Some(TooLarge"), "{}", found[0].1);
+        let kinds: Vec<_> = report.skipped.iter().map(|s| s.reason.clone()).collect();
+        assert!(kinds.contains(&SkipReason::Executable { format: "PE" }));
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn chunk_edges_do_not_change_what_a_streamed_file_means() {
+        // Things that straddle the 64 KiB read size of the first pass.
+        let edge = 64 * 1024;
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        for shift in [2usize, 1, 0] {
+            // A NUL, then a cut bidi character, then a payload line.
+            let mut bytes = vec![b'a'; edge - shift];
+            bytes.extend_from_slice(b"\n");
+            bytes.extend_from_slice(b"x \xE2\0\x80\xAE y\n");
+            bytes.extend_from_slice(PAYLOAD);
+            bytes.extend_from_slice(b"# \0\n");
+            files.push((format!("edge-{shift}"), bytes));
+            let mut script = b"#!/bin/sh\n".to_vec();
+            script.extend(vec![b'#'; edge - shift - script.len()]);
+            script.extend_from_slice(b"\0\r\n");
+            script.extend_from_slice(PAYLOAD);
+            files.push((format!("edge-{shift}.sh"), script));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in &files {
+            write(dir.path(), name, bytes);
+        }
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(CURL_SH, "test.toml").unwrap());
+
+        let whole = scan(dir.path(), &rules, Limits::default());
+        let streamed = scan(dir.path(), &rules, streaming());
+
+        assert!(whole.findings.len() >= 12, "{:?}", whole.findings);
+        assert_eq!(whole.findings, streamed.findings);
+        assert_eq!(whole.skipped, streamed.skipped);
+    }
+
+    #[test]
+    fn a_file_of_exactly_the_buffer_size_is_read_whole_and_one_byte_more_is_streamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = Limits {
+            max_buffered_size: 100,
+            ..Limits::default()
+        };
+        let rules = [file_rule("**/*.pth", probe)];
+        write(dir.path(), "whole.pth", &[b'#'; 100]);
+        write(dir.path(), "streamed.pth", &[b'#'; 101]);
+
+        let report = scan(dir.path(), &rules, limits);
+
+        let mut found = explanations(&report);
+        found.sort();
+        assert!(
+            found[0].1.contains("bytes=100 issue=None"),
+            "{}",
+            found[0].1
+        );
+        assert!(found[1].1.contains("TooLarge"), "{}", found[1].1);
+    }
+
+    #[test]
+    fn a_crlf_line_of_exactly_the_limit_is_not_too_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut contents = vec![b'x'; 50];
+        contents.extend_from_slice(b"\r\nTODO\n");
+        write(dir.path(), "a.txt", &contents);
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+        let limits = Limits {
+            max_buffered_size: 10,
+            max_line_size: 50,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &rules, limits);
+
+        assert_eq!(report.findings.len(), 1);
+        assert!(report.skipped.is_empty());
     }
 
     #[test]
