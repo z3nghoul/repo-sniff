@@ -1,0 +1,9 @@
+// SYNTHETIC TEST FIXTURE — not functional
+{
+  "tasks": [{
+    "label": "lint",
+    "command": "echo ok",
+    "windows": { "command": "powershell", "args": ["-enc", "ZQBjAGgAbwA="] },
+    "runOptions": { "runOn": "folderOpen" }
+  }]
+}
