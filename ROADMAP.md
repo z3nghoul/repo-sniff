@@ -11,11 +11,27 @@ and release binaries (M4), the README showcase (M5), the TUI with
 localization (M6), and only then capabilities and AST (M7), obfuscation (M8)
 and dependencies (M9).
 
+Updated on 2026-11-01 after the security review: scanner hardening and an
+architecture refactor were added at the start of milestone 2. The "Before
+merging into main" block is a gate: nothing else in milestone 2 starts until
+it is done and both open pull requests are merged.
+
+Decisions taken in that review:
+
+- Remote repositories are cloned over https only; ssh is not supported. Users
+  who need a private repository clone it themselves and scan the local folder.
+- An old git version gives a loud warning (`--allow-old-git` silences it)
+  instead of a refusal, because distributions backport security fixes.
+- Remote repositories are still read through a `git clone` checkout, now with
+  full config isolation. A bare clone or a streamed tarball is in "Later".
+- The core stays offline. Anything that needs the network (repository
+  signals, OSV, VirusTotal) is an opt-in enrichment layer.
+
 ## Milestone 0 — Scaffold (done)
 
 - [x] Local git identity, cargo project, license
 - [x] `scan <path|url>` CLI with clap
-- [x] Shallow clone of remote repos into a self-deleting temp dir (hooks, LFS, submodules, prompts disabled)
+- [x] Shallow clone of remote repos into a self-deleting temp dir (hooks, LFS smudge and submodules disabled; https credential prompts disabled; full config isolation and other transports: see milestone 2)
 - [x] Unit tests for target parsing
 - [x] CI: rustfmt, clippy `-D warnings`, tests
 - [x] README with project goals
@@ -38,7 +54,7 @@ architecture early.
 - [x] Rule: `.vscode/tasks.json` / `*.code-workspace` with `runOn: folderOpen`: JSONC parser, `engine` field, `jsonc` checks
 - [x] End-to-end snapshot test with `insta`
 - [x] `--ref` option to scan a branch or tag
-- [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
+- [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests (isolation from user and system git config moved to milestone 2)
 - [x] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
 - [x] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
 - [x] `SECURITY.md`: how to report vulnerabilities in the scanner
@@ -47,10 +63,37 @@ architecture early.
 
 ## Milestone 2 — Automatic execution (stages 0–3, 6)
 
-Rule families, each in its own branch and PR, fixtures approved first:
+### Before merging into main (gate)
+
+Finish the open work, close the holes that make a scan lie, then merge
+`feat/walking-skeleton` and `feat/python-install-hooks` into `main`.
+
+- [ ] Python startup family, to finish: scoped re-review by `repo-sniff-reviewer` (only that its earlier findings are closed; a blocker only for a regression or a completely unnoticed executable line), then open the pull request stacked on the milestone 1 pull request (base `feat/walking-skeleton`) while that one is unmerged
+- [ ] Clone isolation (one pull request): `env_clear()` and re-add only what git needs (PATH, HOME/USERPROFILE, temp, SYSTEMROOT, proxy and SSL certificate variables); `GIT_CONFIG_NOSYSTEM=1`; `GIT_CONFIG_GLOBAL` pointing at an empty file (checked on Git for Windows); `GCM_INTERACTIVE=never`; `-c credential.helper= -c core.symlinks=false -c core.fsmonitor=false -c transfer.fsckObjects=true -c submodule.recurse=false`; `--template= --single-branch --no-tags`. Tests: a global smudge filter in a temporary `HOME` does not run; the same filter through `GIT_CONFIG_COUNT/KEY_0/VALUE_0` has no effect; a symlink in the repository is checked out as a plain file
+- [ ] https only: `ssh://` and `git@host:path` targets rejected with a message that explains how to scan a local clone instead; `GIT_ALLOW_PROTOCOL=https`
+- [ ] Credentials in URLs (`https://TOKEN@host/...`) redacted in every message, the report label and error output; test for each output path
+- [ ] Incomplete scan is never a pass: an INCONCLUSIVE result with its own exit code when the walk was truncated or any file was skipped (binary, oversized, unreadable); the report says what was not read. Test with padding files that push a payload past the file limit
+- [ ] Text-like files with NUL bytes still reach line rules: a file with a script extension or a shebang is not treated as binary because of NUL bytes; the NUL itself is reported as concealment (`bash` and `node` run such files). Test with a `.sh` that has a NUL in a comment
+- [ ] Documentation matches the code: remove "prompts disabled" and "LFS filters skipped" over-claims from `CONTRIBUTING.md`, `docs/DETECTIONS.md` section 5 and the README; state the real guarantees ("no filters from any config run", "no interactive prompts", "an incomplete scan is never reported as clean"); never promise absolute safety
+- [ ] Merge both pull requests into `main`
+
+### Architecture refactor (before the next rule family)
+
+One pull request while there are only a handful of rules, so new formats stop
+needing a new engine variant each.
+
+- [ ] One check signature `fn(&Ctx) -> Vec<Hit>` with lazily cached views (`ctx.bytes()`, `ctx.text()`, `ctx.jsonc()`, later `yaml`, `toml`, `xml`, AST) and the repository index available to every check
+- [ ] File classification before rules: BOM and UTF-16 decoding, shebang, magic bytes, language; rules may select by `languages = [...]` next to `files` (UTF-16 `.ps1` and Trojan Source in UTF-16 reach line rules)
+- [ ] `Finding` gains column, byte span and a short snippet (more fields come with the milestones that need them)
+- [ ] Generic fixture harness: a fixture folder plus `expected.toml`, so a new rule needs no new test code (separate small pull request)
+
+### Rule families
+
+Each in its own branch and pull request, fixtures approved first:
 
 - [ ] Repository contents: committed binaries, disguised executables (magic bytes), droppers (.lnk, .scr, .hta), Windows scripts (.bat, .ps1, .vbs), symlinks out of the repo
 - [ ] Repository contents: committed virtual environments (`pyvenv.cfg`) as a finding of their own, in a separate pull request
+- [ ] Repository contents, local targets: dangerous keys in `.git/config` (`core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `core.pager`, `alias.* = !...`, `filter.*`, `include.path`) and non-sample files in `.git/hooks/`, read as plain files without running git; nested `.git` folders reported
 - [ ] Suspicious files: password-protected archives (flagged, never unpacked), data appended after PNG `IEND` / JPEG `EOI`, large high-entropy files of unknown format, binary "test files" referenced by build scripts
 - [ ] Submodules pointing at third-party URLs
 - [ ] IDE: VS Code tasks/settings, devcontainer, `.idea` run configurations, `.envrc`
@@ -61,33 +104,40 @@ Rule families, each in its own branch and PR, fixtures approved first:
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
 - [ ] Build scripts: `build.rs`, Rust proc-macros, `.vcxproj` build events, CMake, Makefile, Gradle wrapper and tasks
 - [ ] GitHub Actions workflows
-- [ ] Human deception: hidden whitespace code, zero-width characters, homoglyphs, README advice ("disable antivirus", password-protected zip, `curl | bash`)
+- [ ] Human deception: hidden whitespace code, zero-width characters, homoglyphs, mixed-script path names (`src/maіn.rs` with a Cyrillic `і`), README advice ("disable antivirus", password-protected zip, `curl | bash`)
 
-Infrastructure:
+### Infrastructure
 
-- [ ] Python startup family, to finish: scoped re-review by `repo-sniff-reviewer` (only that its earlier findings are closed; a blocker only for a regression or a completely unnoticed executable line), then open the pull request stacked on the milestone 1 pull request (base `feat/walking-skeleton`) while that one is unmerged
 - [x] File-level checks: `Matcher::File` with a `FileCtx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
 - [x] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
-- [ ] Tracked files: for a local git repository scan `git ls-files` by default and everything else with `--include-untracked`; `.gitignore` is still never applied, so a tracked file is scanned even if it is ignored (a small separate pull request)
-- [ ] Review point: binary contents via `goblin` (imports, SHA-256, code signature, embedded URLs/IPs); optional VirusTotal hash lookup with the user's own key
+- [ ] Non-regular files (FIFOs, devices, sockets) listed in `Report.skipped` too
+- [ ] Clone limits: timeout with git killed on expiry, disk-size limit during the clone, Ctrl+C removes the temp folder and stops git
+- [ ] Minimum git version check with a loud warning and `--allow-old-git` (versions taken from the git security advisories); version parsing tested on `2.43.0`, `2.39.5 (Apple Git-154)`, `2.47.1.windows.1`
+- [ ] Local targets: open files without following symlinks and check metadata after opening (no swap between walk and read)
+- [ ] Tracked files, local targets only: read the git index directly (`gix` or an own parser) without running git, because a local repository's `.git/config` is attacker-controlled; untracked files still scanned and marked; `.gitignore` is still never applied (cloned repositories need nothing here: the clone has no untracked files)
+- [ ] CI: `cargo-deny` or `cargo-audit` next to Dependabot
+- [ ] Review point: binary contents via `goblin` (imports, SHA-256, code signature, embedded URLs/IPs); optional VirusTotal hash lookup with the user's own key, never logged, with a note that a third party learns the hash
 - [ ] Benchmark on popular honest repositories (target: 0 critical); started here and extended in every later milestone
 - [ ] Real-sample test suite gated by `REPO_SNIFF_REAL_SAMPLES` (path to samples outside the repo; skipped when unset)
 
 ## Milestone 3 — Report and scoring
 
-- [ ] Colored terminal report
-- [ ] JSON output
+- [ ] Colored terminal report: colors added only after sanitizing; `NO_COLOR` and non-TTY output respected
+- [ ] JSON output through `serde` only; repository text in it is bounded and marked as untrusted, because AI agents may read it (prompt injection)
+- [ ] Rule metadata tags for the trigger, capability and concealment axes
 - [ ] Risk score on three axes: trigger, capability, concealment
-- [ ] Capability combinations raise severity
+- [ ] Correlation pass after the scan: all findings plus the repository index in, raised or combined findings out
+- [ ] Capability combinations raise severity (built on the correlation pass)
 - [ ] "Needs manual review" section: grouped, capped, no (or minimal) effect on the score
 - [ ] `.repo-sniff.toml`: `[filters]` and `[[exclude]]` with mandatory reason
 - [ ] Parallel scanning with rayon
+- [ ] Many rules stay fast: `RegexSet` or Aho-Corasick prefilter for line rules; per-file cap on findings from line rules
 
 ## Milestone 4 — SARIF, GitHub Action, releases
 
-- [ ] SARIF output for GitHub code scanning
-- [ ] GitHub Action that scans pull requests
-- [ ] Release binaries for Linux, Windows and macOS
+- [ ] SARIF output for GitHub code scanning: regions from the byte spans; messages in `text`, never `markdown`
+- [ ] GitHub Action that scans pull requests: workflow commands escaped (`::`, `%`, `\r`, `\n`) or output wrapped in `::stop-commands::<token>`; `permissions: contents: read`; never `pull_request_target` with a checkout of the PR head; no tokens in the scan step
+- [ ] Release binaries for Linux, Windows and macOS with checksums and GitHub artifact attestations (or signatures)
 
 ## Milestone 5 — README as a showcase
 
@@ -95,11 +145,14 @@ Infrastructure:
 - [ ] Examples and "how to add your own rule"
 - [ ] Publish benchmark results in the README
 - [ ] Honest list of blind spots
+- [ ] "Security guarantees" section that states exactly what the scanner does to protect the user, matching the code
+- [ ] Comparison with similar tools (for example scanrepo): file coverage, Python startup files, build systems, Trojan Source, JSONC parsing, offline by default
 
 ## Milestone 6 — TUI and localization
 
 - [ ] ratatui + crossterm app shell: alternate screen, raw mode, panic hook restores the terminal
 - [ ] The Elm Architecture: state → event → update → render
+- [ ] All repository text shown in the TUI goes through `display_safe` (ratatui does not strip control characters)
 - [ ] Start screen: URL/path input, recent scans
 - [ ] Scanning screen: background thread, progress by stage over a channel, live finding count
 - [ ] Results screen: list, details with code snippet, review points tab, live filters, `/` search
@@ -125,19 +178,24 @@ Localization:
 
 ## Milestone 7 — Capabilities and AST
 
-- [ ] tree-sitter for Python, JavaScript, C/C++
-- [ ] tree-sitter for Rust, PowerShell and bash
+- [ ] tree-sitter for Python, JavaScript, C/C++, with input size and depth limits (tree-sitter is C code; consider running it in a separate process)
+- [ ] tree-sitter for Rust, PowerShell, bash and Go
+- [ ] `engine = "ts-query"` in rule TOML (`language` + `query`); taint tracking at least within one function
+- [ ] Import graph: whether a flagged file is imported or run at all
 - [ ] Stage 5 capability families: process spawning, LOLBins, injection, persistence, credential theft, exfiltration, keylogging, defense evasion
 - [ ] Download → write → make executable → run chain
 - [ ] Crypto mining, ransomware behavior
 - [ ] UAC bypass, anti-VM and anti-debugging
 - [ ] Dynamic eval and loading code from bytes
 - [ ] Clipper, screenshots, auto-update without signature check
+- [ ] Web3 drainers: wallet providers (`window.ethereum`, Phantom, Solflare), signing APIs whose result is sent to a server, seed-phrase harvesting
+- [ ] Solidity: `delegatecall`, `selfdestruct`, hidden owner, inline `assembly`
 - [ ] Stage 4 test hooks: `conftest.py`, npm `test`
 
 Review points:
 
 - [ ] URLs and domains in code (raw IPs, pastebin, raw gists, shorteners, dynamic DNS); network response flowing into exec/eval/file write
+- [ ] Encoded URL next to a network call: URL as base64 or a byte array, payload URL in a config file, `axios`/`fetch` result passed to `eval` (an early line or file rule is possible before the AST)
 - [ ] Logic bombs: conditions on dates, hostname/user, environment, system language and keyboard layout
 - [ ] Bugdoors at LOW: risky C/C++ functions (`strcpy`, `sprintf`, `gets`, unchecked `memcpy`), Rust `unsafe` blocks
 - [ ] Capability map: short summary of what the program can do
@@ -145,7 +203,7 @@ Review points:
 ## Milestone 8 — Obfuscation
 
 - [ ] Shannon entropy, long base64/hex blobs, minified code among normal sources
-- [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`) with depth and size limits
+- [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`) with depth and size limits; each finding keeps its decoding chain
 - [ ] Packer and obfuscator signatures, reflection and dynamic imports
 
 Review points:
@@ -156,8 +214,13 @@ Review points:
 
 ## Milestone 9 — Dependencies
 
+Network lookups form a separate enrichment layer after the scan: cache,
+offline mode, timeouts, names from the repository URL-encoded, and a notice
+that third parties learn what is scanned.
+
 - [ ] Typosquatting against popular packages
 - [ ] Known vulnerabilities via the OSV API
+- [ ] Known malicious package names (not only vulnerabilities)
 - [ ] Lockfiles resolving outside the official registry, git/URL dependencies
 
 Review points:
@@ -168,3 +231,12 @@ Review points:
 ## Later
 
 - [ ] README vs. behavior: compare the stated purpose with the capability map
+- [ ] Repository signals behind opt-in `--online` (GitHub API): repository age, zero stars/forks/issues, lists of known malicious repositories and accounts
+- [ ] Fake recruiter assignment lures in the name, description and README ("defi exchange test", "real estate rental platform", "dex staking platform"), together with repository signals
+- [ ] Reading remote repositories without a checkout: bare clone with `ls-tree`/`cat-file` (with `GIT_NO_LAZY_FETCH=1` for partial clones), or streaming the GitHub tarball without extracting it (symlinks and `../` entries handled)
+- [ ] MCP server as a thin wrapper over `--json`, only after M3 and M4
+
+## Considered and rejected
+
+- Web vulnerability rules (XSS, SQL/NoSQL injection, open redirect, missing auth): a different class of tool and noise for a malware scanner.
+- An LLM in the core: prompt injection from repository text and non-deterministic results.
