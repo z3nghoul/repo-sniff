@@ -2055,14 +2055,17 @@ mod tests {
 
         let report = scan(dir.path(), &rules, limits);
 
-        let mut found = explanations(&report);
-        found.sort();
-        assert!(
-            found[0].1.contains("bytes=100 issue=None"),
-            "{}",
-            found[0].1
-        );
-        assert!(found[1].1.contains("TooLarge"), "{}", found[1].1);
+        let found = explanations(&report);
+        let of = |name: &str| {
+            found
+                .iter()
+                .find(|(file, _)| file == name)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert!(of("whole.pth").contains("bytes=100 issue=None"));
+        assert!(of("streamed.pth").contains("TooLarge"));
     }
 
     #[test]
