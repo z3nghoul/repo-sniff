@@ -37,7 +37,7 @@ architecture early.
 - [x] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
 - [x] `SECURITY.md`: how to report vulnerabilities in the scanner
 - [x] `CONTRIBUTING.md`: commits, fixtures, scanner security and cross-platform rules
-- [ ] Update `DETECTIONS.md` and README
+- [x] Update `DETECTIONS.md` and README
 
 ## Milestone 2 — Automatic execution (stages 0–3, 6)
 
