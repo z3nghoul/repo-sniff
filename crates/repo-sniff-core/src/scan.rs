@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::finding::Finding;
-use crate::rule::Rule;
+use crate::rule::{Matcher, Rule};
 use crate::walk::{self, Limits, SkipReason, Skipped};
 
 /// How many leading bytes are checked to tell text from binary files.
@@ -77,18 +77,22 @@ fn scan_text(relative: &Path, text: &str, rules: &[Rule]) -> Vec<Finding> {
     }
 
     let mut findings = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        for rule in &applicable {
-            if rule.pattern.is_match(line) {
-                findings.push(Finding {
-                    rule_id: rule.id.clone(),
-                    severity: rule.severity,
-                    stage: rule.stage,
-                    attack: rule.attack.clone(),
-                    file: relative.to_path_buf(),
-                    line: index + 1,
-                    explanation: rule.description.clone(),
-                });
+    for rule in applicable {
+        match &rule.matcher {
+            Matcher::LineRegex(pattern) => {
+                for (index, line) in text.lines().enumerate() {
+                    if pattern.is_match(line) {
+                        findings.push(Finding {
+                            rule_id: rule.id.clone(),
+                            severity: rule.severity,
+                            stage: rule.stage,
+                            attack: rule.attack.clone(),
+                            file: relative.to_path_buf(),
+                            line: index + 1,
+                            explanation: rule.description.clone(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -118,6 +122,7 @@ mod tests {
     const RULES: &str = r#"
         [[rule]]
         id = "test.everywhere"
+        engine = "line-regex"
         family = "test"
         stage = "run"
         severity = "low"
@@ -127,6 +132,7 @@ mod tests {
 
         [[rule]]
         id = "test.only-json"
+        engine = "line-regex"
         family = "test"
         stage = "ide"
         severity = "high"

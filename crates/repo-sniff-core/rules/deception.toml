@@ -2,6 +2,7 @@
 
 [[rule]]
 id          = "deception.bidi-control"
+engine      = "line-regex"
 family      = "trojan-source"
 stage       = "deception"
 severity    = "critical"

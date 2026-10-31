@@ -54,6 +54,7 @@ Rules are TOML files in `crates/repo-sniff-core/rules/`:
 ```toml
 [[rule]]
 id          = "deception.bidi-control"   # <stage>.<short-name>, unique
+engine      = "line-regex"               # how the rule matches (see below)
 family      = "trojan-source"            # groups related rules
 stage       = "deception"                # repo, ide, deps, build, tests, run, deception, obfuscation
 severity    = "critical"                 # info, low, medium, high, critical
@@ -63,6 +64,9 @@ example     = "src/auth.rs:12 contains U+202E"
 pattern     = '[\u{202A}-\u{202E}\u{2066}-\u{2069}]'
 files       = ["*.rs"]                   # optional; omitted means every file
 ```
+
+`engine = "line-regex"` matches a regular expression against each line and
+needs a `pattern`. Other engines are added as the scanner grows.
 
 Unknown fields, unknown stages, malformed ATT&CK IDs, invalid regexes and
 duplicate IDs are rejected when the rules load, so `cargo test` catches them.
