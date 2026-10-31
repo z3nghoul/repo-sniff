@@ -16,5 +16,5 @@ pub use checks::{FileCheck, FileCtx, FileIssue, Hit, JsoncCheck, RepoIndex};
 pub use finding::{Finding, Severity, Stage, UnknownSeverity};
 pub use rule::{Engine, Matcher, Rule, RuleError, builtin_rules, parse_rules};
 pub use sanitize::{display_path, display_safe};
-pub use scan::{Report, scan};
+pub use scan::{Report, Unlisted, scan};
 pub use walk::{Limits, SkipReason, Skipped, WalkResult, walk};

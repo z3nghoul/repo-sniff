@@ -137,7 +137,7 @@ Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
 | 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, a nested `.git` repository was not read, or an executable binary (ELF, PE, Mach-O) was not analyzed |
 
 Other binary files (images, archives, compressed test data) are read and listed
-as `binary, not analyzed`, and do not change the status. A scan is never
+as `binary format, ASCII rules only`, and do not change the status. A scan is never
 reported as clean when it could not vouch for what it looked at: the report ends
 with `Scan: INCONCLUSIVE` and says why, and the exit status is 3 even with
 `--fail-on none`. The executable-binary case goes away when the "committed
