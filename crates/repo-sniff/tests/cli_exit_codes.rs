@@ -256,13 +256,18 @@ fn compressed_test_files_are_listed_but_do_not_change_the_exit_status() {
 
     assert_eq!(code(&output), 0);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Not analyzed (3): 3 binary"), "{stdout}");
     assert!(
-        stdout.contains("data/a.gz  binary, not analyzed"),
+        stdout.contains("Not fully analyzed (3): 3 binary"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("Scan: complete (every file was read; 3 binary files were not analyzed)"),
+        stdout.contains("data/a.gz  binary format, ASCII rules only"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Scan: complete (every file was read; 3 binary files were read as ASCII only)"
+        ),
         "{stdout}"
     );
     assert!(!stdout.contains("INCONCLUSIVE"), "{stdout}");

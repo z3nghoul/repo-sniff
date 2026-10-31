@@ -43,12 +43,14 @@ pub enum SkipReason {
     Symlink {
         target: Option<PathBuf>,
     },
-    /// The file contains NUL bytes. It was read, but no rule looks inside a
-    /// binary of this kind yet, so it is reported as "binary, not analyzed".
+    /// The file has a known binary header, or NUL bytes and contents that do
+    /// not read as text. The line rules ran on its ASCII only, with the NUL
+    /// bytes removed, because a shell can still source such a file; nothing
+    /// looked inside the binary format itself.
     Binary,
-    /// Like `Binary`, and the magic bytes say it is an executable format
-    /// (ELF, PE, Mach-O, including fat binaries). It is code that runs, and
-    /// nothing analyzes it yet.
+    /// The magic bytes say it is an executable format (ELF, PE, Mach-O,
+    /// including fat binaries). It is code that runs, and nothing analyzes it
+    /// yet.
     Executable {
         format: &'static str,
     },
