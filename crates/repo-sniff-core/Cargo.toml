@@ -8,7 +8,11 @@ repository.workspace = true
 
 [dependencies]
 globset = "0.4.21"
+ignore = "0.4.34"
 regex = "1.13.1"
 serde.workspace = true
 thiserror = "2.0.21"
 toml = "1.1.8"
+
+[dev-dependencies]
+tempfile.workspace = true

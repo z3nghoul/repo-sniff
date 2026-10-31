@@ -23,7 +23,7 @@ architecture early.
 - [x] Split into a cargo workspace: `repo-sniff-core` (no UI) + `repo-sniff` binary
 - [x] `Finding`, `Severity` and `Stage` model
 - [x] Load rules from TOML with full metadata (id, family, stage, severity, ATT&CK, description, example)
-- [ ] Walk repository files with safety limits (no symlinks, size and count limits, `.gitignore` not honored)
+- [x] Walk repository files with safety limits (no symlinks, size and count limits, `.gitignore` not honored)
 - [ ] Line-based regex rule engine
 - [ ] Plain-text report showing severity, stage and ATT&CK ID per finding
 - [ ] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
