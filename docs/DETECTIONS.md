@@ -135,6 +135,7 @@ Known gap: a payload kept under another name and renamed to `*.pth` while the pa
 |---|---|---|---|
 | Trojan Source: Unicode bidi control characters (CVE-2021-42574) | CRITICAL | — | `deception.bidi-control` |
 | Code hidden with whitespace past the edge of the screen (beyond ~column 200) or after hundreds of blank lines | CRITICAL | T1027 | — |
+| NUL byte inside a script (script extension or shebang; UTF-16 files are not meant here). Shells and interpreters still run the file, but tools that take NUL for the mark of a binary stop reading at it. The script is scanned like any other text file | HIGH | T1027 | `deception.nul-byte-in-script` |
 | Invisible (zero-width) characters and homoglyphs in identifiers (Cyrillic `а` instead of Latin `a`) | HIGH | T1036 | — |
 | README advising "disable your antivirus", "download the password-protected zip", `curl \| bash` | HIGH | T1204 | — |
 
