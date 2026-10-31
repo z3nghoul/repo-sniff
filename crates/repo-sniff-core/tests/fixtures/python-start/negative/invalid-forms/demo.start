@@ -1,0 +1,15 @@
+# SYNTHETIC TEST FIXTURE — not functional
+:run
+demo.mod:
+1demo.mod:run
+demo.1mod:run
+demo.mod:1run
+demo mod:run
+demo.mod:run extra
+demo.mod:ru-n
+demo::mod:run
+demo.:run
+demo.mod:run.
+demo.mod:run  # note
+.demo:run
+demo.mod:run;

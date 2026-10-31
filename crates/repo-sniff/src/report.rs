@@ -56,7 +56,8 @@ pub fn render(report: &Report, target: &str) -> String {
         for skipped in report.skipped.iter().take(MAX_SKIPPED_SHOWN) {
             let reason = match &skipped.reason {
                 SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
-                SkipReason::Symlink => "symlink, not followed".to_string(),
+                SkipReason::Symlink { .. } => "symlink, not followed".to_string(),
+                SkipReason::Binary => "binary file, not scanned for text patterns".to_string(),
                 SkipReason::Unreadable { error } => format!("unreadable: {error}"),
             };
             let _ = writeln!(
@@ -129,13 +130,43 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_of_skipped_file_is_listed_with_its_reason() {
+        let skip = |name: &str, reason| Skipped {
+            path: PathBuf::from(name),
+            reason,
+        };
+        let report = Report {
+            skipped: vec![
+                skip("a.bin", SkipReason::Binary),
+                skip("big.txt", SkipReason::TooLarge { size: 99 }),
+                skip("link", SkipReason::Symlink { target: None }),
+                skip(
+                    "locked",
+                    SkipReason::Unreadable {
+                        error: "denied".to_string(),
+                    },
+                ),
+            ],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(text.contains("Not scanned (4):"), "{text}");
+        assert!(text.contains("a.bin  binary file"), "{text}");
+        assert!(text.contains("big.txt  too large (99 bytes)"), "{text}");
+        assert!(text.contains("link  symlink, not followed"), "{text}");
+        assert!(text.contains("locked  unreadable: denied"), "{text}");
+    }
+
+    #[test]
     fn hostile_file_names_cannot_inject_terminal_escapes() {
         let hostile = PathBuf::from("a\u{1b}[2Jb\nHIGH      forged.rs:1");
         let report = Report {
             findings: vec![finding(hostile.clone())],
             skipped: vec![Skipped {
                 path: hostile,
-                reason: SkipReason::Symlink,
+                reason: SkipReason::Symlink { target: None },
             }],
             files_scanned: 1,
             ..Report::default()

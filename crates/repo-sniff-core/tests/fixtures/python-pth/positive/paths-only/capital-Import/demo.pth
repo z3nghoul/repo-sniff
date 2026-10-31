@@ -1,0 +1,2 @@
+# SYNTHETIC TEST FIXTURE — not functional
+Import sys; print('hello')

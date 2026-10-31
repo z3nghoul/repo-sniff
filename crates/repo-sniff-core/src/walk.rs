@@ -35,9 +35,18 @@ impl Default for Limits {
 /// Why a path was not scanned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
-    TooLarge { size: u64 },
-    Symlink,
-    Unreadable { error: String },
+    TooLarge {
+        size: u64,
+    },
+    /// A symbolic link; `target` is where it points, when that can be read.
+    Symlink {
+        target: Option<PathBuf>,
+    },
+    /// The file contains NUL bytes, so line rules do not apply to it.
+    Binary,
+    Unreadable {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +100,9 @@ pub fn walk(root: &Path, limits: Limits) -> WalkResult {
         if file_type.is_symlink() {
             result.skipped.push(Skipped {
                 path,
-                reason: SkipReason::Symlink,
+                reason: SkipReason::Symlink {
+                    target: std::fs::read_link(entry.path()).ok(),
+                },
             });
             continue;
         }
@@ -194,7 +205,9 @@ mod tests {
             result.skipped,
             [Skipped {
                 path: PathBuf::from("etc-link"),
-                reason: SkipReason::Symlink,
+                reason: SkipReason::Symlink {
+                    target: Some(PathBuf::from("/etc")),
+                },
             }]
         );
     }

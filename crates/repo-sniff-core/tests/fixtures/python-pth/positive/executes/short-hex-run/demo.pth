@@ -1,0 +1,2 @@
+# SYNTHETIC TEST FIXTURE — not functional
+import sys; x = '0123456789abcdef01234567'

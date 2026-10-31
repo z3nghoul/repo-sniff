@@ -1,0 +1,18 @@
+# Expected findings of rule deps.python-start-entrypoint for the fixtures in this directory.
+# Each case directory (positive/<group>/<case>, negative/<case>) is scanned on its own.
+# Columns, tab separated: file<TAB>line<TAB>severity
+# A file that is not listed must produce no finding.
+positive/entry-points/crlf-line-numbers/demo.start	4	HIGH
+positive/entry-points/dotted-object/demo.start	2	HIGH
+positive/entry-points/last-line-without-newline/demo.start	2	HIGH
+positive/entry-points/leading-whitespace/demo.start	2	HIGH
+positive/entry-points/multiple-lines/demo.start	2	HIGH
+positive/entry-points/multiple-lines/demo.start	4	HIGH
+positive/entry-points/plain/demo.start	2	HIGH
+positive/entry-points/separator-lone-cr/demo.start	3	HIGH
+positive/entry-points/separator-nel-85/demo.start	3	HIGH
+positive/entry-points/unicode-name/demo.start	2	HIGH
+positive/inert/dot-prefixed/.hidden.start	2	LOW
+positive/inert/mixed-extension/Demo.Start	2	LOW
+positive/inert/upper-extension/DEMO.START	2	LOW
+positive/pairs/with-pth/foo.start	2	HIGH
