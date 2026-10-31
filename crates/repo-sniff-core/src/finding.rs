@@ -1,0 +1,166 @@
+//! What the scanner reports: one `Finding` per suspicious spot.
+
+use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use serde::Deserialize;
+use thiserror::Error;
+
+/// How serious a finding is.
+///
+/// Variants are declared from least to most severe, so the derived `Ord`
+/// lets us compare levels directly: `Severity::High > Severity::Low`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl Severity {
+    /// The untranslatable code shown in every report and UI.
+    pub fn code(self) -> &'static str {
+        match self {
+            Severity::Info => "INFO",
+            Severity::Low => "LOW",
+            Severity::Medium => "MEDIUM",
+            Severity::High => "HIGH",
+            Severity::Critical => "CRITICAL",
+        }
+    }
+}
+
+/// The text is not the name of a severity level.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown severity `{0}`; expected one of: info, low, medium, high, critical")]
+pub struct UnknownSeverity(pub String);
+
+impl FromStr for Severity {
+    type Err = UnknownSeverity;
+
+    /// Accepts the level names in any letter case: `high`, `HIGH`, `High`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.to_ascii_lowercase().as_str() {
+            "info" => Ok(Severity::Info),
+            "low" => Ok(Severity::Low),
+            "medium" => Ok(Severity::Medium),
+            "high" => Ok(Severity::High),
+            "critical" => Ok(Severity::Critical),
+            _ => Err(UnknownSeverity(text.to_string())),
+        }
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+/// The step on a developer's machine at which the flagged code would run.
+/// Mirrors the stages in `docs/DETECTIONS.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    /// The repository contents themselves, right after cloning.
+    Repo,
+    /// Opening the project in an IDE.
+    Ide,
+    /// Installing dependencies.
+    Deps,
+    /// Building.
+    Build,
+    /// Running tests.
+    Tests,
+    /// Running the program.
+    Run,
+    /// Tricks aimed at the human reading the code.
+    Deception,
+    /// Hiding what code does.
+    Obfuscation,
+}
+
+impl Stage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Repo => "repo",
+            Stage::Ide => "ide",
+            Stage::Deps => "deps",
+            Stage::Build => "build",
+            Stage::Tests => "tests",
+            Stage::Run => "run",
+            Stage::Deception => "deception",
+            Stage::Obfuscation => "obfuscation",
+        }
+    }
+}
+
+impl fmt::Display for Stage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A single suspicious spot found by a rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub rule_id: String,
+    pub severity: Severity,
+    pub stage: Stage,
+    /// MITRE ATT&CK technique IDs, e.g. `T1547.001`. May be empty.
+    pub attack: Vec<String>,
+    /// Path relative to the scanned repository root.
+    pub file: PathBuf,
+    /// 1-based line number.
+    pub line: usize,
+    /// Why this is suspicious, in plain words.
+    pub explanation: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn severities_are_ordered_from_info_to_critical() {
+        assert!(Severity::Info < Severity::Low);
+        assert!(Severity::Low < Severity::Medium);
+        assert!(Severity::Medium < Severity::High);
+        assert!(Severity::High < Severity::Critical);
+    }
+
+    #[test]
+    fn severity_parses_names_in_any_case() {
+        assert_eq!("high".parse(), Ok(Severity::High));
+        assert_eq!("CRITICAL".parse(), Ok(Severity::Critical));
+        assert_eq!("Info".parse(), Ok(Severity::Info));
+        // The code shown in reports can be fed back as input.
+        for severity in [
+            Severity::Info,
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ] {
+            assert_eq!(severity.code().parse(), Ok(severity));
+        }
+    }
+
+    #[test]
+    fn unknown_severity_is_an_error_naming_the_input() {
+        let err = "urgent".parse::<Severity>().unwrap_err();
+        assert_eq!(err, UnknownSeverity("urgent".to_string()));
+        assert!(err.to_string().contains("`urgent`"));
+        assert!("".parse::<Severity>().is_err());
+    }
+
+    #[test]
+    fn severity_displays_as_untranslatable_code() {
+        assert_eq!(Severity::Critical.to_string(), "CRITICAL");
+        assert_eq!(Severity::Info.to_string(), "INFO");
+    }
+}

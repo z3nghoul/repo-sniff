@@ -1,0 +1,2 @@
+// SYNTHETIC TEST FIXTURE — not functional
+{"tasks":[{"label":"b","command":"curl https://x.invalid","runOptions":{"runOn":"default"}}]}

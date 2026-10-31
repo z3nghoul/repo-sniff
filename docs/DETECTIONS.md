@@ -56,7 +56,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| `.vscode/tasks.json` with `"runOn": "folderOpen"` | HIGH, with network or shell CRITICAL | — | — |
+| `.vscode/tasks.json` or `*.code-workspace` with a task using `"runOn": "folderOpen"` (parsed as JSONC, so comments, line breaks and `\u` escapes cannot hide it; the per-OS `windows`/`linux`/`osx` overrides are checked too) | HIGH, with network or shell CRITICAL | — | `ide.vscode-folder-open-task` |
 | `.vscode/settings.json` overriding the interpreter, terminal or environment | HIGH | — | — |
 | `Directory.Build.props` / `Directory.Build.targets`, custom MSBuild tasks (Visual Studio evaluates them on project load) | HIGH | T1127.001 | — |
 | .NET analyzers / source generators shipped as DLLs in the repo (a binary runs inside the IDE) | CRITICAL | — | — |
@@ -69,7 +69,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 |---|---|---|---|
 | npm `preinstall` / `install` / `postinstall` / `prepare` | HIGH, with network, exec or obfuscation CRITICAL | T1195.001 | — |
 | `setup.py` containing code other than the `setup()` call | HIGH | T1195.001 | — |
-| `.pth` files (executed on every Python start-up) | CRITICAL | T1546 | — |
+| `.pth` files with a line Python executes at start-up (a line starting with `import` followed by a space or tab). A line counts if any supported Python version would run it, so lines are split the way the most permissive version does it. Paths only: INFO. Known honest form (exact file name and content, e.g. setuptools): LOW. Any other executable line: HIGH. An executable line using `exec`, `eval`, `compile`, `__import__`, `base64`, `zlib`, `marshal`, `codecs`, `subprocess`, `os.system`, `socket`, `urllib` or `requests`, or a long or high-entropy one: CRITICAL | INFO to CRITICAL | T1546.018 | — |
 | Custom build backend inside the repo (pyproject.toml) | HIGH | T1195.001 | — |
 | Lockfile resolving a package from outside the official registry | HIGH | T1195.001 | — |
 | Typosquatted package names | HIGH | T1195.001 | — |
@@ -122,7 +122,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| Trojan Source: Unicode bidi control characters (CVE-2021-42574) | CRITICAL | — | — |
+| Trojan Source: Unicode bidi control characters (CVE-2021-42574) | CRITICAL | — | `deception.bidi-control` |
 | Code hidden with whitespace past the edge of the screen (beyond ~column 200) or after hundreds of blank lines | CRITICAL | T1027 | — |
 | Invisible (zero-width) characters and homoglyphs in identifiers (Cyrillic `а` instead of Latin `a`) | HIGH | T1036 | — |
 | README advising "disable your antivirus", "download the password-protected zip", `curl \| bash` | HIGH | T1204 | — |
@@ -221,7 +221,19 @@ scanner itself:
 - limits on file size, decoding recursion depth and number of files;
 - never unpack archives (zip-bomb protection), only flag them;
 - regular expressions only through the `regex` crate (linear-time matching,
-  protection against ReDoS).
+  protection against ReDoS);
+- remote repositories are cloned shallowly over `https` or `ssh` only
+  (`http://` and `git://` are refused), with hooks redirected to an empty
+  directory, Git LFS filters skipped, submodules not fetched and credential
+  prompts disabled; the `--ref` value is passed to git as a single argument
+  and validated first, and error text coming back from a git server is
+  cleaned before it is printed;
+- text taken from the scanned repository (task labels, file names) is passed
+  through `display_safe` before it is reported, so it cannot inject terminal
+  escape sequences, forge extra lines or reorder text with bidi characters;
+- structured files (JSON-like) are parsed rather than matched line by line,
+  with a nesting limit, so comments and escapes cannot hide a setting and a
+  deeply nested file cannot overflow the stack;
 - localizations load only from the built-in set and the OS config directory,
   never from the scanned repository, so a repository cannot change what the
   report says; third-party locale text is stripped of control, bidi and
@@ -234,8 +246,8 @@ scanner itself:
 published in the README.
 
 **What we scan.** The branch or tag the user is going to build (the default
-branch unless told otherwise), not the whole history. The ref can be passed
-as an argument.
+branch unless told otherwise), not the whole history. For a remote
+repository the ref is chosen with `--ref` (a branch or tag).
 
 **Implementation order.** Stages 0–3 (automatic execution) and stage 6
 (Trojan Source, whitespace hiding) first, because they give the most value
