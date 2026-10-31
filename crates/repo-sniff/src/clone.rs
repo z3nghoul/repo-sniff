@@ -18,6 +18,8 @@ use anyhow::{Context, Result, bail};
 use repo_sniff_core::display_safe;
 use tempfile::TempDir;
 
+use crate::redact::redact_credentials;
+
 /// URL schemes that send the repository over the network unencrypted.
 const PLAIN_TEXT_SCHEMES: &[&str] = &["http://", "git://"];
 
@@ -76,13 +78,20 @@ const PASS_THROUGH: &[&str] = &[
 ///   submodules are not fetched, objects are checked for corruption;
 /// - there are no interactive prompts.
 pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<TempDir> {
+    validate(url, git_ref)?;
+    clone_unchecked(url, git_ref, ALLOWED_PROTOCOLS, |name| {
+        std::env::var_os(name)
+    })
+}
+
+/// Checks a target before anything is announced or started: only an https
+/// URL and a sensible ref pass.
+pub fn validate(url: &str, git_ref: Option<&str>) -> Result<()> {
     ensure_https_only(url)?;
     if let Some(git_ref) = git_ref {
         validate_ref(git_ref)?;
     }
-    clone_unchecked(url, git_ref, ALLOWED_PROTOCOLS, |name| {
-        std::env::var_os(name)
-    })
+    Ok(())
 }
 
 /// The clone itself, without looking at the URL. `protocols` is the list of
@@ -118,14 +127,20 @@ fn clone_unchecked(
         .context("failed to run `git`; is it installed and on PATH?")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git clone of {url} failed: {}",
-            display_safe(stderr.trim(), MAX_GIT_ERROR_CHARS)
-        );
+        return Err(clone_failure(url, &String::from_utf8_lossy(&output.stderr)));
     }
 
     Ok(dir)
+}
+
+/// The error for a failed clone. Both the URL and git's text are cleaned:
+/// git repeats the URL it was given, user information included.
+fn clone_failure(url: &str, stderr: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "git clone of {} failed: {}",
+        redact_credentials(url),
+        display_safe(&redact_credentials(stderr.trim()), MAX_GIT_ERROR_CHARS)
+    )
 }
 
 /// The environment git runs in: the allowed variables from `source`, plus the
@@ -460,6 +475,34 @@ mod tests {
         assert_eq!(env["GIT_CONFIG_GLOBAL"], "/empty-config");
         assert_eq!(env["GIT_CONFIG_NOSYSTEM"], "1");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
+    }
+
+    #[test]
+    fn a_failed_clone_never_shows_credentials_from_the_url_or_from_git() {
+        let url = "https://TOKEN@example.invalid/owner/repo";
+        let git_text = "fatal: unable to access 'https://TOKEN@example.invalid/owner/repo/': \
+                        Could not resolve host: example.invalid";
+
+        let message = clone_failure(url, git_text).to_string();
+
+        assert!(!message.contains("TOKEN"), "{message}");
+        assert!(
+            message.contains("https://***@example.invalid/owner/repo"),
+            "{message}"
+        );
+        assert!(message.contains("Could not resolve host"), "{message}");
+    }
+
+    #[test]
+    fn refusing_a_url_does_not_repeat_it() {
+        for url in [
+            "http://TOKEN@example.invalid/x",
+            "ssh://TOKEN@example.invalid/x",
+            "ftp://TOKEN@example.invalid/x",
+        ] {
+            let message = ensure_https_only(url).unwrap_err().to_string();
+            assert!(!message.contains("TOKEN"), "{url}: {message}");
+        }
     }
 
     #[test]

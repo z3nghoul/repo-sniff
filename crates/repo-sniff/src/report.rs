@@ -4,6 +4,8 @@ use std::fmt::Write;
 
 use repo_sniff_core::{Report, Severity, SkipReason, display_path, display_safe};
 
+use crate::redact::redact_credentials;
+
 /// Severity levels from most to least serious, the order the report uses.
 const SEVERITIES_DESC: [Severity; 5] = [
     Severity::Critical,
@@ -24,6 +26,8 @@ const MAX_SKIPPED_SHOWN: usize = 10;
 pub fn render(report: &Report, target: &str) -> String {
     let mut out = String::new();
     // Writing to a String cannot fail, so the `fmt::Result`s are ignored.
+    // The label is what the user typed, so it may hold a token in the URL.
+    let target = redact_credentials(target);
     let _ = writeln!(out, "Scanned {} files in {target}\n", report.files_scanned);
 
     let mut findings: Vec<_> = report.findings.iter().collect();
@@ -125,6 +129,19 @@ mod tests {
         let text = render(&report, "repo");
         assert!(
             text.contains("HIGH      src/lib.rs:3  test.rule  [run]"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn credentials_in_the_target_label_are_hidden() {
+        let report = Report::default();
+
+        let text = render(&report, "https://TOKEN@github.com/owner/repo (ref v1)");
+
+        assert!(!text.contains("TOKEN"), "{text}");
+        assert!(
+            text.contains("Scanned 0 files in https://***@github.com/owner/repo (ref v1)"),
             "{text}"
         );
     }
