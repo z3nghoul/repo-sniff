@@ -119,3 +119,31 @@ fn missing_target_is_a_runtime_error() {
     assert_eq!(code(&output), 2);
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot access"));
 }
+
+#[test]
+fn ref_with_a_local_directory_is_a_runtime_error() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run(dir.path(), &["scan", ".", "--ref", "main"]);
+
+    assert_eq!(code(&output), 2);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("remote repository"));
+}
+
+#[test]
+fn option_like_ref_is_rejected_before_any_network_access() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // `=` keeps clap from reading the value as a flag of its own.
+    let output = run(
+        dir.path(),
+        &[
+            "scan",
+            "https://example.invalid/repo",
+            "--ref=--upload-pack=x",
+        ],
+    );
+
+    assert_eq!(code(&output), 2);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--ref must not start with"));
+}

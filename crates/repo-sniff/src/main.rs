@@ -47,6 +47,11 @@ enum Command {
             value_parser = fail_on::parse
         )]
         fail_on: FailOn,
+
+        /// Branch or tag to scan. Only for remote repositories; by default
+        /// the repository's default branch is scanned.
+        #[arg(long = "ref", value_name = "REF")]
+        git_ref: Option<String>,
     },
 }
 
@@ -64,13 +69,23 @@ fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Scan { target, fail_on } => scan(&target, fail_on),
+        Command::Scan {
+            target,
+            fail_on,
+            git_ref,
+        } => scan(&target, git_ref.as_deref(), fail_on),
     }
 }
 
-fn scan(raw_target: &str, fail_on: FailOn) -> Result<ExitCode> {
+fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<ExitCode> {
     match Target::parse(raw_target) {
         Target::Local(path) => {
+            if git_ref.is_some() {
+                bail!(
+                    "--ref selects what to clone, so it only works with a remote repository; \
+                     check out the branch or tag yourself before scanning a local directory"
+                );
+            }
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot access {}", path.display()))?;
@@ -83,8 +98,12 @@ fn scan(raw_target: &str, fail_on: FailOn) -> Result<ExitCode> {
             eprintln!("Cloning {url}");
             // `checkout` must stay alive until the scan ends: dropping it
             // deletes the cloned files.
-            let checkout = clone::shallow_clone(&url)?;
-            scan_dir(checkout.path(), raw_target, fail_on)
+            let checkout = clone::shallow_clone(&url, git_ref)?;
+            let label = match git_ref {
+                Some(git_ref) => format!("{raw_target} (ref {git_ref})"),
+                None => raw_target.to_string(),
+            };
+            scan_dir(checkout.path(), &label, fail_on)
         }
     }
 }
