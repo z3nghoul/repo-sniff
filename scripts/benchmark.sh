@@ -54,7 +54,7 @@ for repo in "${REPOS[@]}"; do
 
   summary="$(grep '^Summary:' "$OUT/$name.txt" | tail -1)"
   count() { echo "$summary" | sed -n "s/.* \([0-9]*\) $1.*/\1/p"; }
-  skipped="$(sed -n 's/^Not analyzed ([0-9]*): //p' "$OUT/$name.txt" | head -1)"
+  skipped="$(sed -n 's/^Not fully analyzed ([0-9]*): //p' "$OUT/$name.txt" | head -1)"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$repo" "$head" "$result" "$code" \
     "$(count critical)" "$(count high)" "$(count medium)" "$(count low)" "$(count info)" \
