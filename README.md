@@ -34,15 +34,18 @@ What it does to protect you:
   configuration runs, hooks and templates are off, symlinks are written as
   plain files, and submodules are not fetched. There are no interactive
   prompts. For a private repository, clone it yourself and scan the folder.
-- **Secrets.** A token pasted into a URL is hidden in everything the tool
-  prints.
+- **Secrets.** A token pasted into a URL (`https://TOKEN@host/...`) is hidden
+  in the notice, the report and error messages. Passwords containing `?` or `#`
+  and scp-like targets are known gaps.
 - **Reading.** Symlinks are never followed. File names and text taken from the
   repository are cleaned before they are printed, so a hostile repository
   cannot paint over the report. The work per file is bounded.
 - **Honesty.** A scan is never reported as clean when it cannot vouch for what
   it looked at: if the file limit was reached, a file was too large or could
-  not be read, or an executable binary (ELF, PE, Mach-O) was not analyzed, the
-  report says `INCONCLUSIVE` and the exit status is 3. Other binary files
+  not be read, a repository nested inside it (a `.git` folder below the root)
+  was not read, or an executable binary (ELF, PE, Mach-O including 64-bit fat
+  binaries) was not analyzed, the report says `INCONCLUSIVE` and the exit
+  status is 3. Other binary files
   (images, archives, compressed data) are read and listed as `binary, not
   analyzed`: no rule looks inside them yet.
 
@@ -128,18 +131,19 @@ Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
 
 | Status | Meaning |
 |---|---|
-| 0 | The scan read every file and nothing reached the `--fail-on` threshold |
+| 0 | Nothing reached the `--fail-on` threshold, and the scan was not inconclusive (files it did not analyze are listed in the report) |
 | 1 | The scan found something at or above the threshold |
 | 2 | The scan could not run (bad target, clone failure, wrong options) |
-| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, or an executable binary (ELF, PE, Mach-O) was not analyzed |
+| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, a nested `.git` repository was not read, or an executable binary (ELF, PE, Mach-O) was not analyzed |
 
 Other binary files (images, archives, compressed test data) are read and listed
 as `binary, not analyzed`, and do not change the status. A scan is never
 reported as clean when it could not vouch for what it looked at: the report ends
 with `Scan: INCONCLUSIVE` and says why, and the exit status is 3 even with
 `--fail-on none`. The executable-binary case goes away when the "committed
-binaries" rule exists, because then such a file is a finding. This makes `repo-sniff scan . --fail-on high` usable as
-a CI check without mistaking "nothing found in what was read" for "safe".
+binaries" rule exists, because then such a file is a finding. The `.git` folder at the root is listed as
+`git metadata, not analyzed` and does not change the status. This makes
+`repo-sniff scan . --fail-on high` usable as a CI check without mistaking "nothing found in what was read" for "safe".
 
 ## Development
 
