@@ -74,7 +74,7 @@ Finish the open work, close the holes that make a scan lie, then merge
 - [x] Credentials in URLs (`https://TOKEN@host/...`) redacted in every message, the report label and error output; test for each output path
 - [x] Incomplete scan is never a pass: an INCONCLUSIVE result with its own exit code (3) when bytes were not read (the walk was truncated, a file was too large or could not be read) or an executable binary (ELF, PE, Mach-O including fat binaries, by magic bytes) was not analyzed; other binary files that were read are listed as "binary, not analyzed" and do not change the status; the report says what was not read. Test with padding files that push a payload past the file limit
 - [x] Text-like files with NUL bytes still reach line rules: a file with a script extension or a shebang is not treated as binary because of NUL bytes; the NUL itself is reported as concealment (`bash` and `node` run such files). Test with a `.sh` that has a NUL in a comment
-- [ ] Documentation matches the code: remove "prompts disabled" and "LFS filters skipped" over-claims from `CONTRIBUTING.md`, `docs/DETECTIONS.md` section 5 and the README; state the real guarantees ("no filters from any config run", "no interactive prompts", "an incomplete scan is never reported as clean"); never promise absolute safety
+- [x] Documentation matches the code: remove "prompts disabled" and "LFS filters skipped" over-claims from `CONTRIBUTING.md`, `docs/DETECTIONS.md` section 5 and the README; state the real guarantees ("no filters from any config run", "no interactive prompts", "an incomplete scan is never reported as clean"); never promise absolute safety
 - [ ] Merge both pull requests into `main`
 
 ### Architecture refactor (before the next rule family)
