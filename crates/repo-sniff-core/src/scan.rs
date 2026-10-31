@@ -1,7 +1,8 @@
 //! Running rules over a repository.
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
 use crate::checks::{FileCheck, FileCtx, FileIssue, RepoIndex};
@@ -9,6 +10,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
 use crate::sanitize::{display_safe, to_slash};
 use crate::walk::{self, Limits, SkipReason, Skipped};
+use regex::Regex;
 
 /// Explanations built from text in the scanned repository are cut to this.
 const MAX_EXPLANATION_CHARS: usize = 300;
@@ -139,8 +141,35 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
     };
     let mut skipped = walked.skipped;
 
+    let has_file_rule = |slash_path: &str| {
+        file_rules
+            .iter()
+            .any(|(rule, _)| rule.applies_to(slash_path))
+    };
+
     for relative in &walked.files {
         let slash_path = to_slash(relative);
+
+        // A file too big to hold in memory is read as a stream, and only the
+        // line rules look at it.
+        let size = fs::metadata(root.join(relative)).map_or(0, |metadata| metadata.len());
+        if size > limits.max_buffered_size {
+            let streamed = scan_streamed(
+                root,
+                relative,
+                &slash_path,
+                size,
+                rules,
+                &limits,
+                has_file_rule(&slash_path),
+                &mut report.unlisted,
+            );
+            report.findings.extend(streamed.findings);
+            report.files_scanned += usize::from(streamed.scanned);
+            skipped.extend(streamed.skipped);
+            continue;
+        }
+
         let bytes = match fs::read(root.join(relative)) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -365,6 +394,246 @@ fn resolve_inside(link: &Path, target: &Path) -> Option<PathBuf> {
     Some(resolved.into_iter().collect())
 }
 
+/// Runs the line-regex rules over lines fed one at a time, keeping at most
+/// `MAX_LINE_FINDINGS_PER_RULE` findings per rule and counting the rest.
+struct LineScanner<'a> {
+    rules: Vec<(&'a Rule, &'a Regex)>,
+    listed: Vec<usize>,
+    hidden: Vec<usize>,
+    findings: Vec<Finding>,
+}
+
+impl<'a> LineScanner<'a> {
+    fn new(rules: &[&'a Rule]) -> Self {
+        let rules: Vec<_> = rules
+            .iter()
+            .filter_map(|&rule| match &rule.matcher {
+                Matcher::LineRegex(pattern) => Some((rule, pattern)),
+                _ => None,
+            })
+            .collect();
+        LineScanner {
+            listed: vec![0; rules.len()],
+            hidden: vec![0; rules.len()],
+            rules,
+            findings: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    fn feed(&mut self, relative: &Path, line_number: usize, line: &str) {
+        for (index, (rule, pattern)) in self.rules.iter().enumerate() {
+            if !pattern.is_match(line) {
+                continue;
+            }
+            if self.listed[index] == MAX_LINE_FINDINGS_PER_RULE {
+                self.hidden[index] += 1;
+                continue;
+            }
+            self.listed[index] += 1;
+            self.findings.push(Finding {
+                rule_id: rule.id.clone(),
+                severity: rule.severity,
+                stage: rule.stage,
+                attack: rule.attack.clone(),
+                file: relative.to_path_buf(),
+                line: line_number,
+                explanation: rule.description.clone(),
+            });
+        }
+    }
+
+    fn finish(self, relative: &Path, unlisted: &mut Vec<Unlisted>) -> Vec<Finding> {
+        for ((rule, _), hidden) in self.rules.iter().zip(&self.hidden) {
+            if *hidden > 0 {
+                unlisted.push(Unlisted {
+                    file: relative.to_path_buf(),
+                    rule_id: rule.id.clone(),
+                    severity: rule.severity,
+                    count: *hidden,
+                });
+            }
+        }
+        self.findings
+    }
+}
+
+/// What reading one large file as a stream produced.
+#[derive(Default)]
+struct Streamed {
+    findings: Vec<Finding>,
+    skipped: Vec<Skipped>,
+    /// Whether the line rules read the file.
+    scanned: bool,
+}
+
+/// Scans a file that is too big to hold in memory, one line at a time.
+///
+/// It is classified like a small file: an executable is listed and not read
+/// further; a script keeps its NUL rule; data that does not read as text is
+/// read as ASCII only. That needs two passes: the first measures the file
+/// (`NulProbe`), the second runs the line rules. Rules that need the whole
+/// file (file-level and JSONC rules) cannot run, so if one applies the file is
+/// listed as too large, which makes the scan inconclusive, as before.
+#[allow(clippy::too_many_arguments)]
+fn scan_streamed(
+    root: &Path,
+    relative: &Path,
+    slash_path: &str,
+    size: u64,
+    rules: &[Rule],
+    limits: &Limits,
+    file_rule_applies: bool,
+    unlisted: &mut Vec<Unlisted>,
+) -> Streamed {
+    let mut out = Streamed::default();
+    let unreadable = |err: io::Error| Skipped {
+        path: relative.to_path_buf(),
+        reason: SkipReason::Unreadable {
+            error: err.to_string(),
+        },
+    };
+    let path = root.join(relative);
+
+    let mut head = Vec::new();
+    let read_head = File::open(&path)
+        .and_then(|file| file.take(BINARY_SNIFF_LEN as u64).read_to_end(&mut head));
+    if let Err(err) = read_head {
+        out.skipped.push(unreadable(err));
+        return out;
+    }
+    if looks_binary(&head)
+        && let Some(format) = executable_format(&head)
+    {
+        out.skipped.push(Skipped {
+            path: relative.to_path_buf(),
+            reason: SkipReason::Executable { format },
+        });
+        return out;
+    }
+
+    let applicable: Vec<&Rule> = rules
+        .iter()
+        .filter(|rule| rule.applies_to(slash_path))
+        .collect();
+    let whole_file_rule = file_rule_applies
+        || applicable
+            .iter()
+            .any(|rule| matches!(rule.matcher, Matcher::Jsonc(_)));
+    let too_large = Skipped {
+        path: relative.to_path_buf(),
+        reason: SkipReason::TooLarge { size },
+    };
+    let script = is_script(slash_path, &head);
+    if has_utf16_bom(&head) && has_script_extension(slash_path) {
+        // Decoding UTF-16 needs the whole file; nothing can be said about it.
+        out.skipped.push(too_large);
+        return out;
+    }
+    if whole_file_rule {
+        out.skipped.push(too_large);
+    }
+
+    // First pass: how much of the file is NUL, and is the rest text.
+    let mut probe = NulProbe::default();
+    let measured = File::open(&path).and_then(|mut file| {
+        let mut chunk = vec![0; 64 * 1024];
+        loop {
+            match file.read(&mut chunk)? {
+                0 => return Ok(()),
+                n => probe.feed(&chunk[..n]),
+            }
+        }
+    });
+    if let Err(err) = measured {
+        out.skipped.push(unreadable(err));
+        return out;
+    }
+    let binary_looking = !script
+        && ((looks_binary(&head) && known_binary_magic(&head))
+            || (probe.nuls > 0 && !probe.is_text()));
+    if binary_looking {
+        out.skipped.push(Skipped {
+            path: relative.to_path_buf(),
+            reason: SkipReason::Binary,
+        });
+    }
+    let nul_line = if script { probe.first_nul_line } else { None };
+
+    for rule in &applicable {
+        if let (Matcher::NulByte, Some(line)) = (&rule.matcher, nul_line) {
+            out.findings.push(Finding {
+                rule_id: rule.id.clone(),
+                severity: rule.severity,
+                stage: rule.stage,
+                attack: rule.attack.clone(),
+                file: relative.to_path_buf(),
+                line,
+                explanation: rule.description.clone(),
+            });
+        }
+    }
+
+    // Second pass: the line rules.
+    let mut lines = LineScanner::new(&applicable);
+    if !lines.is_empty() {
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                out.skipped.push(unreadable(err));
+                return out;
+            }
+        };
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut number = 0;
+        loop {
+            line.clear();
+            let cap = limits.max_line_size as u64 + 1;
+            match (&mut reader).take(cap).read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(err) => {
+                    out.skipped.push(unreadable(err));
+                    break;
+                }
+            }
+            number += 1;
+            if line.len() > limits.max_line_size && line.last() != Some(&b'\n') {
+                out.skipped.push(Skipped {
+                    path: relative.to_path_buf(),
+                    reason: SkipReason::LineTooLong { line: number },
+                });
+                break;
+            }
+            if line.last() == Some(&b'\n') {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+            }
+            let text = if binary_looking {
+                ascii_only_text(&line)
+            } else {
+                text_without_nuls(&line)
+            };
+            lines.feed(relative, number, &text);
+        }
+    }
+    let mut found = lines.finish(relative, unlisted);
+    if binary_looking {
+        for finding in &mut found {
+            finding.explanation.push_str(BINARY_LOOKING_NOTE);
+        }
+    }
+    out.findings.append(&mut found);
+    out.scanned = true;
+    out
+}
+
 /// Runs line, JSONC and other text rules over one file's text. `relative` is
 /// the path shown in findings; `slash_path` is matched against each rule's
 /// `files` globs.
@@ -385,38 +654,15 @@ fn scan_text(
     }
 
     let mut findings = Vec::new();
+    let mut lines = LineScanner::new(&applicable);
+    for (index, line) in text.lines().enumerate() {
+        lines.feed(relative, index + 1, line);
+    }
+    findings.extend(lines.finish(relative, unlisted));
     for rule in applicable {
         match &rule.matcher {
-            Matcher::LineRegex(pattern) => {
-                let mut listed = 0;
-                let mut hidden = 0;
-                for (index, line) in text.lines().enumerate() {
-                    if pattern.is_match(line) {
-                        if listed == MAX_LINE_FINDINGS_PER_RULE {
-                            hidden += 1;
-                            continue;
-                        }
-                        listed += 1;
-                        findings.push(Finding {
-                            rule_id: rule.id.clone(),
-                            severity: rule.severity,
-                            stage: rule.stage,
-                            attack: rule.attack.clone(),
-                            file: relative.to_path_buf(),
-                            line: index + 1,
-                            explanation: rule.description.clone(),
-                        });
-                    }
-                }
-                if hidden > 0 {
-                    unlisted.push(Unlisted {
-                        file: relative.to_path_buf(),
-                        rule_id: rule.id.clone(),
-                        severity: rule.severity,
-                        count: hidden,
-                    });
-                }
-            }
+            // Done above, in one pass over the lines.
+            Matcher::LineRegex(_) => {}
             Matcher::Jsonc(check) => {
                 for hit in check(slash_path, text, rule.severity) {
                     findings.push(Finding {
@@ -563,11 +809,23 @@ struct NulProbe {
     /// The start of a multi-byte UTF-8 sequence cut off by the end of a chunk.
     pending: Vec<u8>,
     invalid: bool,
+    /// Lines ended before the first NUL byte, counted until it is found.
+    newlines: usize,
+    /// The 1-based line of the first NUL byte, counting `\n` as shells do.
+    first_nul_line: Option<usize>,
 }
 
 impl NulProbe {
     fn feed(&mut self, chunk: &[u8]) {
         self.total += chunk.len() as u64;
+        if self.first_nul_line.is_none() {
+            let before = chunk.iter().position(|&b| b == 0);
+            let end = before.unwrap_or(chunk.len());
+            self.newlines += chunk[..end].iter().filter(|&&b| b == b'\n').count();
+            if before.is_some() {
+                self.first_nul_line = Some(1 + self.newlines);
+            }
+        }
         for (index, segment) in chunk.split(|&b| b == 0).enumerate() {
             if index > 0 {
                 self.nuls += 1;
@@ -1602,6 +1860,175 @@ mod tests {
                 assert!(probe.is_text(), "cuts at {first} and {second}");
             }
         }
+    }
+
+    // ---- files read as a stream ---------------------------------------------
+
+    /// Every file of more than one byte is read as a stream.
+    fn streaming() -> Limits {
+        Limits {
+            max_buffered_size: 1,
+            ..Limits::default()
+        }
+    }
+
+    #[test]
+    fn a_streamed_file_gets_the_same_result_as_one_read_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let comments = "# a comment line\n".repeat(600);
+        let files: [(&str, Vec<u8>); 9] = [
+            (
+                "plain.txt",
+                b"one\r\ntwo\nTODO\r\nTODO\n\nlast TODO".to_vec(),
+            ),
+            ("lib/env", payload_with(b"", b"# \0\xFF\n")),
+            ("late-nul", payload_with(comments.as_bytes(), b"# \0\xFF\n")),
+            ("padded", payload_with(b"", &[0; 4096])),
+            ("gif", payload_with(b"GIF89a=1\n", b"\0\n")),
+            ("icon.icns", noise_with_bidi(b"icns\0\0\x10\0")),
+            (
+                "run.sh",
+                format!("#!/bin/sh\n# a\0b\necho {BIDI}\n").into_bytes(),
+            ),
+            (
+                "notes",
+                b"some notes x \xE2\0\x80\xAE y and more text\n".to_vec(),
+            ),
+            ("todos.txt", "TODO\n".repeat(130).into_bytes()),
+        ];
+        for (name, contents) in &files {
+            write(dir.path(), name, contents);
+        }
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(CURL_SH, "test.toml").unwrap());
+        rules.extend(parse_rules(RULES, "test.toml").unwrap());
+
+        let whole = scan(dir.path(), &rules, Limits::default());
+        let streamed = scan(dir.path(), &rules, streaming());
+
+        assert!(!whole.findings.is_empty());
+        assert_eq!(whole.findings, streamed.findings);
+        assert_eq!(whole.unlisted, streamed.unlisted);
+        assert_eq!(whole.skipped, streamed.skipped);
+        assert_eq!(whole.files_scanned, streamed.files_scanned);
+    }
+
+    #[test]
+    fn a_large_text_file_is_scanned_and_the_scan_stays_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut contents = "x = 1\n".repeat(2000).into_bytes();
+        contents.extend_from_slice(PAYLOAD);
+        write(dir.path(), "fixture.ts", &contents);
+        let mut rules = Vec::new();
+        rules.extend(parse_rules(CURL_SH, "test.toml").unwrap());
+        let limits = Limits {
+            max_buffered_size: 1024,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &rules, limits);
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].line, 2001);
+        assert!(report.skipped.is_empty());
+        assert!(report.is_complete());
+        assert_eq!(report.files_scanned, 1);
+    }
+
+    #[test]
+    fn a_streamed_executable_is_listed_and_a_streamed_binary_is_ascii_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tool.exe", &noise_with_bidi(b"MZ\x90\0"));
+        write(dir.path(), "voice.mp3", &noise_with_bidi(b"ID3\x03\0\0\0"));
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, streaming());
+
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        let mut reasons: Vec<_> = report
+            .skipped
+            .iter()
+            .map(|s| (to_slash(&s.path), s.reason.clone()))
+            .collect();
+        reasons.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            reasons,
+            [
+                (
+                    "tool.exe".to_string(),
+                    SkipReason::Executable { format: "PE" }
+                ),
+                ("voice.mp3".to_string(), SkipReason::Binary),
+            ]
+        );
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn a_streamed_file_that_a_whole_file_rule_selects_is_still_listed_as_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "big.pth", &[b'#'; 100]);
+        let rules = [file_rule("**/*.pth", probe)];
+
+        let report = scan(dir.path(), &rules, streaming());
+
+        let found = explanations(&report);
+        assert_eq!(found.len(), 1, "the rule runs once");
+        assert!(found[0].1.contains("issue=Some(TooLarge { size: 100 })"));
+        assert!(matches!(
+            report.skipped[..],
+            [Skipped {
+                reason: SkipReason::TooLarge { size: 100 },
+                ..
+            }]
+        ));
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn a_line_longer_than_the_limit_makes_the_scan_inconclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut contents = b"short\nTODO\n".to_vec();
+        contents.extend_from_slice(&[b'x'; 200]);
+        contents.extend_from_slice(b"\nTODO\n");
+        write(dir.path(), "min.js", &contents);
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+        let limits = Limits {
+            max_buffered_size: 10,
+            max_line_size: 100,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &rules, limits);
+
+        assert_eq!(report.findings.len(), 1, "the line before it was scanned");
+        assert!(matches!(
+            report.skipped[..],
+            [Skipped {
+                reason: SkipReason::LineTooLong { line: 3 },
+                ..
+            }]
+        ));
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn a_streamed_utf16_script_cannot_be_decoded_and_is_listed_as_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend("# evil\n".encode_utf16().flat_map(u16::to_le_bytes));
+        write(dir.path(), "big.ps1", &bytes);
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, streaming());
+
+        assert!(matches!(
+            report.skipped[..],
+            [Skipped {
+                reason: SkipReason::TooLarge { .. },
+                ..
+            }]
+        ));
     }
 
     #[test]

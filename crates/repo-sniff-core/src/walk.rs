@@ -18,16 +18,28 @@ use ignore::WalkBuilder;
 /// Upper bounds for one scan.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// Files larger than this many bytes are skipped.
+    /// Files larger than this many bytes are not read at all.
     pub max_file_size: u64,
+    /// Files up to this size are read into memory and given to every rule.
+    /// Larger ones (up to `max_file_size`) are read as a stream, line by line,
+    /// and only the line rules look at them.
+    pub max_buffered_size: u64,
+    /// A line longer than this is not analysed by the line rules of a
+    /// streamed file, which makes the scan inconclusive.
+    pub max_line_size: usize,
     /// The walk stops after this many files.
     pub max_files: usize,
 }
 
 impl Default for Limits {
+    /// 100 MiB is the size at which GitHub refuses a push, so on a hosted
+    /// repository the hard limit leaves nothing out; streaming keeps the memory
+    /// of a scan at a few lines of that file, not the whole file.
     fn default() -> Self {
         Limits {
-            max_file_size: 5 * 1024 * 1024,
+            max_file_size: 100 * 1024 * 1024,
+            max_buffered_size: 5 * 1024 * 1024,
+            max_line_size: 16 * 1024 * 1024,
             max_files: 100_000,
         }
     }
@@ -56,6 +68,11 @@ pub enum SkipReason {
     },
     Unreadable {
         error: String,
+    },
+    /// A line of a streamed file is longer than `Limits::max_line_size`, so
+    /// the line rules did not look at it (or at the rest of the file).
+    LineTooLong {
+        line: usize,
     },
     /// A `.git` folder (or a `.git` file of a worktree or submodule). Its
     /// contents are not scanned. The one at the root is the repository's own
@@ -87,6 +104,7 @@ impl SkipReason {
             self,
             SkipReason::TooLarge { .. }
                 | SkipReason::Unreadable { .. }
+                | SkipReason::LineTooLong { .. }
                 | SkipReason::Executable { .. }
                 | SkipReason::GitMetadata { nested: true }
         )
