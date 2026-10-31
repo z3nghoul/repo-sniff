@@ -1,0 +1,19 @@
+# Stage: deps. Code that runs because of what is installed.
+
+[[rule]]
+id          = "deps.python-pth-exec"
+engine      = "file"
+family      = "python-startup"
+stage       = "deps"
+# Baseline for an ordinary executable line. The check lowers it for known honest
+# forms (LOW, or MEDIUM when the module they import is in the repository), for
+# files Python never reads (LOW) and for files that only add paths (INFO), and
+# raises it to CRITICAL for lines that decode, run programs, use the network,
+# or hide what they do.
+severity    = "high"
+attack      = ["T1546.018"]
+description = "A Python .pth file contains a line that starts with `import`. Python's site module runs such lines every time the interpreter starts, so a .pth file is code that runs without being imported"
+example     = 'site-packages/evil.pth:2 starts with "import" and calls exec()'
+# Every .pth, whatever the case or the name: the check decides whether Python
+# would read the file, so that a look-alike name still gets a (lower) finding.
+files       = ["**/*.pth"]
