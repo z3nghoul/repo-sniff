@@ -68,7 +68,7 @@ architecture early.
 Finish the open work, close the holes that make a scan lie, then merge
 `feat/walking-skeleton` and `feat/python-install-hooks` into `main`.
 
-- [ ] Python startup family, to finish: scoped re-review by `repo-sniff-reviewer` (only that its earlier findings are closed; a blocker only for a regression or a completely unnoticed executable line), then open the pull request stacked on the milestone 1 pull request (base `feat/walking-skeleton`) while that one is unmerged
+- [x] Python startup family, to finish: scoped re-review by `repo-sniff-reviewer` (only that its earlier findings are closed; a blocker only for a regression or a completely unnoticed executable line), then open the pull request stacked on the milestone 1 pull request (base `feat/walking-skeleton`) while that one is unmerged
 - [ ] Clone isolation (one pull request): `env_clear()` and re-add only what git needs (PATH, HOME/USERPROFILE, temp, SYSTEMROOT, proxy and SSL certificate variables); `GIT_CONFIG_NOSYSTEM=1`; `GIT_CONFIG_GLOBAL` pointing at an empty file (checked on Git for Windows); `GCM_INTERACTIVE=never`; `-c credential.helper= -c core.symlinks=false -c core.fsmonitor=false -c transfer.fsckObjects=true -c submodule.recurse=false`; `--template= --single-branch --no-tags`. Tests: a global smudge filter in a temporary `HOME` does not run; the same filter through `GIT_CONFIG_COUNT/KEY_0/VALUE_0` has no effect; a symlink in the repository is checked out as a plain file
 - [ ] https only: `ssh://` and `git@host:path` targets rejected with a message that explains how to scan a local clone instead; `GIT_ALLOW_PROTOCOL=https`
 - [ ] Credentials in URLs (`https://TOKEN@host/...`) redacted in every message, the report label and error output; test for each output path
