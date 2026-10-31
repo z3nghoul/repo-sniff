@@ -34,7 +34,8 @@ pub struct Limits {
 impl Default for Limits {
     /// 100 MiB is the size at which GitHub refuses a push, so on a hosted
     /// repository the hard limit leaves nothing out; streaming keeps the memory
-    /// of a scan at a few lines of that file, not the whole file.
+    /// of a scan at one line of that file (up to `max_line_size`, and up to three
+    /// times that for data read as ASCII), not the whole file.
     fn default() -> Self {
         Limits {
             max_file_size: 100 * 1024 * 1024,
