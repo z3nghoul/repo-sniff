@@ -55,6 +55,16 @@ pub fn render(report: &Report, target: &str) -> String {
         let _ = writeln!(out);
     }
 
+    for unlisted in &report.unlisted {
+        let _ = writeln!(
+            out,
+            "{}  {}  {} more findings in this file not shown\n",
+            display_path(&unlisted.file),
+            display_safe(&unlisted.rule_id, MAX_REASON_CHARS),
+            unlisted.count
+        );
+    }
+
     if !report.skipped.is_empty() {
         let _ = writeln!(
             out,
@@ -309,6 +319,25 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("INCONCLUSIVE"), "{text}");
+    }
+
+    #[test]
+    fn findings_cut_by_the_per_file_limit_are_counted_in_the_report() {
+        let report = Report {
+            unlisted: vec![repo_sniff_core::Unlisted {
+                file: PathBuf::from("src/big.js"),
+                rule_id: "test.rule".to_string(),
+                count: 42,
+            }],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(
+            text.contains("src/big.js  test.rule  42 more findings in this file not shown"),
+            "{text}"
+        );
     }
 
     #[test]
