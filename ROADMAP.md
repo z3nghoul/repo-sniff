@@ -57,7 +57,7 @@ Rule families, each in its own branch and PR, fixtures approved first:
 - [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
 - [ ] npm install hooks: lifecycle scripts
 - [ ] Python install hooks: `setup.py`, build backends
-- [ ] Python startup files: `.pth` lines run by any supported Python version (graded levels INFO to CRITICAL; symlinked, oversized and non-UTF-8 files included) and `.start` entry points (Python 3.15)
+- [x] Python startup files: `.pth` lines run by any supported Python version (graded levels INFO to CRITICAL; symlinked, oversized and non-UTF-8 files included) and `.start` entry points (Python 3.15)
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
 - [ ] Build scripts: `build.rs`, Rust proc-macros, `.vcxproj` build events, CMake, Makefile, Gradle wrapper and tasks
 - [ ] GitHub Actions workflows
