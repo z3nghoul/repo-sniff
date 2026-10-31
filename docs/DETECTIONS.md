@@ -222,6 +222,11 @@ scanner itself:
 - never unpack archives (zip-bomb protection), only flag them;
 - regular expressions only through the `regex` crate (linear-time matching,
   protection against ReDoS).
+- localizations load only from the built-in set and the OS config directory,
+  never from the scanned repository, so a repository cannot change what the
+  report says; third-party locale text is stripped of control, bidi and
+  zero-width characters, cannot carry raw terminal escape sequences, and
+  severity codes (CRITICAL, HIGH, ...) are always shown untranslated.
 
 **False positives.** A `.repo-sniff.toml` file holds exclusions, each with a
 **mandatory justification** field. A benchmark on popular honest repositories
