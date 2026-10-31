@@ -58,7 +58,7 @@ pub fn render(report: &Report, target: &str) -> String {
     if !report.skipped.is_empty() {
         let _ = writeln!(
             out,
-            "Not scanned ({}): {}",
+            "Not analyzed ({}): {}",
             report.skipped.len(),
             skip_breakdown(report)
         );
@@ -66,7 +66,10 @@ pub fn render(report: &Report, target: &str) -> String {
             let reason = match &skipped.reason {
                 SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
                 SkipReason::Symlink { .. } => "symlink, not followed".to_string(),
-                SkipReason::Binary => "binary file, not scanned for text patterns".to_string(),
+                SkipReason::Binary => "binary, not analyzed".to_string(),
+                SkipReason::Executable { format } => {
+                    format!("executable binary ({format}), not analyzed")
+                }
                 SkipReason::Unreadable { error } => format!("unreadable: {error}"),
             };
             let _ = writeln!(
@@ -113,6 +116,10 @@ fn skip_breakdown(report: &Report) -> String {
     let parts = [
         (count(|r| matches!(r, SkipReason::Binary)), "binary"),
         (
+            count(|r| matches!(r, SkipReason::Executable { .. })),
+            "executable",
+        ),
+        (
             count(|r| matches!(r, SkipReason::TooLarge { .. })),
             "too large",
         ),
@@ -135,15 +142,39 @@ fn skip_breakdown(report: &Report) -> String {
 
 /// The last line of the report: says whether "no findings" can be trusted.
 fn completeness(report: &Report) -> String {
+    let count = |wanted: fn(&SkipReason) -> bool| {
+        report.skipped.iter().filter(|s| wanted(&s.reason)).count()
+    };
     if report.is_complete() {
-        return "Scan: complete (every file was read)".to_string();
+        let binaries = count(|r| matches!(r, SkipReason::Binary));
+        return if binaries == 0 {
+            "Scan: complete (every file was read)".to_string()
+        } else {
+            format!(
+                "Scan: complete (every file was read; {binaries} binary files were not analyzed)"
+            )
+        };
     }
     let mut reasons = Vec::new();
     if report.truncated {
         reasons.push("the file limit was reached".to_string());
     }
-    if report.unread_count() > 0 {
-        reasons.push(format!("{} files were not read", report.unread_count()));
+    let unread = count(|r| {
+        matches!(
+            r,
+            SkipReason::TooLarge { .. } | SkipReason::Unreadable { .. }
+        )
+    });
+    if unread > 0 {
+        reasons.push(format!(
+            "{unread} files could not be read (too large or unreadable)"
+        ));
+    }
+    let executables = count(|r| matches!(r, SkipReason::Executable { .. }));
+    if executables > 0 {
+        reasons.push(format!(
+            "{executables} executable binaries were not analyzed"
+        ));
     }
     format!(
         "Scan: INCONCLUSIVE ({}). Findings above may be incomplete, and a result without \
@@ -199,8 +230,8 @@ mod tests {
         let report = Report {
             truncated: true,
             skipped: vec![Skipped {
-                path: PathBuf::from("a.bin"),
-                reason: SkipReason::Binary,
+                path: PathBuf::from("tool"),
+                reason: SkipReason::Executable { format: "ELF" },
             }],
             ..Report::default()
         };
@@ -209,11 +240,55 @@ mod tests {
 
         assert!(text.contains("Scan: INCONCLUSIVE"), "{text}");
         assert!(text.contains("the file limit was reached"), "{text}");
-        assert!(text.contains("1 files were not read"), "{text}");
+        assert!(
+            text.contains("1 executable binaries were not analyzed"),
+            "{text}"
+        );
         assert!(
             text.contains("does not mean the repository is clean"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn unread_files_are_named_in_the_reasons() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("big.txt"),
+                reason: SkipReason::TooLarge { size: 9 },
+            }],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(
+            text.contains(
+                "Scan: INCONCLUSIVE (1 files could not be read (too large or unreadable))"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn binary_files_without_rules_are_listed_but_the_scan_stays_complete() {
+        let skip = |name: &str| Skipped {
+            path: PathBuf::from(name),
+            reason: SkipReason::Binary,
+        };
+        let report = Report {
+            skipped: vec![skip("a.gz"), skip("b.png")],
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        assert!(text.contains("Not analyzed (2): 2 binary"), "{text}");
+        assert!(
+            text.contains("Scan: complete (every file was read; 2 binary files were not analyzed)"),
+            "{text}"
+        );
+        assert!(!text.contains("INCONCLUSIVE"), "{text}");
     }
 
     #[test]
@@ -251,6 +326,7 @@ mod tests {
         let report = Report {
             skipped: vec![
                 skip("a.bin", SkipReason::Binary),
+                skip("tool", SkipReason::Executable { format: "ELF" }),
                 skip("big.txt", SkipReason::TooLarge { size: 99 }),
                 skip("link", SkipReason::Symlink { target: None }),
                 skip(
@@ -266,10 +342,16 @@ mod tests {
         let text = render(&report, "repo");
 
         assert!(
-            text.contains("Not scanned (4): 1 binary, 1 too large, 1 unreadable, 1 symlink"),
+            text.contains(
+                "Not analyzed (5): 1 binary, 1 executable, 1 too large, 1 unreadable, 1 symlink"
+            ),
             "{text}"
         );
-        assert!(text.contains("a.bin  binary file"), "{text}");
+        assert!(text.contains("a.bin  binary, not analyzed"), "{text}");
+        assert!(
+            text.contains("tool  executable binary (ELF), not analyzed"),
+            "{text}"
+        );
         assert!(text.contains("big.txt  too large (99 bytes)"), "{text}");
         assert!(text.contains("link  symlink, not followed"), "{text}");
         assert!(text.contains("locked  unreadable: denied"), "{text}");

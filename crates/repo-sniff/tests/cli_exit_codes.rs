@@ -212,25 +212,95 @@ fn credentials_in_a_refused_target_are_not_repeated() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("TOKEN789"));
 }
 
-/// A directory that holds a binary file next to clean source.
-fn clean_dir_with_a_binary_file() -> tempfile::TempDir {
+/// Source next to the kind of compressed and image files a normal repository
+/// keeps as test data. They are binary (they contain NUL bytes), they were
+/// read, and no rule looks inside them.
+fn clean_dir_with_compressed_test_files() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
-    fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+    fs::create_dir(dir.path().join("data")).unwrap();
+    fs::write(
+        dir.path().join("data/a.gz"),
+        [0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 3],
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("data/b.zst"),
+        [0x28, 0xB5, 0x2F, 0xFD, 0, 0, 0, 0],
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("data/c.png"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR",
+    )
+    .unwrap();
+    dir
+}
+
+/// Source next to a file that starts with the given executable header. It is
+/// not a working program: only its first bytes are real.
+fn clean_dir_with_executable(header: &[u8]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let mut bytes = header.to_vec();
+    bytes.extend([0u8; 16]);
+    fs::write(dir.path().join("tool"), bytes).unwrap();
     dir
 }
 
 #[test]
-fn an_unread_binary_file_makes_a_clean_looking_scan_inconclusive() {
-    let dir = clean_dir_with_a_binary_file();
+fn compressed_test_files_are_listed_but_do_not_change_the_exit_status() {
+    let dir = clean_dir_with_compressed_test_files();
+
+    let output = run(dir.path(), &["scan", "."]);
+
+    assert_eq!(code(&output), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Not analyzed (3): 3 binary"), "{stdout}");
+    assert!(
+        stdout.contains("data/a.gz  binary, not analyzed"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Scan: complete (every file was read; 3 binary files were not analyzed)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("INCONCLUSIVE"), "{stdout}");
+}
+
+#[test]
+fn an_elf_file_makes_the_scan_inconclusive() {
+    let dir = clean_dir_with_executable(b"\x7fELF\x02\x01\x01\0");
 
     let output = run(dir.path(), &["scan", "."]);
 
     assert_eq!(code(&output), 3);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Not scanned (1): 1 binary"), "{stdout}");
+    assert!(
+        stdout.contains("tool  executable binary (ELF), not analyzed"),
+        "{stdout}"
+    );
     assert!(stdout.contains("Scan: INCONCLUSIVE"), "{stdout}");
-    assert!(stdout.contains("1 files were not read"), "{stdout}");
+    assert!(
+        stdout.contains("1 executable binaries were not analyzed"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn every_executable_format_makes_the_scan_inconclusive() {
+    for (name, header) in [
+        ("PE", &b"MZ\x90\0\x03\0\0\0"[..]),
+        ("Mach-O 32-bit", &[0xFE, 0xED, 0xFA, 0xCE][..]),
+        ("Mach-O 64-bit", &[0xCF, 0xFA, 0xED, 0xFE][..]),
+        ("Mach-O fat", &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2][..]),
+    ] {
+        let dir = clean_dir_with_executable(header);
+
+        let output = run(dir.path(), &["scan", "."]);
+
+        assert_eq!(code(&output), 3, "{name}");
+    }
 }
 
 #[test]
@@ -241,24 +311,39 @@ fn an_oversized_file_makes_the_scan_inconclusive() {
     let output = run(dir.path(), &["scan", "."]);
 
     assert_eq!(code(&output), 3);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 too large"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 too large"), "{stdout}");
+    assert!(
+        stdout.contains("1 files could not be read (too large or unreadable)"),
+        "{stdout}"
+    );
 }
 
 #[test]
-fn findings_at_the_threshold_win_over_an_incomplete_scan() {
+fn findings_at_the_threshold_win_over_an_inconclusive_scan() {
     let dir = high_only_dir();
-    fs::write(dir.path().join("blob.bin"), [0u8, 1]).unwrap();
+    fs::write(dir.path().join("tool"), b"\x7fELF\0\0\0\0").unwrap();
 
     assert_eq!(code(&run(dir.path(), &["scan", "."])), 1);
 }
 
 #[test]
-fn fail_on_none_does_not_turn_an_incomplete_scan_into_a_pass() {
-    let dir = clean_dir_with_a_binary_file();
+fn fail_on_none_does_not_turn_an_inconclusive_scan_into_a_pass() {
+    let dir = clean_dir_with_executable(b"\x7fELF");
 
     assert_eq!(
         code(&run(dir.path(), &["scan", ".", "--fail-on", "none"])),
         3
+    );
+}
+
+#[test]
+fn fail_on_none_with_a_complete_scan_exits_zero() {
+    let dir = clean_dir_with_compressed_test_files();
+
+    assert_eq!(
+        code(&run(dir.path(), &["scan", ".", "--fail-on", "none"])),
+        0
     );
 }
 
