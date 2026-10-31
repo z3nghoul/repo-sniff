@@ -4,6 +4,7 @@
 //! carries metadata (id, stage, severity, ATT&CK IDs, descriptions). The code
 //! that decides what to report lives here and is looked up by the rule's id.
 
+mod pylines;
 pub mod python_pth;
 pub mod vscode_autorun;
 
