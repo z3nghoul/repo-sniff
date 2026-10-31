@@ -34,7 +34,7 @@ architecture early.
 - [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
 - [x] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
 - [x] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
-- [ ] `SECURITY.md`: how to report vulnerabilities in the scanner
+- [x] `SECURITY.md`: how to report vulnerabilities in the scanner
 - [x] `CONTRIBUTING.md`: commits, fixtures, scanner security and cross-platform rules
 - [ ] Update `DETECTIONS.md` and README
 
