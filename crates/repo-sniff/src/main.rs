@@ -1,10 +1,12 @@
 mod clone;
+mod report;
 mod target;
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use repo_sniff_core::{Limits, builtin_rules};
 
 use crate::target::Target;
 
@@ -29,12 +31,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Scan { target } => scan(Target::parse(&target)),
+        Command::Scan { target } => scan(&target),
     }
 }
 
-fn scan(target: Target) -> Result<()> {
-    match target {
+fn scan(raw_target: &str) -> Result<()> {
+    match Target::parse(raw_target) {
         Target::Local(path) => {
             let root = path
                 .canonicalize()
@@ -42,19 +44,21 @@ fn scan(target: Target) -> Result<()> {
             if !root.is_dir() {
                 bail!("{} is not a directory", root.display());
             }
-            scan_dir(&root)
+            scan_dir(&root, raw_target)
         }
         Target::Remote(url) => {
-            println!("Cloning {url}");
+            eprintln!("Cloning {url}");
             // `checkout` must stay alive until the scan ends: dropping it
             // deletes the cloned files.
             let checkout = clone::shallow_clone(&url)?;
-            scan_dir(checkout.path())
+            scan_dir(checkout.path(), raw_target)
         }
     }
 }
 
-fn scan_dir(root: &Path) -> Result<()> {
-    println!("Scanning {}", root.display());
+fn scan_dir(root: &Path, label: &str) -> Result<()> {
+    let rules = builtin_rules().context("failed to load built-in rules")?;
+    let report = repo_sniff_core::scan(root, &rules, Limits::default());
+    print!("{}", report::render(&report, label));
     Ok(())
 }
