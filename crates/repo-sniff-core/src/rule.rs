@@ -47,6 +47,9 @@ pub enum Engine {
     /// the rest of the repository. Looked up by the rule's id like `Jsonc`;
     /// `files` is required and selects the candidate files.
     File,
+    /// Reports a NUL byte inside a file that is meant to be read as a script
+    /// (by extension or shebang). The scanner itself decides what a script is.
+    NulByte,
 }
 
 /// A rule as written in TOML, before validation.
@@ -80,6 +83,7 @@ pub enum Matcher {
     LineRegex(Regex),
     Jsonc(JsoncCheck),
     File(FileCheck),
+    NulByte,
 }
 
 /// A validated rule, ready to run.
@@ -198,6 +202,12 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
             let check = checks::jsonc_check(&raw.id)
                 .ok_or_else(|| RuleError::UnknownCheck { id: raw.id.clone() })?;
             Matcher::Jsonc(check)
+        }
+        Engine::NulByte => {
+            if raw.pattern.is_some() {
+                return Err(RuleError::UnexpectedPattern { id: raw.id });
+            }
+            Matcher::NulByte
         }
         Engine::File => {
             if raw.pattern.is_some() {
@@ -419,6 +429,28 @@ mod tests {
         assert!(matches!(
             parse_rules(&source, "test.toml"),
             Err(RuleError::MissingFiles { .. })
+        ));
+    }
+
+    #[test]
+    fn nul_byte_rule_needs_no_pattern_and_no_files() {
+        let source = r#"
+            [[rule]]
+            id = "test.nul"
+            engine = "nul-byte"
+            family = "test"
+            stage = "deception"
+            severity = "high"
+            description = "Example"
+            example = "a.sh:1"
+        "#;
+        let rules = parse_rules(source, "test.toml").unwrap();
+        assert!(matches!(rules[0].matcher, Matcher::NulByte));
+
+        let with_pattern = format!("{source}\npattern = 'x'");
+        assert!(matches!(
+            parse_rules(&with_pattern, "test.toml"),
+            Err(RuleError::UnexpectedPattern { .. })
         ));
     }
 
