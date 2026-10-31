@@ -65,8 +65,8 @@ Rule families, each in its own branch and PR, fixtures approved first:
 
 Infrastructure:
 
-- [ ] File-level checks: `Matcher::File` with a `FileCtx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
-- [ ] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
+- [x] File-level checks: `Matcher::File` with a `FileCtx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
+- [x] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
 - [ ] Tracked files: for a local git repository scan `git ls-files` by default and everything else with `--include-untracked`; `.gitignore` is still never applied, so a tracked file is scanned even if it is ignored (a small separate pull request)
 - [ ] Review point: binary contents via `goblin` (imports, SHA-256, code signature, embedded URLs/IPs); optional VirusTotal hash lookup with the user's own key
 - [ ] Benchmark on popular honest repositories (target: 0 critical); started here and extended in every later milestone

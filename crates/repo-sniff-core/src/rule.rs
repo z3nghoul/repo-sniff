@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::checks::{self, JsoncCheck};
+use crate::checks::{self, FileCheck, JsoncCheck};
 use crate::finding::{Severity, Stage};
 
 /// Rule files shipped inside the binary, as `(file name, contents)`.
@@ -42,6 +42,10 @@ pub enum Engine {
     /// Rust code that parses a structured (JSONC) file. The code is looked up
     /// by the rule's id; the TOML only supplies its metadata.
     Jsonc,
+    /// Rust code that inspects one whole file as raw bytes, with knowledge of
+    /// the rest of the repository. Looked up by the rule's id like `Jsonc`;
+    /// `files` is required and selects the candidate files.
+    File,
 }
 
 /// A rule as written in TOML, before validation.
@@ -74,6 +78,7 @@ struct RuleFile {
 pub enum Matcher {
     LineRegex(Regex),
     Jsonc(JsoncCheck),
+    File(FileCheck),
 }
 
 /// A validated rule, ready to run.
@@ -112,10 +117,12 @@ pub enum RuleError {
     },
     #[error("rule `{id}`: engine `line-regex` requires a `pattern`")]
     MissingPattern { id: String },
-    #[error("rule `{id}`: engine `jsonc` does not take a `pattern`")]
+    #[error("rule `{id}`: this engine does not take a `pattern`")]
     UnexpectedPattern { id: String },
-    #[error("rule `{id}`: engine `jsonc` needs a check registered in the code under this id")]
+    #[error("rule `{id}`: this engine needs a check registered in the code under this id")]
     UnknownCheck { id: String },
+    #[error("rule `{id}`: engine `file` requires `files` globs to select the files to check")]
+    MissingFiles { id: String },
     #[error("rule `{id}`: invalid pattern: {source}")]
     Pattern {
         id: String,
@@ -190,6 +197,17 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
             let check = checks::jsonc_check(&raw.id)
                 .ok_or_else(|| RuleError::UnknownCheck { id: raw.id.clone() })?;
             Matcher::Jsonc(check)
+        }
+        Engine::File => {
+            if raw.pattern.is_some() {
+                return Err(RuleError::UnexpectedPattern { id: raw.id });
+            }
+            if raw.files.is_empty() {
+                return Err(RuleError::MissingFiles { id: raw.id });
+            }
+            let check = checks::file_check(&raw.id)
+                .ok_or_else(|| RuleError::UnknownCheck { id: raw.id.clone() })?;
+            Matcher::File(check)
         }
     };
 
@@ -368,6 +386,44 @@ mod tests {
     #[test]
     fn jsonc_rule_with_a_pattern_is_rejected() {
         let source = format!("{JSONC_RULE}\npattern = 'x'");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::UnexpectedPattern { .. })
+        ));
+    }
+
+    const FILE_RULE: &str = r#"
+        [[rule]]
+        id = "test.no-such-file-check"
+        engine = "file"
+        family = "test"
+        stage = "deps"
+        severity = "high"
+        description = "Example"
+        example = "x.pth:1"
+        files = ["**/*.pth"]
+    "#;
+
+    #[test]
+    fn file_rule_without_a_registered_check_is_rejected() {
+        assert!(matches!(
+            parse_rules(FILE_RULE, "test.toml"),
+            Err(RuleError::UnknownCheck { .. })
+        ));
+    }
+
+    #[test]
+    fn file_rule_must_say_which_files_it_wants() {
+        let source = FILE_RULE.replace(r#"files = ["**/*.pth"]"#, "");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::MissingFiles { .. })
+        ));
+    }
+
+    #[test]
+    fn file_rule_with_a_pattern_is_rejected() {
+        let source = format!("{FILE_RULE}\npattern = 'x'");
         assert!(matches!(
             parse_rules(&source, "test.toml"),
             Err(RuleError::UnexpectedPattern { .. })
