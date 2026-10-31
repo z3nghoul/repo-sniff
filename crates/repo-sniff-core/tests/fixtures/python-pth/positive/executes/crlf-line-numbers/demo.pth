@@ -1,0 +1,5 @@
+# SYNTHETIC TEST FIXTURE — not functional
+../src
+../lib
+../more
+import sys; print('hello')
