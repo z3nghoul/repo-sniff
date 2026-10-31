@@ -5,7 +5,11 @@ use std::path::Path;
 
 use crate::finding::Finding;
 use crate::rule::{Matcher, Rule};
+use crate::sanitize::display_safe;
 use crate::walk::{self, Limits, SkipReason, Skipped};
+
+/// Explanations built from text in the scanned repository are cut to this.
+const MAX_EXPLANATION_CHARS: usize = 300;
 
 /// How many leading bytes are checked to tell text from binary files.
 const BINARY_SNIFF_LEN: usize = 8 * 1024;
@@ -92,6 +96,21 @@ fn scan_text(relative: &Path, text: &str, rules: &[Rule]) -> Vec<Finding> {
                             explanation: rule.description.clone(),
                         });
                     }
+                }
+            }
+            Matcher::Jsonc(check) => {
+                for hit in check(&slash_path, text, rule.severity) {
+                    findings.push(Finding {
+                        rule_id: rule.id.clone(),
+                        severity: hit.severity,
+                        stage: rule.stage,
+                        attack: rule.attack.clone(),
+                        file: relative.to_path_buf(),
+                        line: hit.line,
+                        // The reason may quote the scanned file, so it is
+                        // cleaned before it can reach a terminal.
+                        explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
+                    });
                 }
             }
         }
