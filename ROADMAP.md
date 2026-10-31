@@ -31,7 +31,7 @@ architecture early.
 - [ ] Rule: `.vscode/tasks.json` with `runOn: folderOpen` (written by the author)
 - [ ] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag
-- [ ] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
+- [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
 - [ ] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
 - [ ] CI supply chain: every action pinned to a commit SHA with a version comment; Dependabot for `github-actions` and `cargo`
 - [ ] `SECURITY.md`: how to report vulnerabilities in the scanner
