@@ -25,23 +25,35 @@ architecture early.
 - [ ] Load rules from TOML with full metadata (id, family, stage, severity, ATT&CK, description, example)
 - [ ] Walk repository files with safety limits (no symlinks, size and count limits, `.gitignore` not honored)
 - [ ] Line-based regex rule engine
-- [ ] Plain-text report, non-zero exit code on High/Critical
+- [ ] Plain-text report showing severity, stage and ATT&CK ID per finding
+- [ ] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
 - [ ] Rule: Trojan Source bidi characters
 - [ ] Rule: `.vscode/tasks.json` with `runOn: folderOpen` (written by the author)
 - [ ] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag
+- [ ] CI matrix: ubuntu, windows, macos
 - [ ] Update `DETECTIONS.md` and README
 
 ## Milestone 2 — Automatic execution (stages 0–3, 6)
 
 Rule families, each in its own branch and PR, fixtures approved first:
 
-- [ ] Repository contents: committed binaries, disguised executables (magic bytes), droppers, symlinks out of the repo
-- [ ] IDE: VS Code tasks/settings, MSBuild props/targets, devcontainer
+- [ ] Repository contents: committed binaries, disguised executables (magic bytes), droppers (.lnk, .scr, .hta), Windows scripts (.bat, .ps1, .vbs), symlinks out of the repo
+- [ ] Suspicious files: password-protected archives (flagged, never unpacked), data appended after PNG `IEND` / JPEG `EOI`, large high-entropy files of unknown format, binary "test files" referenced by build scripts
+- [ ] Submodules pointing at third-party URLs
+- [ ] IDE: VS Code tasks/settings, devcontainer, `.idea` run configurations, `.envrc`
+- [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
 - [ ] npm and Python install hooks: lifecycle scripts, `setup.py`, `.pth`, build backends
-- [ ] Build scripts: `build.rs`, `.vcxproj` build events, CMake, Makefile, Gradle wrapper
+- [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
+- [ ] Build scripts: `build.rs`, Rust proc-macros, `.vcxproj` build events, CMake, Makefile, Gradle wrapper and tasks
 - [ ] GitHub Actions workflows
-- [ ] Human deception: hidden whitespace code, zero-width characters, homoglyphs
+- [ ] Human deception: hidden whitespace code, zero-width characters, homoglyphs, README advice ("disable antivirus", password-protected zip, `curl | bash`)
+
+Infrastructure:
+
+- [ ] Review point: binary contents via `goblin` (imports, SHA-256, code signature, embedded URLs/IPs); optional VirusTotal hash lookup with the user's own key
+- [ ] Benchmark on popular honest repositories (target: 0 critical); started here and extended in every later milestone
+- [ ] Real-sample test suite gated by `REPO_SNIFF_REAL_SAMPLES` (path to samples outside the repo; skipped when unset)
 
 ## Milestone 3 — Report and scoring
 
@@ -49,7 +61,7 @@ Rule families, each in its own branch and PR, fixtures approved first:
 - [ ] JSON output
 - [ ] Risk score on three axes: trigger, capability, concealment
 - [ ] Capability combinations raise severity
-- [ ] "Needs manual review" section
+- [ ] "Needs manual review" section: grouped, capped, no (or minimal) effect on the score
 - [ ] `.repo-sniff.toml`: `[filters]` and `[[exclude]]` with mandatory reason
 - [ ] Parallel scanning with rayon
 
@@ -68,20 +80,44 @@ Rule families, each in its own branch and PR, fixtures approved first:
 ## Milestone 4 — Capabilities and AST
 
 - [ ] tree-sitter for Python, JavaScript, C/C++
+- [ ] tree-sitter for Rust, PowerShell and bash
 - [ ] Stage 5 capability families: process spawning, LOLBins, injection, persistence, credential theft, exfiltration, keylogging, defense evasion
+- [ ] Download → write → make executable → run chain
+- [ ] Crypto mining, ransomware behavior
+- [ ] UAC bypass, anti-VM and anti-debugging
+- [ ] Dynamic eval and loading code from bytes
+- [ ] Clipper, screenshots, auto-update without signature check
 - [ ] Stage 4 test hooks: `conftest.py`, npm `test`
+
+Review points:
+
+- [ ] URLs and domains in code (raw IPs, pastebin, raw gists, shorteners, dynamic DNS); network response flowing into exec/eval/file write
+- [ ] Logic bombs: conditions on dates, hostname/user, environment, system language and keyboard layout
+- [ ] Bugdoors at LOW: risky C/C++ functions (`strcpy`, `sprintf`, `gets`, unchecked `memcpy`), Rust `unsafe` blocks
+- [ ] Capability map: short summary of what the program can do
 
 ## Milestone 5 — Obfuscation
 
 - [ ] Shannon entropy, long base64/hex blobs, minified code among normal sources
 - [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`) with depth and size limits
-- [ ] Packer and obfuscator signatures
+- [ ] Packer and obfuscator signatures, reflection and dynamic imports
+
+Review points:
+
+- [ ] Possible code virtualization: large numeric arrays + opcode dispatch loop
+- [ ] Decryption (AES, Fernet, CryptoJS) whose result is executed or loaded as code
+- [ ] Code that reads image pixels/bytes and executes the result (steganography)
 
 ## Milestone 6 — Dependencies
 
 - [ ] Typosquatting against popular packages
 - [ ] Known vulnerabilities via the OSV API
 - [ ] Lockfiles resolving outside the official registry, git/URL dependencies
+
+Review points:
+
+- [ ] Young dependencies via registry APIs (npm, crates.io, PyPI): recently published, few downloads, changed owner
+- [ ] Release binaries via the GitHub API, README telling users to download releases instead of building
 
 ## Milestone 7 — SARIF, GitHub Action, releases
 
@@ -94,5 +130,9 @@ Rule families, each in its own branch and PR, fixtures approved first:
 - [ ] Demo GIF or screenshot of the report
 - [ ] Examples and "how to add your own rule"
 - [ ] `CONTRIBUTING.md`
-- [ ] Benchmark on popular honest repositories: 0 critical on clean repos
+- [ ] Publish benchmark results in the README
 - [ ] Honest list of blind spots
+
+## Later
+
+- [ ] README vs. behavior: compare the stated purpose with the capability map
