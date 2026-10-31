@@ -130,29 +130,52 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         let checked = env.run_file_checks(relative, &slash_path, &bytes, None);
         report.findings.extend(checked.findings);
 
-        // A script with a NUL byte is still a script (and the NUL is reported
-        // by its own rule); anything else with a NUL byte is a binary.
         let script = is_script(&slash_path, &bytes);
         let nul_line = script.then(|| first_nul_line(&bytes)).flatten();
+        let mut utf16_text = None;
 
-        if looks_binary(&bytes) && !script {
-            if checked.examined {
-                report.files_scanned += 1;
-            } else {
-                let reason = match executable_format(&bytes) {
-                    Some(format) => SkipReason::Executable { format },
-                    None => SkipReason::Binary,
-                };
+        if looks_binary(&bytes) {
+            // An executable is listed even when a file rule looked at it, and
+            // even when its name says script: the rule saw the bytes of a
+            // `.pth` or `.start` file, not the code of the program.
+            if let Some(format) = executable_format(&bytes) {
                 skipped.push(Skipped {
                     path: relative.clone(),
-                    reason,
+                    reason: SkipReason::Executable { format },
                 });
+                if checked.examined {
+                    report.files_scanned += 1;
+                }
+                continue;
             }
-            continue;
+            // A script with a NUL byte is still a script, and the NUL is
+            // reported by its own rule (`nul_line`).
+            if !script {
+                if has_utf16_bom(&bytes) && has_script_extension(&slash_path) {
+                    // Windows PowerShell and WSH read UTF-16 scripts.
+                    utf16_text = Some(decode_utf16_bom(&bytes));
+                } else if known_binary_magic(&bytes) {
+                    if checked.examined {
+                        report.files_scanned += 1;
+                    } else {
+                        skipped.push(Skipped {
+                            path: relative.clone(),
+                            reason: SkipReason::Binary,
+                        });
+                    }
+                    continue;
+                }
+            }
+            // Anything else with a NUL byte and no known binary header goes
+            // to the line rules with the NULs removed: `dash` drops them, so
+            // a file sourced by a script can hide behind one.
         }
 
         report.files_scanned += 1;
-        let text = String::from_utf8_lossy(&bytes);
+        let text = match utf16_text {
+            Some(text) => text,
+            None => String::from_utf8_lossy(&bytes).replace('\0', ""),
+        };
         report
             .findings
             .extend(scan_text(relative, &slash_path, &text, nul_line, rules));
@@ -367,20 +390,66 @@ fn scan_text(
 
 /// Whether the file is meant to be read as a script: it has a script
 /// extension or starts with a shebang. A file with a UTF-16 byte order mark is
-/// not treated as one here, because UTF-16 text is full of NUL bytes by
-/// design (Windows PowerShell writes it by default); it stays a skipped
-/// binary until the scanner learns to decode it.
+/// not one here, because UTF-16 text is full of NUL bytes by design (Windows
+/// PowerShell writes it by default); it is decoded instead.
 fn is_script(slash_path: &str, bytes: &[u8]) -> bool {
-    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+    if has_utf16_bom(bytes) {
         return false;
     }
-    let extension = slash_path
+    has_script_extension(slash_path) || bytes.starts_with(b"#!")
+}
+
+fn has_script_extension(slash_path: &str) -> bool {
+    slash_path
         .rsplit('/')
         .next()
         .and_then(|name| name.rsplit_once('.'))
-        .map(|(_, extension)| extension.to_ascii_lowercase());
-    extension.is_some_and(|ext| SCRIPT_EXTENSIONS.contains(&ext.as_str()))
-        || bytes.starts_with(b"#!")
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .is_some_and(|ext| SCRIPT_EXTENSIONS.contains(&ext.as_str()))
+}
+
+fn has_utf16_bom(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF])
+}
+
+/// Decodes UTF-16 after its byte order mark; unpaired surrogates and a odd
+/// trailing byte become U+FFFD.
+fn decode_utf16_bom(bytes: &[u8]) -> String {
+    let little_endian = bytes.starts_with(&[0xFF, 0xFE]);
+    let units = bytes[2..].chunks(2).map(|pair| match *pair {
+        [a, b] if little_endian => u16::from_le_bytes([a, b]),
+        [a, b] => u16::from_be_bytes([a, b]),
+        _ => 0xFFFD,
+    });
+    char::decode_utf16(units)
+        .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
+}
+
+/// Headers of formats that are binary data by design and that no script
+/// engine reads as text: archives, compressed streams, images, documents,
+/// WebAssembly and fonts.
+fn known_binary_magic(bytes: &[u8]) -> bool {
+    const MAGICS: [&[u8]; 17] = [
+        &[0x1F, 0x8B],
+        &[0x28, 0xB5, 0x2F, 0xFD],
+        b"BZh",
+        &[0xFD, b'7', b'z', b'X', b'Z', 0],
+        b"PK\x03\x04",
+        b"PK\x05\x06",
+        b"7z\xBC\xAF\x27\x1C",
+        b"Rar!",
+        b"\x89PNG",
+        &[0xFF, 0xD8, 0xFF],
+        b"GIF8",
+        b"%PDF",
+        b"\0asm",
+        b"RIFF",
+        b"wOF",
+        b"OTTO",
+        b"\0\x01\0\0",
+    ];
+    MAGICS.iter().any(|magic| bytes.starts_with(magic))
 }
 
 /// The 1-based line of the first NUL byte, counting `\n` as shells do.
@@ -391,16 +460,14 @@ fn first_nul_line(bytes: &[u8]) -> Option<usize> {
 
 /// Names the executable format a file starts with, by its magic bytes:
 /// ELF, PE (the `MZ` header), Mach-O in all four byte orders, and fat Mach-O
-/// binaries. The fat header `CAFEBABE` is also the header of a Java class
+/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The fat header `CAFEBABE` is also the header of a Java class
 /// file; both are code that runs, so both count.
 fn executable_format(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x7F, b'E', b'L', b'F', ..] => Some("ELF"),
         [b'M', b'Z', ..] => Some("PE"),
         [0xFE, 0xED, 0xFA, 0xCE | 0xCF, ..] | [0xCE | 0xCF, 0xFA, 0xED, 0xFE, ..] => Some("Mach-O"),
-        [0xCA, 0xFE, 0xBA, 0xBE, ..] | [0xBE, 0xBA, 0xFE, 0xCA, ..] => {
-            Some("Mach-O fat (or Java class)")
-        }
+        [0xCA, 0xFE, 0xBA, 0xBE | 0xBF, ..] => Some("Mach-O fat (or Java class)"),
         _ => None,
     }
 }
@@ -538,7 +605,7 @@ mod tests {
     #[test]
     fn binary_files_are_not_line_scanned_but_are_reported_as_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "blob.bin", b"\0\0TODO");
+        write(dir.path(), "blob.bin", b"\x1f\x8b\0\0TODO");
         let rules = parse_rules(RULES, "test.toml").unwrap();
 
         let report = scan(dir.path(), &rules, Limits::default());
@@ -627,7 +694,7 @@ mod tests {
                 Some("Mach-O fat (or Java class)"),
             ),
             (
-                &[0xBE, 0xBA, 0xFE, 0xCA, 2, 0, 0, 0],
+                &[0xCA, 0xFE, 0xBA, 0xBF, 0, 0, 0, 2],
                 Some("Mach-O fat (or Java class)"),
             ),
             (&[0x1F, 0x8B, 8, 0, 0], None),
@@ -638,6 +705,19 @@ mod tests {
         for (bytes, expected) in cases {
             assert_eq!(executable_format(bytes), expected, "{bytes:?}");
         }
+    }
+
+    #[test]
+    fn an_executable_that_a_file_rule_examined_is_still_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "helper.start", b"\x7fELF\x02\x01\x01\0\0\0\0\0");
+        let rules = vec![file_rule("*.start", probe)];
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.inconclusive_count(), 1);
+        assert!(!report.is_complete());
     }
 
     #[test]
@@ -709,7 +789,7 @@ mod tests {
     fn file_rules_see_raw_bytes_of_binary_looking_files() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "x.pth", b"# \0 comment\nimport os\n");
-        write(dir.path(), "other.bin", b"\0\0");
+        write(dir.path(), "other.bin", b"\x1f\x8b\0\0");
         let rules = [file_rule("**/*.pth", probe)];
 
         let report = scan(dir.path(), &rules, Limits::default());
@@ -980,11 +1060,11 @@ mod tests {
     }
 
     #[test]
-    fn files_that_are_not_scripts_with_a_nul_stay_binary() {
+    fn files_with_a_known_binary_header_stay_binary() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "data.bin", b"\0\0\0");
-        write(dir.path(), "notes.txt", b"a\0b");
         write(dir.path(), "image.png", b"\x89PNG\0\0");
+        write(dir.path(), "data.gz", &[0x1F, 0x8B, 8, 0, 0]);
+        write(dir.path(), "module.wasm", b"\0asm\x01\0\0\0");
         let rules = builtin_rules().unwrap();
 
         let report = scan(dir.path(), &rules, Limits::default());
@@ -1003,25 +1083,79 @@ mod tests {
     }
 
     #[test]
-    fn utf16_scripts_are_not_reported_as_concealment() {
+    fn a_utf16_script_is_decoded_and_read_by_the_line_rules() {
         let dir = tempfile::tempdir().unwrap();
-        // "Write-Host" in UTF-16LE with a byte order mark, as Windows PowerShell writes it.
-        let mut bytes = vec![0xFF, 0xFE];
-        for unit in "Write-Host".encode_utf16() {
-            bytes.extend(unit.to_le_bytes());
-        }
-        write(dir.path(), "legit.ps1", &bytes);
+        let utf16 = |text: &str, le: bool| {
+            let mut bytes = if le {
+                vec![0xFF, 0xFE]
+            } else {
+                vec![0xFE, 0xFF]
+            };
+            for unit in text.encode_utf16() {
+                bytes.extend(if le {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            bytes
+        };
+        write(dir.path(), "legit.ps1", &utf16("Write-Host", true));
+        write(
+            dir.path(),
+            "bidi.ps1",
+            &utf16("# a\n# \u{202E}evil\n", true),
+        );
+        write(dir.path(), "bidi-be.vbs", &utf16("' \u{202E}evil\n", false));
         let rules = builtin_rules().unwrap();
 
         let report = scan(dir.path(), &rules, Limits::default());
 
         assert!(builtin_findings(&report, NUL_RULE).is_empty());
-        // To the scanner it is binary data for now, so it is listed as such.
-        // Decoding UTF-16 is part of the planned file classification; until
-        // then a UTF-16 script is not analyzed.
-        assert_eq!(report.skipped.len(), 1);
-        assert_eq!(report.skipped[0].reason, SkipReason::Binary);
-        assert!(report.is_complete());
+        assert!(report.skipped.is_empty());
+        let bidi: Vec<_> = report
+            .findings
+            .iter()
+            .map(|f| (to_slash(&f.file), f.line))
+            .collect();
+        assert_eq!(
+            bidi,
+            [("bidi-be.vbs".to_string(), 1), ("bidi.ps1".to_string(), 2)]
+        );
+    }
+
+    #[test]
+    fn a_file_with_a_nul_and_no_known_header_still_reaches_the_line_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        // Sourced by install.sh; dash drops the NUL and runs the rest.
+        write(dir.path(), "lib/common", b"# x\n\0\n# \xE2\x80\xAEevil\n");
+        write(dir.path(), ".envrc", b"a\0\n# \xE2\x80\xAEevil\n");
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let lines: Vec<_> = report
+            .findings
+            .iter()
+            .map(|f| (to_slash(&f.file), f.line))
+            .collect();
+        assert_eq!(
+            lines,
+            [(".envrc".to_string(), 2), ("lib/common".to_string(), 3)]
+        );
+        assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn an_elf_named_like_a_script_is_an_executable_not_a_script() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tool.sh", b"\x7fELF\x02\x01\x01\0\0\0\0\0");
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(report.inconclusive_count(), 1);
+        assert!(builtin_findings(&report, NUL_RULE).is_empty());
     }
 
     #[test]
@@ -1032,6 +1166,9 @@ mod tests {
         assert!(!is_script("a.txt", b"hello"));
         assert!(!is_script("archive.sh.zip", b"PK"));
         assert!(!is_script("x.ps1", &[0xFF, 0xFE, b'a', 0]));
+        assert!(has_script_extension("x.ps1"));
+        assert_eq!(decode_utf16_bom(&[0xFF, 0xFE, b'a', 0, b'b', 0]), "ab");
+        assert_eq!(decode_utf16_bom(&[0xFE, 0xFF, 0, b'a', 0xD8]), "a\u{FFFD}");
         assert!(!is_script("noext", b"plain"));
 
         assert_eq!(first_nul_line(b"a\nb\0c"), Some(2));
