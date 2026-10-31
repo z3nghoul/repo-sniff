@@ -34,6 +34,8 @@ hostile repository cannot paint over the report.
 |---|---|---|
 | `deception.bidi-control` | CRITICAL | Unicode bidirectional control characters that make code look different from what it does (Trojan Source, CVE-2021-42574) |
 | `ide.vscode-folder-open-task` | HIGH, CRITICAL | VS Code tasks that run when a folder is opened, in `.vscode/tasks.json` and `*.code-workspace`; CRITICAL if the command downloads or runs code from a string |
+| `deps.python-pth-exec` | INFO to CRITICAL | Python `.pth` files with a line that starts with `import`, which Python runs every time it starts. Judged the way every supported Python version would read it; known honest forms (setuptools, virtualenv, editable installs, pytest-cov) are lowered |
+| `deps.python-start-entrypoint` | HIGH | Python 3.15 `.start` files, whose `package.module:callable` entry points Python calls every time it starts |
 
 The full catalog of planned detections, with their levels and MITRE ATT&CK
 techniques, is in [docs/DETECTIONS.md](docs/DETECTIONS.md).
