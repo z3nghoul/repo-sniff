@@ -5,5 +5,7 @@
 //! Action all build on top of it.
 
 pub mod finding;
+pub mod rule;
 
 pub use finding::{Finding, Severity, Stage};
+pub use rule::{Rule, RuleError, builtin_rules, parse_rules};
