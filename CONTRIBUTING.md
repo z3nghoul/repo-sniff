@@ -135,16 +135,24 @@ repo-sniff runs on Linux, Windows and macOS, and CI tests all three.
 
 ## Scanner security
 
-The scanned repository may try to attack the scanner itself. Changes must
-keep these guarantees (full list in
+The scanned repository may try to attack the scanner itself. These are design
+guarantees (the ones that exist in the code have tests); none of them is a
+promise of absolute safety, so never describe them as one. Changes must keep
+them (full list in
 [docs/DETECTIONS.md](docs/DETECTIONS.md#5-additional-requirements)):
 
 - symlinks are never followed;
 - file size, file count and decoding depth are limited, and every skipped
   file is reported;
 - archives are flagged, never unpacked;
-- remote repositories are cloned with hooks, LFS filters, submodules and
-  credential prompts disabled;
+- remote repositories are cloned over https only, by a git that runs with an
+  empty environment and an empty configuration (so no filter, credential
+  helper or fsmonitor from any configuration runs), with hooks and templates
+  off, symlinks written as plain files, submodules not fetched and no
+  interactive prompts;
+- credentials in a URL are hidden in everything that is printed;
+- an incomplete scan (file limit reached, files not read) is never reported
+  as clean;
 - nothing from the scanned repository (locales, configuration, rules) can
   silently change what the report shows: the scanner never loads locales or
   rules from it, and any exclusions it declares are surfaced in the report,
