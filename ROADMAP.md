@@ -30,7 +30,7 @@ architecture early.
 - [ ] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
 - [x] Rule: Trojan Source bidi characters
 - [x] Rule: `.vscode/tasks.json` / `*.code-workspace` with `runOn: folderOpen`: JSONC parser, `engine` field, `jsonc` checks
-- [ ] End-to-end snapshot test with `insta`
+- [x] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag
 - [x] Clone hardening: hooks disabled through an empty temporary hooks directory (works on every OS); plain-text transports (`http://`, `git://`) rejected; tests
 - [x] CI matrix (ubuntu, windows, macos) and `.gitattributes` keeping fixture line endings untouched
