@@ -5,6 +5,12 @@ of detections lives in [docs/DETECTIONS.md](docs/DETECTIONS.md); detection
 milestones below only name rule families, and the exact set for each one is
 agreed before it starts.
 
+Order (changed on 2026-10-31 so a usable product exists earlier): detections
+for automatic execution (M2), report and scoring (M3), SARIF, GitHub Action
+and release binaries (M4), the README showcase (M5), the TUI with
+localization (M6), and only then capabilities and AST (M7), obfuscation (M8)
+and dependencies (M9).
+
 ## Milestone 0 — Scaffold (done)
 
 - [x] Local git identity, cargo project, license
@@ -23,7 +29,7 @@ architecture early.
 - [x] Split into a cargo workspace: `repo-sniff-core` (no UI) + `repo-sniff` binary
 - [x] `Finding`, `Severity` and `Stage` model
 - [x] Load rules from TOML with full metadata (id, family, stage, severity, ATT&CK, description, example)
-- [x] Walk repository files with safety limits (no symlinks, size and count limits, `.gitignore` not honored)
+- [x] Walk repository files with safety limits (no symlinks, size and count limits, `.gitignore` never applied; for local git repositories see "tracked files" in M2)
 - [x] Line-based regex rule engine
 - [x] Plain-text report showing severity, stage and ATT&CK ID per finding
 - [x] Report text from the scanned repository (file names, task labels) is cleaned of control, bidi and zero-width characters; paths are relative with `/` on every OS
@@ -44,11 +50,14 @@ architecture early.
 Rule families, each in its own branch and PR, fixtures approved first:
 
 - [ ] Repository contents: committed binaries, disguised executables (magic bytes), droppers (.lnk, .scr, .hta), Windows scripts (.bat, .ps1, .vbs), symlinks out of the repo
+- [ ] Repository contents: committed virtual environments (`pyvenv.cfg`) as a finding of their own, in a separate pull request
 - [ ] Suspicious files: password-protected archives (flagged, never unpacked), data appended after PNG `IEND` / JPEG `EOI`, large high-entropy files of unknown format, binary "test files" referenced by build scripts
 - [ ] Submodules pointing at third-party URLs
 - [ ] IDE: VS Code tasks/settings, devcontainer, `.idea` run configurations, `.envrc`
 - [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
-- [ ] npm and Python install hooks: lifecycle scripts, `setup.py`, `.pth` (levels INFO to CRITICAL, Python-compatible line splitting), build backends
+- [ ] npm install hooks: lifecycle scripts
+- [ ] Python install hooks: `setup.py`, build backends
+- [ ] Python startup files: `.pth` lines run by any supported Python version (graded levels INFO to CRITICAL; symlinked, oversized and non-UTF-8 files included) and `.start` entry points (Python 3.15)
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
 - [ ] Build scripts: `build.rs`, Rust proc-macros, `.vcxproj` build events, CMake, Makefile, Gradle wrapper and tasks
 - [ ] GitHub Actions workflows
@@ -56,6 +65,9 @@ Rule families, each in its own branch and PR, fixtures approved first:
 
 Infrastructure:
 
+- [ ] File-level checks: `Matcher::File` with a `FileCtx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
+- [ ] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
+- [ ] Tracked files: for a local git repository scan `git ls-files` by default and everything else with `--include-untracked`; `.gitignore` is still never applied, so a tracked file is scanned even if it is ignored (a small separate pull request)
 - [ ] Review point: binary contents via `goblin` (imports, SHA-256, code signature, embedded URLs/IPs); optional VirusTotal hash lookup with the user's own key
 - [ ] Benchmark on popular honest repositories (target: 0 critical); started here and extended in every later milestone
 - [ ] Real-sample test suite gated by `REPO_SNIFF_REAL_SAMPLES` (path to samples outside the repo; skipped when unset)
@@ -70,7 +82,20 @@ Infrastructure:
 - [ ] `.repo-sniff.toml`: `[filters]` and `[[exclude]]` with mandatory reason
 - [ ] Parallel scanning with rayon
 
-## Milestone 3.5 — TUI
+## Milestone 4 — SARIF, GitHub Action, releases
+
+- [ ] SARIF output for GitHub code scanning
+- [ ] GitHub Action that scans pull requests
+- [ ] Release binaries for Linux, Windows and macOS
+
+## Milestone 5 — README as a showcase
+
+- [ ] Demo GIF or screenshot of the report
+- [ ] Examples and "how to add your own rule"
+- [ ] Publish benchmark results in the README
+- [ ] Honest list of blind spots
+
+## Milestone 6 — TUI and localization
 
 - [ ] ratatui + crossterm app shell: alternate screen, raw mode, panic hook restores the terminal
 - [ ] The Elm Architecture: state → event → update → render
@@ -97,7 +122,7 @@ Localization:
 - [ ] `repo-sniff locale check <file>`: missing/extra keys, lost/extra placeholders, markup errors, overridden severity labels; run in CI for built-in locales
 - [ ] Non-interactive fallback when stdout is not a TTY or `--no-tui`/`--json`/`--sarif` is given
 
-## Milestone 4 — Capabilities and AST
+## Milestone 7 — Capabilities and AST
 
 - [ ] tree-sitter for Python, JavaScript, C/C++
 - [ ] tree-sitter for Rust, PowerShell and bash
@@ -116,7 +141,7 @@ Review points:
 - [ ] Bugdoors at LOW: risky C/C++ functions (`strcpy`, `sprintf`, `gets`, unchecked `memcpy`), Rust `unsafe` blocks
 - [ ] Capability map: short summary of what the program can do
 
-## Milestone 5 — Obfuscation
+## Milestone 8 — Obfuscation
 
 - [ ] Shannon entropy, long base64/hex blobs, minified code among normal sources
 - [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`) with depth and size limits
@@ -128,7 +153,7 @@ Review points:
 - [ ] Decryption (AES, Fernet, CryptoJS) whose result is executed or loaded as code
 - [ ] Code that reads image pixels/bytes and executes the result (steganography)
 
-## Milestone 6 — Dependencies
+## Milestone 9 — Dependencies
 
 - [ ] Typosquatting against popular packages
 - [ ] Known vulnerabilities via the OSV API
@@ -138,19 +163,6 @@ Review points:
 
 - [ ] Young dependencies via registry APIs (npm, crates.io, PyPI): recently published, few downloads, changed owner
 - [ ] Release binaries via the GitHub API, README telling users to download releases instead of building
-
-## Milestone 7 — SARIF, GitHub Action, releases
-
-- [ ] SARIF output for GitHub code scanning
-- [ ] GitHub Action that scans pull requests
-- [ ] Release binaries for Linux, Windows and macOS
-
-## Milestone 8 — README as a showcase
-
-- [ ] Demo GIF or screenshot of the report
-- [ ] Examples and "how to add your own rule"
-- [ ] Publish benchmark results in the README
-- [ ] Honest list of blind spots
 
 ## Later
 

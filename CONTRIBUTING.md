@@ -47,6 +47,15 @@ The workspace has two crates:
 - Tick the matching task in [ROADMAP.md](ROADMAP.md) in the commit that
   completes it.
 
+## Review findings
+
+A design or code review of a pull request can raise more than the pull
+request needs. Findings that block the change are fixed in it. New, smaller
+findings (hardening ideas, extra evasion cases, nits) are not folded into
+the same pull request: file each as a GitHub issue with the `hardening`
+label instead (`gh issue create --label hardening`), so the pull request
+stays reviewable and nothing is lost.
+
 ## Adding a rule
 
 Rules are TOML files in `crates/repo-sniff-core/rules/`:
@@ -113,8 +122,7 @@ Fixtures live in `crates/repo-sniff-core/tests/fixtures/<family>/` with
 
 ## Cross-platform rules
 
-repo-sniff runs on Linux, Windows and macOS, and CI tests all three
-(the CI matrix lands in milestone 1).
+repo-sniff runs on Linux, Windows and macOS, and CI tests all three.
 
 - Work with paths only through `Path` / `PathBuf`; never build paths by
   concatenating strings with `/` or `\`.
