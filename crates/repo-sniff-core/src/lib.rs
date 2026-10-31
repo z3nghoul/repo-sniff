@@ -6,6 +6,8 @@
 
 pub mod finding;
 pub mod rule;
+pub mod walk;
 
 pub use finding::{Finding, Severity, Stage};
 pub use rule::{Rule, RuleError, builtin_rules, parse_rules};
+pub use walk::{Limits, SkipReason, Skipped, WalkResult, walk};
