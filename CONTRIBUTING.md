@@ -71,6 +71,8 @@ needs a `pattern`. Other engines are added as the scanner grows.
 Unknown fields, unknown stages, malformed ATT&CK IDs, invalid regexes and
 duplicate IDs are rejected when the rules load, so `cargo test` catches them.
 
+The `files` globs ignore case, because Windows and macOS file systems do.
+
 Patterns use the [`regex`](https://docs.rs/regex) crate, which matches in
 linear time; never add a regex engine with backtracking.
 
