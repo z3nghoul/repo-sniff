@@ -27,7 +27,7 @@ architecture early.
 - [x] Line-based regex rule engine
 - [x] Plain-text report showing severity, stage and ATT&CK ID per finding
 - [ ] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
-- [ ] Rule: Trojan Source bidi characters
+- [x] Rule: Trojan Source bidi characters
 - [ ] Rule: `.vscode/tasks.json` with `runOn: folderOpen` (written by the author)
 - [ ] End-to-end snapshot test with `insta`
 - [ ] `--ref` option to scan a branch or tag

@@ -122,7 +122,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| Trojan Source: Unicode bidi control characters (CVE-2021-42574) | CRITICAL | — | — |
+| Trojan Source: Unicode bidi control characters (CVE-2021-42574) | CRITICAL | — | `deception.bidi-control` |
 | Code hidden with whitespace past the edge of the screen (beyond ~column 200) or after hundreds of blank lines | CRITICAL | T1027 | — |
 | Invisible (zero-width) characters and homoglyphs in identifiers (Cyrillic `а` instead of Latin `a`) | HIGH | T1036 | — |
 | README advising "disable your antivirus", "download the password-protected zip", `curl \| bash` | HIGH | T1204 | — |
