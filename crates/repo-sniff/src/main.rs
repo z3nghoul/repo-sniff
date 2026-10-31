@@ -1,5 +1,6 @@
 mod clone;
 mod fail_on;
+mod redact;
 mod report;
 mod target;
 
@@ -11,6 +12,7 @@ use clap::{Parser, Subcommand};
 use repo_sniff_core::{Limits, builtin_rules};
 
 use crate::fail_on::FailOn;
+use crate::redact::redact_credentials;
 use crate::target::Target;
 
 /// Exit status when the scan found something at or above `--fail-on`.
@@ -59,7 +61,9 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("Error: {err:?}");
+            // The error chain can quote a URL (a failed clone, git's own
+            // message), so it is cleaned as a whole before it is printed.
+            eprintln!("Error: {}", redact_credentials(&format!("{err:?}")));
             ExitCode::from(EXIT_ERROR)
         }
     }
@@ -95,13 +99,14 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
             scan_dir(&root, raw_target, fail_on)
         }
         Target::Remote(url) => {
-            eprintln!("Cloning {url}");
+            clone::validate(&url, git_ref)?;
+            eprintln!("Cloning {}", redact_credentials(&url));
             // `checkout` must stay alive until the scan ends: dropping it
             // deletes the cloned files.
             let checkout = clone::shallow_clone(&url, git_ref)?;
             let label = match git_ref {
-                Some(git_ref) => format!("{raw_target} (ref {git_ref})"),
-                None => raw_target.to_string(),
+                Some(git_ref) => format!("{} (ref {git_ref})", redact_credentials(raw_target)),
+                None => redact_credentials(raw_target),
             };
             scan_dir(checkout.path(), &label, fail_on)
         }

@@ -162,5 +162,52 @@ fn ssh_targets_are_a_runtime_error_that_explains_how_to_scan_a_local_clone() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("ssh targets are not supported"), "{stderr}");
         assert!(stderr.contains("repo-sniff scan some-folder"), "{stderr}");
+        assert!(
+            !stderr.contains("Cloning"),
+            "a refused target must not be announced: {stderr}"
+        );
     }
+}
+
+/// A clone that fails at the name lookup (`.invalid` never resolves), so no
+/// network is needed. Whatever happens, the token must not be printed.
+#[test]
+fn credentials_in_the_target_never_reach_stdout_or_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for target in [
+        "https://TOKEN123@example.invalid/owner/repo",
+        "https://user:SECRET456@example.invalid/owner/repo.git",
+    ] {
+        let output = run(dir.path(), &["scan", target]);
+
+        assert_eq!(code(&output), 2, "{target}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for secret in ["TOKEN123", "SECRET456", "user:"] {
+            assert!(!stdout.contains(secret), "{secret} in stdout: {stdout}");
+            assert!(!stderr.contains(secret), "{secret} in stderr: {stderr}");
+        }
+        assert!(
+            stderr.contains("Cloning https://***@example.invalid/owner/repo"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("git clone of https://***@example.invalid/owner/repo"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn credentials_in_a_refused_target_are_not_repeated() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run(
+        dir.path(),
+        &["scan", "http://TOKEN789@example.invalid/owner/repo"],
+    );
+
+    assert_eq!(code(&output), 2);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("TOKEN789"));
 }
