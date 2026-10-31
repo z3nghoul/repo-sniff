@@ -24,6 +24,13 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     "rb", "pl", "pm", "php", "ps1", "psm1", "psd1", "bat", "cmd", "vbs", "wsf", "lua",
 ];
 
+/// A file with NUL bytes that is not a script is read by the line rules only
+/// if at most one byte in this many is NUL. Text with a stray NUL has a
+/// handful of them; padding in a data format, or ASCII text in UTF-16 without a
+/// byte order mark (one byte in two), has far more. One in eight is above any
+/// accidental NUL in text and well below the density of such data.
+const MAX_NUL_RATIO: u64 = 8;
+
 /// One file check may list at most this many findings for one file; the rest
 /// are summarized on the last one, so a hostile file cannot flood the report.
 const MAX_FINDINGS_PER_FILE_CHECK: usize = 100;
@@ -133,6 +140,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         let script = is_script(&slash_path, &bytes);
         let nul_line = script.then(|| first_nul_line(&bytes)).flatten();
         let mut utf16_text = None;
+        let mut binary = false;
 
         if looks_binary(&bytes) {
             // An executable is listed even when a file rule looked at it, and
@@ -155,20 +163,33 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     // Windows PowerShell and WSH read UTF-16 scripts.
                     utf16_text = Some(decode_utf16_bom(&bytes));
                 } else if known_binary_magic(&bytes) {
-                    if checked.examined {
-                        report.files_scanned += 1;
-                    } else {
-                        skipped.push(Skipped {
-                            path: relative.clone(),
-                            reason: SkipReason::Binary,
-                        });
-                    }
-                    continue;
+                    binary = true;
                 }
             }
-            // Anything else with a NUL byte and no known binary header goes
-            // to the line rules with the NULs removed: `dash` drops them, so
-            // a file sourced by a script can hide behind one.
+        }
+        // Any other file with a NUL byte goes to the line rules with the NULs
+        // removed only if it is text with a stray NUL: `dash` drops them, so a
+        // file sourced by a script can hide behind one. Data such as icons and
+        // audio, which has no header in the list above, would otherwise be
+        // decoded lossily and match byte sequences by chance.
+        if !binary
+            && !script
+            && utf16_text.is_none()
+            && bytes.contains(&0)
+            && !nul_file_is_text(&bytes)
+        {
+            binary = true;
+        }
+        if binary {
+            if checked.examined {
+                report.files_scanned += 1;
+            } else {
+                skipped.push(Skipped {
+                    path: relative.clone(),
+                    reason: SkipReason::Binary,
+                });
+            }
+            continue;
         }
 
         report.files_scanned += 1;
@@ -450,6 +471,53 @@ fn known_binary_magic(bytes: &[u8]) -> bool {
         b"\0\x01\0\0",
     ];
     MAGICS.iter().any(|magic| bytes.starts_with(magic))
+}
+
+/// Whether a file that contains NUL bytes reads as text with a few stray ones:
+/// the NULs are at most one byte in `MAX_NUL_RATIO`, and the rest is valid
+/// UTF-8 once they are removed. Random data (compressed audio, icons) fails the
+/// second test almost at once.
+fn nul_file_is_text(bytes: &[u8]) -> bool {
+    let mut probe = NulProbe::default();
+    probe.feed(bytes);
+    probe.is_text()
+}
+
+/// The two measurements behind `nul_file_is_text`, taken over a stream of
+/// chunks so a large file never has to be in memory at once.
+#[derive(Default)]
+struct NulProbe {
+    total: u64,
+    nuls: u64,
+    /// The start of a multi-byte UTF-8 sequence cut off by the end of a chunk.
+    pending: Vec<u8>,
+    invalid: bool,
+}
+
+impl NulProbe {
+    fn feed(&mut self, chunk: &[u8]) {
+        self.total += chunk.len() as u64;
+        for (index, segment) in chunk.split(|&b| b == 0).enumerate() {
+            if index > 0 {
+                self.nuls += 1;
+            }
+            if self.invalid || segment.is_empty() {
+                continue;
+            }
+            self.pending.extend_from_slice(segment);
+            match std::str::from_utf8(&self.pending) {
+                Ok(_) => self.pending.clear(),
+                Err(err) if err.error_len().is_none() => {
+                    self.pending.drain(..err.valid_up_to());
+                }
+                Err(_) => self.invalid = true,
+            }
+        }
+    }
+
+    fn is_text(&self) -> bool {
+        !self.invalid && self.pending.is_empty() && self.nuls * MAX_NUL_RATIO <= self.total
+    }
 }
 
 /// The 1-based line of the first NUL byte, counting `\n` as shells do.
@@ -1144,6 +1212,107 @@ mod tests {
             [(".envrc".to_string(), 2), ("lib/common".to_string(), 3)]
         );
         assert!(report.skipped.is_empty());
+    }
+
+    /// Bytes that are not valid UTF-8 (0xFF never is) around a sequence the
+    /// bidi rule would match, with a few NULs, like the middle of an icon or
+    /// an audio stream.
+    fn noise_with_bidi(header: &[u8]) -> Vec<u8> {
+        let mut bytes = header.to_vec();
+        for i in 0..400u32 {
+            bytes.push((i.wrapping_mul(37) % 251) as u8 | 0x80);
+        }
+        bytes.extend_from_slice(&[0xFF, 0xE2, 0x80, 0xAE, 0xFF]);
+        bytes.extend_from_slice(&[0x11; 200]);
+        bytes
+    }
+
+    #[test]
+    fn binary_data_without_a_known_header_is_not_read_by_the_line_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "icon.icns", &noise_with_bidi(b"icns\0\0\x10\0"));
+        write(
+            dir.path(),
+            "voice.mp3",
+            &noise_with_bidi(b"ID3\x03\0\0\0\0\x0a\0"),
+        );
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.skipped.len(), 2);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .all(|s| s.reason == SkipReason::Binary)
+        );
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn a_script_is_read_even_when_the_rest_of_it_is_binary() {
+        // Scripts keep the rule that a NUL does not make them binary: the
+        // zipapp pattern (see the NUL rule) and the NUL itself are reported.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "tool.sh",
+            &noise_with_bidi(b"#!/bin/sh\n# a\0b\n"),
+        );
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(
+            builtin_findings(&report, NUL_RULE),
+            [("tool.sh".to_string(), 2)]
+        );
+        assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn text_with_many_nuls_is_binary_even_when_what_is_left_is_text() {
+        // UTF-16 without a byte order mark: half of the bytes are NUL. There
+        // is nothing to read as lines; this is the trade-off of the ratio.
+        let dir = tempfile::tempdir().unwrap();
+        let wide: Vec<u8> = "# \u{202e}evil\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        write(dir.path(), "wide", &wide);
+        let rules = builtin_rules().unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(report.findings.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+    }
+
+    #[test]
+    fn nul_ratio_and_utf8_checks() {
+        assert!(nul_file_is_text(b"a stray \0 in some text"));
+        assert!(nul_file_is_text("h\0\u{e9}llo \u{202e} world\n".as_bytes()));
+        // A multi-byte character split by a NUL is whole again once it is gone.
+        assert!(nul_file_is_text(
+            b"some text \xE2\0\x80\xAE here and there\0"
+        ));
+        assert!(!nul_file_is_text(b"some text \0 and \xFF"));
+        assert!(!nul_file_is_text(b"some text \0 and \xE2\x80"), "cut-off");
+        assert!(!nul_file_is_text(&[0; 64]));
+        // The limit is one NUL in eight bytes.
+        assert!(nul_file_is_text(b"abcdefg\0"));
+        assert!(!nul_file_is_text(b"abcdef\0\0"));
+
+        // Feeding in pieces gives the same answer as feeding all at once.
+        let data = "h\u{e9}\0llo \u{202e}\0 and more text \n".as_bytes();
+        for cut in 0..data.len() {
+            let mut probe = NulProbe::default();
+            probe.feed(&data[..cut]);
+            probe.feed(&data[cut..]);
+            assert!(probe.is_text(), "cut at {cut}");
+        }
     }
 
     #[test]
