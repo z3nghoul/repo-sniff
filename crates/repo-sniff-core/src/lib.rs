@@ -5,6 +5,7 @@
 //! Action all build on top of it.
 
 pub mod finding;
+pub mod jsonc;
 pub mod rule;
 pub mod sanitize;
 pub mod scan;
