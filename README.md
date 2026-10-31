@@ -14,7 +14,7 @@ It is aimed at the moment right before you `npm install`, `pip install`,
 these steps can run code from the repository on your machine, and fake
 "cheats", "tools" and "PoCs" exploit exactly that.
 
-> ⚠️ Early development. Right now `repo-sniff` resolves and clones targets;
+> **Early development.** Right now `repo-sniff` resolves and clones targets;
 > the analysis layers below are being built step by step.
 
 ## Safety first
