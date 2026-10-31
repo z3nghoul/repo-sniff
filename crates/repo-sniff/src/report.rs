@@ -71,6 +71,12 @@ pub fn render(report: &Report, target: &str) -> String {
                     format!("executable binary ({format}), not analyzed")
                 }
                 SkipReason::Unreadable { error } => format!("unreadable: {error}"),
+                SkipReason::GitMetadata { nested: false } => {
+                    "git metadata, not analyzed".to_string()
+                }
+                SkipReason::GitMetadata { nested: true } => {
+                    "nested git repository, not analyzed".to_string()
+                }
             };
             let _ = writeln!(
                 out,
@@ -131,6 +137,10 @@ fn skip_breakdown(report: &Report) -> String {
             count(|r| matches!(r, SkipReason::Symlink { .. })),
             "symlink",
         ),
+        (
+            count(|r| matches!(r, SkipReason::GitMetadata { .. })),
+            "git metadata",
+        ),
     ];
     parts
         .iter()
@@ -147,12 +157,18 @@ fn completeness(report: &Report) -> String {
     };
     if report.is_complete() {
         let binaries = count(|r| matches!(r, SkipReason::Binary));
-        return if binaries == 0 {
+        let git = count(|r| matches!(r, SkipReason::GitMetadata { .. }));
+        let mut notes = Vec::new();
+        if binaries > 0 {
+            notes.push(format!("{binaries} binary files were not analyzed"));
+        }
+        if git > 0 {
+            notes.push("git metadata was not analyzed".to_string());
+        }
+        return if notes.is_empty() {
             "Scan: complete (every file was read)".to_string()
         } else {
-            format!(
-                "Scan: complete (every file was read; {binaries} binary files were not analyzed)"
-            )
+            format!("Scan: complete (every file was read; {})", notes.join("; "))
         };
     }
     let mut reasons = Vec::new();
@@ -175,6 +191,10 @@ fn completeness(report: &Report) -> String {
         reasons.push(format!(
             "{executables} executable binaries were not analyzed"
         ));
+    }
+    let nested = count(|r| matches!(r, SkipReason::GitMetadata { nested: true }));
+    if nested > 0 {
+        reasons.push(format!("{nested} nested git repositories were not read"));
     }
     format!(
         "Scan: INCONCLUSIVE ({}). Findings above may be incomplete, and a result without \
