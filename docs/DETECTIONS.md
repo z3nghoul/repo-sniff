@@ -49,6 +49,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 | .bat, .cmd, .ps1, .vbs, .js (Windows Script Host) | MEDIUM | T1059 | — |
 | Password-protected archives | HIGH | T1027 | — |
 | Symlinks pointing outside the repository | HIGH | — | — |
+| Committed Python virtual environment (`pyvenv.cfg`, `site-packages/`), reported as a finding of its own; the `.pth` files inside are still judged normally | MEDIUM | — | — |
 | Submodules pointing at third-party URLs | MEDIUM | — | — |
 | Large high-entropy files of unknown format | MEDIUM | T1027 | — |
 
@@ -69,7 +70,15 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 |---|---|---|---|
 | npm `preinstall` / `install` / `postinstall` / `prepare` | HIGH, with network, exec or obfuscation CRITICAL | T1195.001 | — |
 | `setup.py` containing code other than the `setup()` call | HIGH | T1195.001 | — |
-| `.pth` files with a line Python executes at start-up (a line starting with `import` followed by a space or tab). A line counts if any supported Python version would run it, so lines are split the way the most permissive version does it. Paths only: INFO. Known honest form (exact file name and content, e.g. setuptools): LOW. Any other executable line: HIGH. An executable line using `exec`, `eval`, `compile`, `__import__`, `base64`, `zlib`, `marshal`, `codecs`, `subprocess`, `os.system`, `socket`, `urllib` or `requests`, or a long or high-entropy one: CRITICAL | INFO to CRITICAL | T1546.018 | — |
+| Python `.pth` file with a line that starts with `import` and a space or tab, which `site.py` runs at every interpreter start-up. A line counts if ANY supported version (3.10 to 3.15) would run it: lines are split like `str.splitlines` (also on `\r`, `\v`, `\f`, `\x1c`-`\x1e`, U+0085, U+2028, U+2029), Python's own whitespace set is stripped (3.15 strips each line), a BOM counts only at the start of the file, and the file is read as raw bytes so a NUL byte or invalid UTF-8 cannot hide it. Any other executable line | HIGH | T1546.018 | `deps.python-pth-exec` |
+| The same, when the line uses `exec`, `eval`, `compile`, `__import__`, `base64`, `zlib`, `marshal`, `codecs`, `subprocess`, `system`, `popen`, `socket`, `urllib`, `requests` and similar words, contains non-ASCII characters or `\x`/`\u` escapes, is 200 or more characters long, has a run of 32 or more hex digits, or has a base64-like run of 40 or more characters (letters and digits, entropy of 4.2 bits per character or more, adjacent string literals joined first). These thresholds apply only to executable `.pth` lines | CRITICAL | T1546.018 | `deps.python-pth-exec` |
+| `.pth` that is a known honest form: file name AND every line match one written by setuptools (`distutils-precedence.pth`, `*-nspkg.pth`), virtualenv (`_virtualenv.pth`), an editable install (`__editable__.*.pth`) or pytest-cov up to 6.2.1. LOW if the module it imports is not in the repository; MEDIUM if it is (honest repositories do not commit it, and it is attacker-controlled) or if the scan was cut short and presence is unknown | LOW or MEDIUM | T1546.018 | `deps.python-pth-exec` |
+| `.pth` that only adds paths to `sys.path` | INFO | T1546.018 | `deps.python-pth-exec` |
+| `.pth` that Python never reads (name starts with a dot, or the extension is not exactly lowercase `.pth`) but that has an executable line | LOW | T1546.018 | `deps.python-pth-exec` |
+| `.pth` or `.start` file that is a symbolic link (Python follows it; the in-repository target is checked too) or is larger than the scan limit (Python reads it in full) | HIGH | T1546.018 | `deps.python-pth-exec`, `deps.python-start-entrypoint` |
+| `.pth` file that is not valid UTF-8 (honest ones are ASCII; Python may decode it with the system's locale encoding) | MEDIUM | T1546.018 | `deps.python-pth-exec` |
+| Python 3.15 `.start` file (PEP 829) with an entry point `package.module:callable`, which `site.py` calls at start-up. Only the strict form `pkgutil.resolve_name` accepts counts; a `.start` file that is not UTF-8 is ignored by Python, so it is not reported. A matching `.start` never lowers the finding for the `.pth` next to it | HIGH | T1546.018 | `deps.python-start-entrypoint` |
+| `.start` file Python never reads (dot-prefixed name, extension not exactly lowercase `.start`) with an entry point | LOW | T1546.018 | `deps.python-start-entrypoint` |
 | Custom build backend inside the repo (pyproject.toml) | HIGH | T1195.001 | — |
 | Lockfile resolving a package from outside the official registry | HIGH | T1195.001 | — |
 | Typosquatted package names | HIGH | T1195.001 | — |
@@ -77,6 +86,8 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 | Known vulnerabilities via OSV | MEDIUM, critical CVE HIGH | — | — |
 | binding.gyp, composer scripts, Rakefile / Gemfile with code | MEDIUM | — | — |
 | Dockerfile with `curl \| sh` | MEDIUM | T1105 | — |
+
+Known gap: a payload kept under another name and renamed to `*.pth` while the package is built (for example hatch `force-include`, setuptools `data_files`) is not seen by the `.pth` rules, because the file in the repository does not have that name yet. It needs a rule that understands the build configuration.
 
 ### Stage 3: building
 
@@ -222,6 +233,8 @@ scanner itself:
 - never unpack archives (zip-bomb protection), only flag them;
 - regular expressions only through the `regex` crate (linear-time matching,
   protection against ReDoS);
+- no file is skipped silently: binary, oversized, symlinked and unreadable files are all listed in the report; rules that select files by name (such as `.pth` and `.start`) run on the raw bytes before the binary check, and also see oversized files and symlinks, so "too big" or "a link" is not a way around them;
+- work per line and per file is bounded (a line is analysed up to 4096 bytes, a longer one is CRITICAL by itself; at most 100 findings per file per rule), so a hostile file cannot make the scan quadratic or flood the report;
 - remote repositories are cloned shallowly over `https` or `ssh` only
   (`http://` and `git://` are refused), with hooks redirected to an empty
   directory, Git LFS filters skipped, submodules not fetched and credential

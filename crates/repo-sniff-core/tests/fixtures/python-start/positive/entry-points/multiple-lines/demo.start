@@ -1,0 +1,4 @@
+# SYNTHETIC TEST FIXTURE — not functional
+demo.mod:run
+# between
+other.mod:main

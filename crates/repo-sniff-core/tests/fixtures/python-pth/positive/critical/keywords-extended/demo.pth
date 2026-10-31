@@ -1,0 +1,17 @@
+# SYNTHETIC TEST FIXTURE — not functional
+import os as o; o.popen('true')
+import os; os . system('true')
+import os; from os import system as s
+import sys; getattr(sys, 'exit')
+import importlib; importlib.import_module('os')
+import binascii; binascii.unhexlify('6869')
+import sys; bytes.fromhex('6869')
+import pickle; pickle.loads(b'N.')
+import ctypes; ctypes.CDLL
+import runpy; runpy.run_path
+import pty; pty.spawn
+import http.client; http.client.HTTPConnection
+import ftplib; ftplib.FTP
+import os; os.execv
+import os; os.spawnl
+import os; os.execlp
