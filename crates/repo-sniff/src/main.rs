@@ -34,7 +34,7 @@ struct Cli {
 enum Command {
     /// Scan a local directory or a remote git repository.
     Scan {
-        /// Path to a local directory or a git URL (https://, ssh://, git@...).
+        /// Path to a local directory or an https:// URL of a git repository.
         target: String,
 
         /// Exit with status 1 if any finding is at least this severe
