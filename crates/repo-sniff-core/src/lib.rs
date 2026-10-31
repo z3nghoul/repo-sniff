@@ -6,10 +6,12 @@
 
 pub mod finding;
 pub mod rule;
+pub mod sanitize;
 pub mod scan;
 pub mod walk;
 
 pub use finding::{Finding, Severity, Stage};
 pub use rule::{Engine, Matcher, Rule, RuleError, builtin_rules, parse_rules};
+pub use sanitize::display_safe;
 pub use scan::{Report, scan};
 pub use walk::{Limits, SkipReason, Skipped, WalkResult, walk};
