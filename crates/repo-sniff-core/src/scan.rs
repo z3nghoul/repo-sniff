@@ -36,6 +36,25 @@ pub struct Report {
     pub truncated: bool,
 }
 
+impl Report {
+    /// Whether the scan can vouch for what it looked at. A report with no
+    /// findings is only a clean bill of health when this is true: a payload
+    /// may sit past the file limit, in a file that was too large or could not
+    /// be opened, or in an executable nobody analyzes yet.
+    pub fn is_complete(&self) -> bool {
+        !self.truncated && self.inconclusive_count() == 0
+    }
+
+    /// Number of skipped files that make the scan inconclusive, see
+    /// `SkipReason::makes_scan_inconclusive`.
+    pub fn inconclusive_count(&self) -> usize {
+        self.skipped
+            .iter()
+            .filter(|skipped| skipped.reason.makes_scan_inconclusive())
+            .count()
+    }
+}
+
 /// Scans every file under `root` with every rule.
 ///
 /// All rules always run; hiding findings by severity, stage or family is
@@ -104,13 +123,23 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         report.findings.extend(checked.findings);
 
         if looks_binary(&bytes) {
-            if checked.examined {
-                report.files_scanned += 1;
-            } else {
+            // An executable is listed even when a file rule looked at it: the
+            // rule saw the bytes of a `.pth` or `.start` file, not the code
+            // of the program.
+            let executable = executable_format(&bytes);
+            if let Some(format) = executable {
+                skipped.push(Skipped {
+                    path: relative.clone(),
+                    reason: SkipReason::Executable { format },
+                });
+            } else if !checked.examined {
                 skipped.push(Skipped {
                     path: relative.clone(),
                     reason: SkipReason::Binary,
                 });
+            }
+            if checked.examined {
+                report.files_scanned += 1;
             }
             continue;
         }
@@ -310,6 +339,20 @@ fn scan_text(relative: &Path, slash_path: &str, text: &str, rules: &[Rule]) -> V
     findings
 }
 
+/// Names the executable format a file starts with, by its magic bytes:
+/// ELF, PE (the `MZ` header), Mach-O in all four byte orders, and fat Mach-O
+/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The fat header `CAFEBABE` is also the header of a Java class
+/// file; both are code that runs, so both count.
+fn executable_format(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x7F, b'E', b'L', b'F', ..] => Some("ELF"),
+        [b'M', b'Z', ..] => Some("PE"),
+        [0xFE, 0xED, 0xFA, 0xCE | 0xCF, ..] | [0xCE | 0xCF, 0xFA, 0xED, 0xFE, ..] => Some("Mach-O"),
+        [0xCA, 0xFE, 0xBA, 0xBE | 0xBF, ..] => Some("Mach-O fat (or Java class)"),
+        _ => None,
+    }
+}
+
 /// Same heuristic as git and ripgrep: a NUL byte near the start means binary.
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
@@ -468,6 +511,159 @@ mod tests {
         let report = scan(dir.path(), &rules, Limits::default());
 
         assert_eq!(report.findings[0].line, 3);
+    }
+
+    #[test]
+    fn a_scan_that_read_everything_is_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", b"fine\n");
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert!(report.is_complete());
+        assert_eq!(report.inconclusive_count(), 0);
+    }
+
+    #[test]
+    fn unread_and_executable_files_make_the_scan_incomplete() {
+        let skip = |reason| Skipped {
+            path: PathBuf::from("x"),
+            reason,
+        };
+        for reason in [
+            SkipReason::TooLarge { size: 9 },
+            SkipReason::Unreadable {
+                error: "denied".to_string(),
+            },
+            SkipReason::Executable { format: "ELF" },
+        ] {
+            let report = Report {
+                skipped: vec![skip(reason.clone())],
+                ..Report::default()
+            };
+            assert!(!report.is_complete(), "{reason:?}");
+            assert_eq!(report.inconclusive_count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_binary_that_was_read_but_has_no_rules_does_not_make_the_scan_incomplete() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("data.gz"),
+                reason: SkipReason::Binary,
+            }],
+            ..Report::default()
+        };
+
+        assert!(report.is_complete());
+        assert_eq!(report.inconclusive_count(), 0);
+    }
+
+    #[test]
+    fn executable_formats_are_recognised_by_their_magic_bytes() {
+        let cases: [(&[u8], Option<&str>); 12] = [
+            (b"\x7fELF\x02\x01\x01\0", Some("ELF")),
+            (b"MZ\x90\0\x03\0", Some("PE")),
+            (&[0xFE, 0xED, 0xFA, 0xCE, 0, 0], Some("Mach-O")),
+            (&[0xFE, 0xED, 0xFA, 0xCF, 0, 0], Some("Mach-O")),
+            (&[0xCE, 0xFA, 0xED, 0xFE, 0, 0], Some("Mach-O")),
+            (&[0xCF, 0xFA, 0xED, 0xFE, 0, 0], Some("Mach-O")),
+            (
+                &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2],
+                Some("Mach-O fat (or Java class)"),
+            ),
+            (
+                &[0xCA, 0xFE, 0xBA, 0xBF, 0, 0, 0, 2],
+                Some("Mach-O fat (or Java class)"),
+            ),
+            (&[0x1F, 0x8B, 8, 0, 0], None),
+            (&[0x28, 0xB5, 0x2F, 0xFD, 0], None),
+            (b"\x89PNG\r\n\x1a\n\0", None),
+            (b"", None),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(executable_format(bytes), expected, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn an_executable_that_a_file_rule_examined_is_still_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "helper.start", b"\x7fELF\x02\x01\x01\0\0\0\0\0");
+        let rules = vec![file_rule("*.start", probe)];
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.inconclusive_count(), 1);
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn an_elf_binary_is_listed_as_an_executable_and_a_gzip_file_as_plain_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tool", b"\x7fELF\x02\x01\x01\0\0\0\0\0");
+        write(dir.path(), "data.gz", &[0x1F, 0x8B, 8, 0, 0, 0, 0, 0]);
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let reasons: Vec<_> = report
+            .skipped
+            .iter()
+            .map(|s| (to_slash(&s.path), s.reason.clone()))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                ("data.gz".to_string(), SkipReason::Binary),
+                ("tool".to_string(), SkipReason::Executable { format: "ELF" }),
+            ]
+        );
+        assert!(
+            !report.is_complete(),
+            "the executable makes it inconclusive"
+        );
+        assert_eq!(report.inconclusive_count(), 1);
+    }
+
+    #[test]
+    fn a_symlink_alone_does_not_make_the_scan_incomplete() {
+        let report = Report {
+            skipped: vec![Skipped {
+                path: PathBuf::from("link"),
+                reason: SkipReason::Symlink { target: None },
+            }],
+            ..Report::default()
+        };
+
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn a_payload_past_the_file_limit_is_missed_and_the_scan_is_not_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        // Padding sorts before the payload, so the limit cuts the payload off.
+        for name in ["a1.txt", "a2.txt", "a3.txt", "a4.txt"] {
+            write(dir.path(), name, b"padding\n");
+        }
+        write(dir.path(), "z-payload.txt", b"TODO payload\n");
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+        let limits = Limits {
+            max_files: 4,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &rules, limits);
+
+        assert!(report.findings.is_empty(), "the payload was never read");
+        assert!(report.truncated);
+        assert!(
+            !report.is_complete(),
+            "no findings must not mean clean here"
+        );
     }
 
     #[test]
