@@ -195,3 +195,289 @@ fn many_auto_run_tasks_are_all_listed_in_linear_time() {
         "took {elapsed:?}"
     );
 }
+
+/// VS Code follows a `.vscode/tasks.json` or `*.code-workspace` that is a
+/// symbolic link, so the check judges the file the link points at (#63).
+#[cfg(unix)]
+#[test]
+fn a_tasks_file_that_is_a_symlink_to_a_file_in_the_repository_is_judged() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let write = |relative: &str, contents: &str| {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    // Named so that no rule reads them as tasks files on their own.
+    write(
+        "notes.txt",
+        "{\n  \"tasks\": [\n    {\"label\": \"x\", \"command\": \"make\",\n     \"runOptions\": {\"runOn\": \"folderOpen\"}}\n  ]\n}\n",
+    );
+    write(
+        "docs/workspace.txt",
+        r#"{"tasks": {"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}}"#,
+    );
+    write(
+        "honest.txt",
+        r#"{"tasks": [{"label": "build", "command": "make"}]}"#,
+    );
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::create_dir_all(root.join("other/.vscode")).unwrap();
+    symlink("../notes.txt", root.join(".vscode/tasks.json")).unwrap();
+    symlink("docs/workspace.txt", root.join("app.code-workspace")).unwrap();
+    symlink("../../honest.txt", root.join("other/.vscode/tasks.json")).unwrap();
+
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+
+    let found: Vec<(String, usize, Severity)> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE_ID)
+        .map(|f| (slash(&f.file), f.line, f.severity))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (".vscode/tasks.json".to_string(), 4, Severity::High),
+            ("app.code-workspace".to_string(), 1, Severity::High),
+        ]
+    );
+    for finding in report.findings.iter().filter(|f| f.rule_id == RULE_ID) {
+        assert!(
+            finding.explanation.contains("symbolic link"),
+            "{}",
+            finding.explanation
+        );
+        // The link has no text of its own to point into.
+        assert_eq!(finding.span, None);
+    }
+    assert!(report.is_complete(), "{:?}", report.skipped);
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, SkipReason::Symlink { .. }))
+            .count(),
+        3
+    );
+
+    // A target the check could not read whole: the link is listed as too
+    // large, so the scan is not reported as complete.
+    let streamed = Limits {
+        max_buffered_size: 16,
+        ..Limits::default()
+    };
+    let report = scan(root, &builtin_rules().unwrap(), streamed);
+    assert!(!report.findings.iter().any(|f| f.rule_id == RULE_ID));
+    let too_large: Vec<String> = report
+        .skipped
+        .iter()
+        .filter(|s| matches!(s.reason, SkipReason::TooLarge { .. }))
+        .map(|s| slash(&s.path))
+        .collect();
+    assert!(
+        too_large.contains(&".vscode/tasks.json".to_string()),
+        "{too_large:?}"
+    );
+    assert!(!report.is_complete());
+}
+
+/// The target of a symlinked tasks file is found the way NTFS and APFS find
+/// it (another case, `\` as a separator); a target the check cannot read
+/// (another link, outside, missing) leaves the scan inconclusive (#63, review).
+#[cfg(unix)]
+#[test]
+fn a_symlinked_tasks_file_is_judged_through_case_and_backslash_or_not_called_clean() {
+    use std::os::unix::fs::symlink;
+
+    let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let scan_with = |links: &[(&str, &str)]| {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), autorun).unwrap();
+        for (link, target) in links {
+            let path = dir.path().join(link);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            symlink(target, path).unwrap();
+        }
+        scan(dir.path(), &builtin_rules().unwrap(), Limits::default())
+    };
+    let autoruns = |report: &Report| {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == RULE_ID)
+            .count()
+    };
+
+    for target in ["../NOTES.TXT", "..\\notes.txt", "./x/../../notes.txt"] {
+        let report = scan_with(&[(".vscode/tasks.json", target)]);
+        assert_eq!(autoruns(&report), 1, "{target}: {:?}", report.findings);
+    }
+
+    for links in [
+        &[(".vscode/tasks.json", "../a"), ("a", "notes.txt")][..],
+        &[(".vscode/tasks.json", "../../outside.json")][..],
+        &[(".vscode/tasks.json", "../missing.json")][..],
+    ] {
+        let report = scan_with(links);
+        assert_eq!(autoruns(&report), 0, "{links:?}");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.path == Path::new(".vscode/tasks.json")
+                    && matches!(s.reason, SkipReason::Unreadable { .. })),
+            "{links:?}: {:?}",
+            report.skipped
+        );
+        assert!(!report.is_complete(), "{links:?}");
+    }
+}
+
+/// Many links to one large target cannot make the scan read it again and
+/// again without end: past the budget the links are listed as too large.
+#[cfg(unix)]
+#[test]
+fn reading_through_many_links_is_bounded() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    // 4 MiB of JSON whitespace around a folderOpen task.
+    let mut big = " ".repeat(4 * 1024 * 1024);
+    big.push_str(
+        r#"{"tasks": {"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}}"#,
+    );
+    fs::write(dir.path().join("big.txt"), big).unwrap();
+    for n in 0..40 {
+        symlink(
+            "big.txt",
+            dir.path().join(format!("w{n:02}.code-workspace")),
+        )
+        .unwrap();
+    }
+
+    let report = scan(dir.path(), &builtin_rules().unwrap(), Limits::default());
+
+    let judged = report
+        .findings
+        .iter()
+        .filter(|f| f.explanation.contains("symbolic link"))
+        .count();
+    let too_large = report
+        .skipped
+        .iter()
+        .filter(|s| matches!(s.reason, SkipReason::TooLarge { .. }))
+        .count();
+    assert!(judged > 0 && judged < 40, "{judged}");
+    assert_eq!(judged + too_large, 40);
+    assert!(!report.is_complete());
+}
+
+/// When the text of a link's target does not name one file for certain, the
+/// scan must not guess: a guess can be a harmless twin while the system that
+/// follows the link opens the payload. Such a link is listed as unreadable.
+#[cfg(unix)]
+#[test]
+fn a_link_target_that_names_no_single_file_for_certain_is_not_guessed() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let honest = r#"{"tasks": [{"label": "build", "command": "make"}]}"#;
+    let unreadable_link = |report: &Report| {
+        report.skipped.iter().any(|s| {
+            s.path == Path::new(".vscode/tasks.json")
+                && matches!(s.reason, SkipReason::Unreadable { .. })
+        })
+    };
+
+    // Not on macOS, where the file system refuses names that are not UTF-8.
+    if !cfg!(target_os = "macos") {
+        // A target that is not UTF-8, next to a harmless file whose name is its
+        // lossy text.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".vscode")).unwrap();
+        fs::write(root.join(OsStr::from_bytes(b"notes\xfe")), autorun).unwrap();
+        fs::write(root.join("notes\u{FFFD}"), honest).unwrap();
+        symlink(
+            OsStr::from_bytes(b"../notes\xfe"),
+            root.join(".vscode/tasks.json"),
+        )
+        .unwrap();
+        let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+        assert!(unreadable_link(&report), "{:?}", report.skipped);
+        assert!(!report.is_complete());
+    }
+
+    // `..\notes.txt` opens the root `notes.txt` on Windows, and a file named
+    // `.vscode/..\notes.txt` on Unix.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join("notes.txt"), autorun).unwrap();
+    fs::write(root.join(".vscode/..\\notes.txt"), honest).unwrap();
+    symlink("..\\notes.txt", root.join(".vscode/tasks.json")).unwrap();
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+    assert!(unreadable_link(&report), "{:?}", report.skipped);
+    assert!(!report.is_complete());
+
+    // The decoy chain: the Unix reading `.vscode/..\notes.txt` is a link to
+    // the payload, the Windows reading is the harmless `notes.txt`.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join("payload.json"), autorun).unwrap();
+    fs::write(root.join("notes.txt"), honest).unwrap();
+    symlink("../payload.json", root.join(".vscode/..\\notes.txt")).unwrap();
+    symlink("..\\notes.txt", root.join(".vscode/tasks.json")).unwrap();
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+    assert!(unreadable_link(&report), "{:?}", report.skipped);
+    assert!(!report.is_complete());
+
+    // A directory link followed by `..`: the system resolves the `..` inside
+    // the directory the link points at, so the text reading
+    // `.vscode/tasks2.json` is the harmless twin of `evil/tasks2.json`.
+    for target in ["dl/../tasks2.json", "DL/../tasks2.json"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".vscode")).unwrap();
+        fs::create_dir_all(root.join("evil/inner")).unwrap();
+        fs::write(root.join("evil/tasks2.json"), autorun).unwrap();
+        fs::write(root.join(".vscode/tasks2.json"), honest).unwrap();
+        symlink("../evil/inner", root.join(".vscode/dl")).unwrap();
+        symlink(target, root.join(".vscode/tasks.json")).unwrap();
+        let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+        assert!(unreadable_link(&report), "{target}: {:?}", report.skipped);
+        assert!(!report.is_complete());
+    }
+}
+
+/// APFS treats the NFC and NFD spellings of a name as one file. The Unix
+/// reading of `..\café.json` (NFC) from `.vscode` is the link
+/// `.vscode/..\café.json` (named in NFD), which points at the payload, while
+/// the Windows reading is the harmless `café.json`. Link names are only
+/// lowercased when compared, so the link is missed and the harmless file is
+/// judged. This is also the case on main, where a linked `tasks.json` is not
+/// judged at all; expected to pass once names are compared normalized.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "issue #84"]
+fn nfc_and_nfd_spellings_of_a_link_name_do_not_hide_the_unix_reading() {
+    use std::os::unix::fs::symlink;
+
+    let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let honest = r#"{"tasks": [{"label": "build", "command": "make"}]}"#;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join("payload.json"), autorun).unwrap();
+    fs::write(root.join("caf\u{e9}.json"), honest).unwrap();
+    symlink("../payload.json", root.join(".vscode/..\\cafe\u{301}.json")).unwrap();
+    symlink("..\\caf\u{e9}.json", root.join(".vscode/tasks.json")).unwrap();
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+    assert!(!report.is_complete(), "{:?}", report.skipped);
+}

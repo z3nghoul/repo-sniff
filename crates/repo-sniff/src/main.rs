@@ -4,7 +4,8 @@ mod redact;
 mod report;
 mod target;
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -110,7 +111,7 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
                     redact_path(&root.to_string_lossy())
                 );
             }
-            scan_dir(&root, raw_target, fail_on)
+            scan_dir(&root, &HashSet::new(), raw_target, fail_on)
         }
         Target::Remote(url) => {
             clone::validate(&url, git_ref)?;
@@ -122,14 +123,22 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
                 Some(git_ref) => format!("{} (ref {git_ref})", redact_credentials(raw_target)),
                 None => redact_credentials(raw_target),
             };
-            scan_dir(checkout.path(), &label, fail_on)
+            scan_dir(checkout.path(), &checkout.symlinks, &label, fail_on)
         }
     }
 }
 
-fn scan_dir(root: &Path, label: &str, fail_on: FailOn) -> Result<ExitCode> {
+/// Scans `root`. `links` lists files that the repository records as symbolic
+/// links although they are plain files on disk (a clone, see
+/// `clone::Checkout`); it is empty for a local folder, whose links are real.
+fn scan_dir(
+    root: &Path,
+    links: &HashSet<PathBuf>,
+    label: &str,
+    fail_on: FailOn,
+) -> Result<ExitCode> {
     let rules = builtin_rules().context("failed to load built-in rules")?;
-    let report = repo_sniff_core::scan(root, &rules, Limits::default());
+    let report = repo_sniff_core::scan_with_links(root, &rules, Limits::default(), links);
     print!("{}", report::render(&report, label));
 
     Ok(ExitCode::from(exit_status(&report, fail_on)))
