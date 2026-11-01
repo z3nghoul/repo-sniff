@@ -99,6 +99,7 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] IDE: VS Code tasks/settings, devcontainer, `.idea` run configurations, `.envrc`
 - [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
 - [ ] npm install hooks: lifecycle scripts
+- [ ] Loader signatures (line and file rules, no AST; the full versions come in milestones 7 and 8): long base64 or hex blobs next to `eval`, `Function`, `exec` or `child_process`; obfuscator.io signatures (`_0x` identifiers, a string array with a rotator function); minified one-line code in a file not named `.min` among ordinary sources; a `fetch` / `axios` / `http.get` result passed to `eval` or `Function`
 - [ ] Python install hooks: `setup.py`, build backends
 - [x] Python startup files: `.pth` lines run by any supported Python version (graded levels INFO to CRITICAL; symlinked, oversized and non-UTF-8 files included) and `.start` entry points (Python 3.15)
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
@@ -186,7 +187,7 @@ Localization:
 - [ ] Download → write → make executable → run chain
 - [ ] Crypto mining, ransomware behavior
 - [ ] UAC bypass, anti-VM and anti-debugging
-- [ ] Dynamic eval and loading code from bytes
+- [ ] Dynamic eval and loading code from bytes (full version of the early line rules in the M2 "Loader signatures" family)
 - [ ] Clipper, screenshots, auto-update without signature check
 - [ ] Web3 drainers: wallet providers (`window.ethereum`, Phantom, Solflare), signing APIs whose result is sent to a server, seed-phrase harvesting
 - [ ] Solidity: `delegatecall`, `selfdestruct`, hidden owner, inline `assembly`
@@ -195,16 +196,16 @@ Localization:
 Review points:
 
 - [ ] URLs and domains in code (raw IPs, pastebin, raw gists, shorteners, dynamic DNS); network response flowing into exec/eval/file write
-- [ ] Encoded URL next to a network call: URL as base64 or a byte array, payload URL in a config file, `axios`/`fetch` result passed to `eval` (an early line or file rule is possible before the AST)
+- [ ] Encoded URL next to a network call: URL as base64 or a byte array, payload URL in a config file, `axios`/`fetch` result passed to `eval` (an early line rule comes with the M2 "Loader signatures" family; this is the data-flow version)
 - [ ] Logic bombs: conditions on dates, hostname/user, environment, system language and keyboard layout
 - [ ] Bugdoors at LOW: risky C/C++ functions (`strcpy`, `sprintf`, `gets`, unchecked `memcpy`), Rust `unsafe` blocks
 - [ ] Capability map: short summary of what the program can do
 
 ## Milestone 8 — Obfuscation
 
-- [ ] Shannon entropy, long base64/hex blobs, minified code among normal sources
+- [ ] Shannon entropy, long base64/hex blobs, minified code among normal sources (full version of the early line and file rules in the M2 "Loader signatures" family)
 - [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`) with depth and size limits; each finding keeps its decoding chain
-- [ ] Packer and obfuscator signatures, reflection and dynamic imports
+- [ ] Packer and obfuscator signatures, reflection and dynamic imports (obfuscator.io signatures start in the M2 "Loader signatures" family)
 
 Review points:
 
