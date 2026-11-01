@@ -151,15 +151,16 @@ pub const NOT_CODE: &[&str] = &[
 
 /// Extensions Windows runs on a double click, the outer half of a disguise by
 /// double extension (`invoice.pdf.exe`).
-const DOUBLE_CLICK: &[&str] = &["exe", "scr", "com", "pif"];
+const DOUBLE_CLICK: &[&str] = &["exe", "scr", "com", "pif", "cpl"];
 
 /// What a lure pretends to be in a double extension: documents, images,
 /// media, archives and plain text. Data and source formats are left out,
 /// because dotted names such as `Newtonsoft.Json.dll` or `System.Xml.exe` are
 /// ordinary .NET assembly names.
 const LURES: &[&str] = &[
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "rtf", "txt", "png", "jpg", "jpeg",
-    "gif", "bmp", "mp3", "mp4", "avi", "mov", "wav", "zip", "rar", "7z",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "rtf", "txt", "md", "csv", "html",
+    "htm", "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "heic", "mp3", "mp4", "avi", "mov",
+    "wav", "zip", "rar", "7z",
 ];
 
 /// Extensions of native executables and libraries. Used only when the bytes
@@ -203,7 +204,8 @@ fn extension(name: &str) -> Option<&str> {
 /// The extension before the last one, as in `invoice.pdf.exe`.
 fn inner_extension(name: &str) -> Option<&str> {
     let (stem, _) = name.rsplit_once('.')?;
-    extension(stem)
+    // `invoice.pdf          .exe` hides the gap past the edge of a listing.
+    extension(stem.trim_end_matches(['.', ' ']))
 }
 
 /// Whether the name is a versioned shared library such as `libfoo.so.1.2`.
@@ -221,7 +223,20 @@ fn has_deceptive_characters(name: &str) -> bool {
     name.chars().any(|c| {
         matches!(
             c as u32,
-            0x061C | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFEFF
+            0x00AD
+                | 0x034F
+                | 0x061C
+                | 0x115F
+                | 0x1160
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x2069
+                | 0x3164
+                | 0xFEFF
+                | 0xFFA0
+                | 0xE0000..=0xE007F
         )
     })
 }
@@ -344,6 +359,29 @@ fn disguise(name: &str) -> Option<String> {
     None
 }
 
+/// Whether the name of a script or dropper pretends to be a document or an
+/// image: bidi or invisible characters, or a lure before the real extension
+/// (`invoice.pdf.bat`). Such a file is raised to CRITICAL.
+fn lure(name: &str) -> Option<String> {
+    if has_deceptive_characters(name) {
+        return Some("its name has bidi or invisible characters".to_string());
+    }
+    let inner = inner_extension(name).filter(|inner| LURES.contains(inner))?;
+    Some(format!(
+        "its name ends in `.{inner}.{}`, posing as a `.{inner}` file",
+        extension(name).unwrap_or_default()
+    ))
+}
+
+/// "an" before a format whose name starts with a vowel sound.
+fn article(format: &str) -> &'static str {
+    if format.starts_with(['A', 'E', 'I', 'O', 'U']) {
+        "an"
+    } else {
+        "a"
+    }
+}
+
 /// Whether `repo.windows-dropper` reports this file as a screen saver, which
 /// `repo.committed-binary` then leaves to it.
 fn native_screen_saver(name: &str, code: Option<Code>) -> bool {
@@ -387,8 +425,9 @@ pub fn disguised_executable(ctx: &Ctx<'_>) -> Vec<Hit> {
     hit(
         ctx.base,
         format!(
-            "{what} a {format} executable, but {why}, which hides what it is; executables do \
-             not end up under such names by accident"
+            "{what} {} {format} executable, but {why}, which hides what it is; executables do \
+             not end up under such names by accident",
+            article(format)
         ),
     )
 }
@@ -421,8 +460,9 @@ pub fn committed_binary(ctx: &Ctx<'_>) -> Vec<Hit> {
         Some(Code::Native(format)) => hit(
             ctx.base,
             format!(
-                "a {format} executable is committed to the repository; it runs native code \
-                 that nothing analyzes, so where it comes from has to be checked"
+                "{} {format} executable is committed to the repository; it runs native code \
+                 that nothing analyzes, so where it comes from has to be checked",
+                article(format)
             ),
         ),
         Some(Code::Bytecode(kind)) => hit(
@@ -439,10 +479,9 @@ pub fn committed_binary(ctx: &Ctx<'_>) -> Vec<Hit> {
 /// Rule `repo.windows-dropper`. Windows runs these on a double click, but
 /// only a `.scr` that is a PE and a `.lnk` with a shortcut header; `mshta`
 /// runs an `.hta` whatever it contains. Without the bytes, the name decides.
+/// A symbolic link is judged by its own name and the first bytes of its
+/// in-repository target, since Windows opens the link by its name.
 pub fn windows_dropper(ctx: &Ctx<'_>) -> Vec<Hit> {
-    if is_symlink(ctx) {
-        return Vec::new();
-    }
     let name = normalized_name(ctx.path);
     let Some(extension) = extension(&name) else {
         return Vec::new();
@@ -457,20 +496,18 @@ pub fn windows_dropper(ctx: &Ctx<'_>) -> Vec<Hit> {
     if !runs {
         return Vec::new();
     }
-    hit(
-        ctx.base,
-        format!(
-            "Windows runs a `.{extension}` file on a double click; shortcuts, screen savers \
-             and HTML applications are a common way to deliver malware"
-        ),
-    )
+    let reason = format!(
+        "Windows runs a `.{extension}` file on a double click; shortcuts, screen savers and \
+         HTML applications are a common way to deliver malware"
+    );
+    match lure(&name) {
+        Some(why) => hit(Severity::Critical, format!("{reason}, and {why}")),
+        None => hit(ctx.base, reason),
+    }
 }
 
-/// Rule `repo.windows-script`.
+/// Rule `repo.windows-script`. A symbolic link is judged by its own name.
 pub fn windows_script(ctx: &Ctx<'_>) -> Vec<Hit> {
-    if is_symlink(ctx) {
-        return Vec::new();
-    }
     let name = normalized_name(ctx.path);
     let Some(extension) = extension(&name) else {
         return Vec::new();
@@ -487,10 +524,12 @@ pub fn windows_script(ctx: &Ctx<'_>) -> Vec<Hit> {
     } else {
         return Vec::new();
     };
-    hit(
-        severity,
-        format!("a Windows `.{extension}` script; it runs when opened or called on Windows{note}"),
-    )
+    let reason =
+        format!("a Windows `.{extension}` script; it runs when opened or called on Windows{note}");
+    match lure(&name) {
+        Some(why) => hit(Severity::Critical, format!("{reason}; {why}")),
+        None => hit(severity, reason),
+    }
 }
 
 /// Absolute targets inside system program folders: a link there is common
