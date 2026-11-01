@@ -224,6 +224,11 @@ fn ambiguous_and_scheme_less_credentials_never_reach_stdout_or_stderr() {
         "https://user:FAKE<TOKEN@example.invalid/r",
         "FAKE_TOKEN@example.invalid/o/r",
         "user:FAKE_TOKEN@example.invalid/o/r",
+        "user:FA/KE_TOKEN@example.invalid/o/r",
+        "//user:FA/KE_TOKEN@example.invalid/r",
+        "https:/user:FA/KE_TOKEN@example.invalid/r",
+        "https://user:FAKE@TOKEN@example.invalid/r",
+        "HTTPS://FAKE_TOKEN#x@example.invalid/r",
         "deploy:FAKE_TOKEN@:o/r",
         "https:/user:FAKE_TOKEN@example.invalid/r",
         "https:\\\\user:FAKE_TOKEN@example.invalid\\r",
@@ -243,7 +248,7 @@ fn ambiguous_and_scheme_less_credentials_never_reach_stdout_or_stderr() {
         assert_eq!(code(&output), 2, "{target}");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        for secret in ["FAKE", "TOKEN", "PART1", "PART2"] {
+        for secret in ["FAKE", "FA/", "TOKEN", "PART1", "PART2", "user:"] {
             assert!(!stdout.contains(secret), "{target}: {stdout}");
             assert!(!stderr.contains(secret), "{target}: {stderr}");
         }

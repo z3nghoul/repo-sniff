@@ -23,31 +23,17 @@ pub fn redact_credentials(text: &str) -> String {
 }
 
 /// A target that was taken for a local path, as it may be shown in an error:
-/// in every component (between `/` or `\`) that holds an `@`, everything up to
-/// its last `@` is hidden. `TOKEN@github.com/o/r`, `user:TOKEN@host/o/r` and a
-/// mistyped `https:/user:TOKEN@host/r` are URLs with credentials that did not
-/// look like URLs; an honest folder such as `C:/Users/first@corp` only loses
-/// the part before the `@` in the message.
+/// if it holds an `@`, everything up to its last `@` is hidden.
+/// `TOKEN@github.com/o/r`, `user:TO/KEN@host/o/r` and a mistyped
+/// `https:/user:TOKEN@host/r` are URLs with credentials that did not look like
+/// URLs, and a token may hold `/` (base64, cloud secret keys), so the cut is
+/// not made per path component. An honest folder such as `C:/Users/first@corp`
+/// only loses the part before the `@` in the message.
 pub fn redact_path(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    loop {
-        let end = rest.find(['/', '\\']).unwrap_or(rest.len());
-        let component = &rest[..end];
-        match component.rfind('@') {
-            Some(at) if at > 0 => {
-                out.push_str("***");
-                out.push_str(&component[at..]);
-            }
-            _ => out.push_str(component),
-        }
-        if end == rest.len() {
-            break;
-        }
-        out.push_str(&rest[end..end + 1]);
-        rest = &rest[end + 1..];
+    match raw.rfind('@') {
+        Some(at) if at > 0 => format!("***{}", &raw[at..]),
+        _ => raw.to_string(),
     }
-    out
 }
 
 /// Characters that end a word: whitespace and the quotes and brackets that
@@ -237,18 +223,19 @@ mod tests {
         for (raw, shown) in [
             ("FAKE_TOKEN@github.com/o/r", "***@github.com/o/r"),
             ("user:FAKE_TOKEN@github.com/o/r", "***@github.com/o/r"),
+            ("user:FA/KETOKEN@github.com/o/r", "***@github.com/o/r"),
             (
-                "https:/user:FAKE_TOKEN@example.invalid/r",
-                "https:/***@example.invalid/r",
+                "https:/user:FA/KETOKEN@example.invalid/r",
+                "***@example.invalid/r",
             ),
             (
                 "https:\\\\user:FAKE_TOKEN@example.invalid\\r",
-                "https:\\\\***@example.invalid\\r",
+                "***@example.invalid\\r",
             ),
-            ("C:/Users/first@corp/repo", "C:/Users/***@corp/repo"),
+            ("C:/Users/first@corp/repo", "***@corp/repo"),
             ("./missing", "./missing"),
             ("", ""),
-            ("a/@b/c", "a/@b/c"),
+            ("@b/c", "@b/c"),
         ] {
             assert_eq!(redact_path(raw), shown, "{raw}");
         }

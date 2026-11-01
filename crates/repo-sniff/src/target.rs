@@ -40,9 +40,9 @@ impl Target {
 /// (`deploy:TOKEN@host:owner/repo` included), which git would fetch over ssh:
 /// the part before the first `/` or `\` holds an `@`, and the text after its
 /// last `@` is a host followed by `:`. The host may be empty when the user part
-/// holds a `:` (`deploy:TOKEN@:x`), which is a password, not a folder name. Such an argument is not a path, and
-/// taking it for one would print it, user information and all, in a "cannot
-/// access" error. A local folder with a name like that can still be scanned
+/// holds a `:` (`deploy:TOKEN@:x`), which is a password, not a folder name.
+/// Such an argument is not a path, and taking it for one would print it, user
+/// information and all, in a "cannot access" error. A local folder with a name like that can still be scanned
 /// as `./user@host:path`.
 pub fn is_scp_like(raw: &str) -> bool {
     if raw.contains("://") {
