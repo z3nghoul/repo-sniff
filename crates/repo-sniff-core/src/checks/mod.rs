@@ -8,8 +8,12 @@
 //! `Ctx`, whose views are computed on demand. The engine only decides when a
 //! check runs: an `engine = "file"` check sees the raw bytes of every file its
 //! globs select, before binary detection, including files that are too large or
-//! are symbolic links (see `FileIssue`); an `engine = "jsonc"` check runs only on
-//! files the line rules read, after the scanner has classified them.
+//! are symbolic links (see `FileIssue`); an `engine = "jsonc"` check runs on
+//! files the line rules read, after the scanner has classified them, and on a
+//! symbolic link to a regular file inside the repository, with that file's
+//! content and `FileIssue::Symlink`, because the tool that opens the link
+//! follows it. A file or link target it cannot read whole is listed as too
+//! large instead, which makes the scan inconclusive.
 
 mod pylines;
 pub mod python_pth;
@@ -168,8 +172,9 @@ impl<'a> Views<'a> {
 pub struct Ctx<'a> {
     /// Path relative to the repository root, with `/` separators.
     pub path: &'a str,
-    /// Why the file is not an ordinary readable file, if it is not. Only
-    /// `engine = "file"` checks are offered such files.
+    /// Why the file is not an ordinary readable file, if it is not.
+    /// `engine = "file"` checks are offered every such file; `engine = "jsonc"`
+    /// checks only symbolic links whose target was read.
     pub issue: Option<FileIssue>,
     pub repo: &'a RepoIndex,
     /// True if the walk stopped early, so `repo` may be missing files.

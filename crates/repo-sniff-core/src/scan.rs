@@ -59,6 +59,11 @@ const MAX_LOCATED_HITS: usize = 100;
 /// Added to findings from a file that has NUL bytes and does not read as text.
 const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
 
+/// Added to findings of a JSONC check on a symbolic link: the check read the
+/// file the link points at, under the link's name, as the tool that opens the
+/// link would.
+const THROUGH_LINK_NOTE: &str = " (read through a symbolic link to a file in the repository)";
+
 /// Everything one scan produced. Front ends decide how to show it.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -157,6 +162,13 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             _ => None,
         })
         .collect();
+    let jsonc_rules: Vec<(&Rule, Check)> = rules
+        .iter()
+        .filter_map(|rule| match rule.matcher {
+            Matcher::Jsonc(check) => Some((rule, check)),
+            _ => None,
+        })
+        .collect();
     let env = Env {
         index: &index,
         truncated: walked.truncated,
@@ -180,6 +192,11 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
 
     let has_file_rule = |slash_path: &str| {
         file_rules
+            .iter()
+            .any(|(rule, _)| rule.applies_to(slash_path))
+    };
+    let has_jsonc_rule = |slash_path: &str| {
+        jsonc_rules
             .iter()
             .any(|(rule, _)| rule.applies_to(slash_path))
     };
@@ -342,15 +359,44 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     size,
                 );
                 report.findings.extend(headed.findings);
-                // File rules get the whole target, as before, and only when one
-                // selects the link.
-                let bytes = if has_file_rule(&slash_path) {
+                // File and JSONC rules get the whole target, and only when one
+                // selects the link: VS Code follows a `.vscode/tasks.json`
+                // that is a link and runs its tasks.
+                let mut jsonc = has_jsonc_rule(&slash_path);
+                let target_size =
+                    symlink_target_file(&entry.path, target.as_deref(), &regular_files)
+                        .and_then(|path| fs::metadata(root.join(path)).ok())
+                        .map(|metadata| metadata.len());
+                if jsonc
+                    && let Some(size) = target_size.filter(|&size| size > limits.max_buffered_size)
+                {
+                    // As for a file that size: a JSONC rule cannot read it whole.
+                    skipped.push(Skipped {
+                        path: entry.path.clone(),
+                        reason: SkipReason::TooLarge { size },
+                    });
+                    jsonc = false;
+                }
+                let bytes = if jsonc || has_file_rule(&slash_path) {
                     symlink_target_bytes(root, &entry.path, target.as_deref(), &regular_files)
                 } else {
                     Vec::new()
                 };
                 // Read the way the target would be read under the link's name.
                 let views = Views::new(&bytes, classify(&slash_path, &bytes).decode);
+                if jsonc && !bytes.is_empty() {
+                    let mut through = env.run_checks(
+                        &jsonc_rules,
+                        &entry.path,
+                        &slash_path,
+                        &views,
+                        Some(issue.clone()),
+                    );
+                    for finding in &mut through.findings {
+                        finding.explanation.push_str(THROUGH_LINK_NOTE);
+                    }
+                    report.findings.extend(through.findings);
+                }
                 env.run_file_checks(&entry.path, &slash_path, &views, Some(issue))
             }
             _ => continue,
@@ -475,13 +521,22 @@ fn symlink_target_bytes(
     target: Option<&Path>,
     regular_files: &HashSet<String>,
 ) -> Vec<u8> {
-    let Some(resolved) = target.and_then(|target| resolve_inside(link, target)) else {
-        return Vec::new();
-    };
-    if !regular_files.contains(&to_slash(&resolved)) {
-        return Vec::new();
-    }
-    fs::read(root.join(resolved)).unwrap_or_default()
+    symlink_target_file(link, target, regular_files)
+        .and_then(|resolved| fs::read(root.join(resolved)).ok())
+        .unwrap_or_default()
+}
+
+/// The path, relative to the root, of the regular file inside the repository
+/// that a symlink points at, if it points at one. Resolved as text only.
+fn symlink_target_file(
+    link: &Path,
+    target: Option<&Path>,
+    regular_files: &HashSet<String>,
+) -> Option<PathBuf> {
+    let resolved = target.and_then(|target| resolve_inside(link, target))?;
+    regular_files
+        .contains(&to_slash(&resolved))
+        .then_some(resolved)
 }
 
 /// The first `HEAD_LEN` bytes of a file, read without reading the rest, its

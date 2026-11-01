@@ -61,7 +61,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
-| `.vscode/tasks.json` or `*.code-workspace` with a task using `"runOn": "folderOpen"` (parsed as JSONC, so comments, line breaks and `\u` escapes cannot hide it; the per-OS `windows`/`linux`/`osx` overrides are checked too) | HIGH, with network or shell CRITICAL | — | `ide.vscode-folder-open-task` |
+| `.vscode/tasks.json` or `*.code-workspace` with a task using `"runOn": "folderOpen"` (parsed as JSONC, so comments, line breaks and `\u` escapes cannot hide it; the per-OS `windows`/`linux`/`osx` overrides are checked too; a file of that name that is a symbolic link to a file in the repository is judged by the file it points at, as VS Code follows it, and the finding says so; a target too large to read whole lists the link as too large, so the scan is inconclusive; a link to another link is not followed yet) | HIGH, with network or shell CRITICAL | — | `ide.vscode-folder-open-task` |
 | `.vscode/settings.json` overriding the interpreter, terminal or environment | HIGH | — | — |
 | `Directory.Build.props` / `Directory.Build.targets`, custom MSBuild tasks (Visual Studio evaluates them on project load) | HIGH | T1127.001 | — |
 | .NET analyzers / source generators shipped as DLLs in the repo (a binary runs inside the IDE) | CRITICAL | — | — |

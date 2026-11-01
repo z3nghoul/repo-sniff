@@ -195,3 +195,91 @@ fn many_auto_run_tasks_are_all_listed_in_linear_time() {
         "took {elapsed:?}"
     );
 }
+
+/// VS Code follows a `.vscode/tasks.json` or `*.code-workspace` that is a
+/// symbolic link, so the check judges the file the link points at (#63).
+#[cfg(unix)]
+#[test]
+fn a_tasks_file_that_is_a_symlink_to_a_file_in_the_repository_is_judged() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let write = |relative: &str, contents: &str| {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    // Named so that no rule reads them as tasks files on their own.
+    write(
+        "notes.txt",
+        "{\n  \"tasks\": [\n    {\"label\": \"x\", \"command\": \"make\",\n     \"runOptions\": {\"runOn\": \"folderOpen\"}}\n  ]\n}\n",
+    );
+    write(
+        "docs/workspace.txt",
+        r#"{"tasks": {"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}}"#,
+    );
+    write(
+        "honest.txt",
+        r#"{"tasks": [{"label": "build", "command": "make"}]}"#,
+    );
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::create_dir_all(root.join("other/.vscode")).unwrap();
+    symlink("../notes.txt", root.join(".vscode/tasks.json")).unwrap();
+    symlink("docs/workspace.txt", root.join("app.code-workspace")).unwrap();
+    symlink("../../honest.txt", root.join("other/.vscode/tasks.json")).unwrap();
+
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+
+    let found: Vec<(String, usize, Severity)> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE_ID)
+        .map(|f| (slash(&f.file), f.line, f.severity))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (".vscode/tasks.json".to_string(), 4, Severity::High),
+            ("app.code-workspace".to_string(), 1, Severity::High),
+        ]
+    );
+    for finding in report.findings.iter().filter(|f| f.rule_id == RULE_ID) {
+        assert!(
+            finding.explanation.contains("symbolic link"),
+            "{}",
+            finding.explanation
+        );
+        // The link has no text of its own to point into.
+        assert_eq!(finding.span, None);
+    }
+    assert!(report.is_complete(), "{:?}", report.skipped);
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, SkipReason::Symlink { .. }))
+            .count(),
+        3
+    );
+
+    // A target the check could not read whole: the link is listed as too
+    // large, so the scan is not reported as complete.
+    let streamed = Limits {
+        max_buffered_size: 16,
+        ..Limits::default()
+    };
+    let report = scan(root, &builtin_rules().unwrap(), streamed);
+    assert!(!report.findings.iter().any(|f| f.rule_id == RULE_ID));
+    let too_large: Vec<String> = report
+        .skipped
+        .iter()
+        .filter(|s| matches!(s.reason, SkipReason::TooLarge { .. }))
+        .map(|s| slash(&s.path))
+        .collect();
+    assert!(
+        too_large.contains(&".vscode/tasks.json".to_string()),
+        "{too_large:?}"
+    );
+    assert!(!report.is_complete());
+}
