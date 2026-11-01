@@ -1,63 +1,93 @@
 # Benchmark on honest repositories
 
-Date: 2026-11-01. Scanner: `repo-sniff 0.1.0`, release build of `main` at commit
-`5fbdd78` (after the fixes for issues 41, 44 and 45). Each repository was
-scanned from its default branch with `repo-sniff scan <url>` (default
-`--fail-on high`) and a 300 second limit per repository including the clone.
-No repository timed out or hit the file limit. Re-run with
-`scripts/benchmark.sh`; the commits below are the heads that were current at
-the time of the run.
+Date: 2026-11-01. Scanner: `repo-sniff 0.1.0`, release build of the branch
+with the repository contents family (commit `b25608c`, stacked on the
+architecture refactor). Each repository was scanned from its default branch
+with `repo-sniff scan <url>` (default `--fail-on high`) and a 600 second limit
+per repository including the clone. No repository timed out or hit the file
+limit. Re-run with `scripts/benchmark.sh`; the commits below are the heads
+that were current at the time of the run. The same heads scanned with the
+previous scanner gave the results of the earlier run (see the end of this
+page), so every difference below comes from the new rules.
 
 The target for honest repositories is 0 critical findings. **It is met:**
-0 CRITICAL in all ten. The first run, on `3d65b24`, found 6 false CRITICAL
-findings; see "What changed since the first run".
+0 CRITICAL in all ten. **No repository is INCONCLUSIVE any more**: the
+executables that made pip, vscode and terminal inconclusive are now HIGH
+findings that name each file.
 
 ## Results
 
 | Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Seconds |
 |---|---|---|---|---|---|---|---|---|---|---|
-| BurntSushi/ripgrep | 91f5d22ef48b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 7 binary, 1 git metadata | 0 |
-| rust-lang/cargo | 809bcc525b61 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 1 git metadata | 1 |
-| psf/requests | 3c7baaa05ab4 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 6 binary, 1 git metadata | 1 |
-| pallets/flask | 49943b5a9441 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 5 binary, 1 git metadata | 1 |
-| pypa/pip | ec43c48b2f2d | INCONCLUSIVE | 3 | 0 | 0 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 1 |
-| expressjs/express | 1c6f1b0fe400 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 1 git metadata | 0 |
-| microsoft/vscode | 1306698e328e | INCONCLUSIVE | 1 | 0 | 1 | 0 | 0 | 0 | 330 binary, 7 executable, 1 git metadata | 11 |
-| git/git | 50fe5cc63f9c | clean | 0 | 0 | 0 | 0 | 0 | 0 | 16 binary, 1 git metadata | 3 |
-| python/cpython | 47c249adf3bc | findings | 1 | 0 | 2 | 0 | 0 | 0 | 146 binary, 1 git metadata | 7 |
-| microsoft/terminal | 703ef7f969d9 | INCONCLUSIVE | 3 | 0 | 0 | 0 | 0 | 0 | 1083 binary, 14 executable, 1 git metadata | 3 |
+| BurntSushi/ripgrep | 91f5d22ef48b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 7 binary, 1 git metadata | 1 |
+| rust-lang/cargo | 809bcc525b61 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 1 git metadata | 3 |
+| psf/requests | 3c7baaa05ab4 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 6 binary, 1 git metadata | 1 |
+| pallets/flask | 49943b5a9441 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 5 binary, 1 git metadata | 1 |
+| pypa/pip | ec43c48b2f2d | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 2 |
+| expressjs/express | 1c6f1b0fe400 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 1 git metadata | 1 |
+| microsoft/vscode | 1306698e328e | findings | 1 | 0 | 8 | 0 | 50 | 0 | 330 binary, 7 executable, 1 git metadata | 16 |
+| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 2 | 5 | 0 | 16 binary, 1 git metadata | 5 |
+| python/cpython | 410fdda081ba | findings | 1 | 0 | 2 | 1 | 28 | 0 | 146 binary, 1 git metadata | 9 |
+| microsoft/terminal | 703ef7f969d9 | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 5 |
 
 Seconds include the clone. "Binary" means a file with a known binary header or
-with NUL bytes that does not read as text; the line rules read its ASCII only
-and the report lists it as "binary format, ASCII rules only".
+with NUL bytes that does not read as text; the line rules read its ASCII only.
+"Executable" files are listed because nothing analyzes their code, but each
+one is reported above as a finding, so they no longer make a scan
+inconclusive.
 
-6 of 10 repositories are clean, 3 are INCONCLUSIVE only because of executables,
-1 has findings.
-
-## HIGH and CRITICAL findings
+## CRITICAL, HIGH and MEDIUM findings
 
 | Repository | File | Rule | Level | Verdict | Why |
 |---|---|---|---|---|---|
-| python/cpython | `Lib/test/archivetestdata/exe_with_zip:26`, `exe_with_z64:25` | `deception.nul-byte-in-script` | HIGH | False in intent | A bash script followed by a zip archive (test data for `zipfile`). The NUL is real, the file is not hiding anything. Issue 42 |
-| microsoft/vscode | `extensions/copilot/.vscode/tasks.json:94` | `ide.vscode-folder-open-task` | HIGH | True detection, benign | The task "watch" does run when the folder is opened; it is an ordinary dev watch task. Issue 43 |
+| pypa/pip | `src/pip/_vendor/distlib/{t32,t64,t64-arm,w32,w64,w64-arm}.exe` | `repo.committed-binary` | HIGH (6) | True detection, benign | Vendored distlib script launchers |
+| microsoft/vscode | `build/lib/watch/watcher.exe`, `build/win32/inno_updater.exe`, `build/win32/vcruntime140.dll`, four PSReadLine `.dll` files | `repo.committed-binary` | HIGH (7) | True detection, benign | Build helpers, the installer updater, a runtime library and vendored PowerShell modules |
+| microsoft/terminal | 13 files under `dep/WinAppDriver/`, `dep/nuget/nuget.exe` | `repo.committed-binary` | HIGH (14) | True detection, benign | A vendored UI test driver and NuGet |
+| microsoft/vscode | `extensions/copilot/.vscode/tasks.json:94` | `ide.vscode-folder-open-task` | HIGH | True detection, benign | As before: a dev watch task that runs on folder open. Issue 43 |
+| python/cpython | `Lib/test/archivetestdata/exe_with_zip:26`, `exe_with_z64:25` | `deception.nul-byte-in-script` | HIGH (2) | False in intent | As before: a shell script followed by a zip archive. Issue 42 |
+| git/git | `git-gui/lib/win32_shortcut.js:4`, `:5` | `repo.wsh-javascript` | MEDIUM (2) | True detection, benign | A real Windows Script Host script that creates shortcuts for git-gui |
+| python/cpython | `Lib/test/empty.vbs` | `repo.windows-script` | MEDIUM | True detection, benign | An empty VBScript used by the test suite |
 
-There are no CRITICAL findings.
+There are no CRITICAL findings. A first run of this branch reported
+`dep/WinAppDriver/Newtonsoft.Json.dll` as a CRITICAL disguised executable
+(".json" before ".dll" read as a double extension); dotted .NET assembly
+names are now excluded, and a double extension counts only when the outer
+extension runs on a double click and the inner one is a document, image,
+media, archive or text lure.
+
+## LOW findings
+
+All LOW findings are `repo.windows-script` on command and PowerShell scripts:
+
+| Repository | `.bat` | `.cmd` | `.ps1` | `.psm1` |
+|---|---|---|---|---|
+| psf/requests | 1 | | | |
+| pallets/flask | 1 | | | |
+| git/git | 3 | | 2 | |
+| python/cpython | 26 | | 2 | |
+| microsoft/vscode | 13 | 11 | 24 | 2 |
+| microsoft/terminal | 18 | 20 | 35 | 1 |
+
+They are build glue in Windows-heavy repositories; LOW keeps them in the
+overall picture without failing anything. A repository with hundreds of them
+needs the grouped "needs manual review" section of milestone 3.
+
+## Levels for vendored launchers
+
+The 27 committed executables above are HIGH, and none of them is disguised.
+Before this family existed, any of them made the scan inconclusive (exit 3),
+which is not a pass. HIGH keeps it a non-pass at the default threshold
+(exit 1), and the report now names the file and says its code is not
+analyzed. MEDIUM would turn a planted binary into exit 0. Nothing in the scan
+can tell an upstream launcher from a replaced one; lowering the level needs
+provenance (a hash allow-list or a code signature check), which is a later
+item.
 
 ## INCONCLUSIVE results
 
-The report now lists every skipped file, the causes of INCONCLUSIVE first, so
-each cause below is visible in the report itself.
-
-| Repository | Cause |
-|---|---|
-| pypa/pip | 6 PE launchers in `src/pip/_vendor/distlib/` (`t32.exe`, `t64.exe`, `t64-arm.exe`, `w32.exe`, `w64.exe`, `w64-arm.exe`), all vendored script launchers |
-| microsoft/vscode | 7 PE files: `build/lib/watch/watcher.exe`, `build/win32/inno_updater.exe`, `build/win32/vcruntime140.dll` and four PSReadLine `.dll` files under `src/vs/workbench/contrib/terminal/common/scripts/psreadline/` |
-| microsoft/terminal | 14 PE files: 13 under `dep/WinAppDriver/` and `dep/nuget/nuget.exe` |
-
-These follow the documented policy: an executable is code that nothing
-analyzes yet. They go away when the "committed binaries" rule exists, because
-such a file then becomes a finding. No repository is INCONCLUSIVE because of a
-file size any more.
+None. In the earlier run, pip (6 PE launchers), vscode (7 PE files) and
+terminal (14 PE files) were inconclusive only because of those executables;
+they are the HIGH findings above.
 
 ## What changed since the first run
 
@@ -77,6 +107,13 @@ because of it:
   over 100 MiB, or a line over 16 MiB, still makes the scan INCONCLUSIVE.
   vscode's two large text files and terminal's `nuget.exe` no longer count as
   "too large" (`nuget.exe` is reported as an executable).
+
+## Earlier run (before the repository contents family)
+
+On the same heads, the scanner before this family (commit `a289486`) gave:
+0 CRITICAL; pip, vscode and terminal INCONCLUSIVE only because of their
+executables (exit 3, 1 with its HIGH finding, and 3); cpython 2 HIGH (issue 42); vscode 1 HIGH
+(issue 43); the other six clean.
 
 ## Issues still open from this benchmark
 
