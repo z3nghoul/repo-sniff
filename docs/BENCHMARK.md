@@ -1,40 +1,46 @@
 # Benchmark on honest repositories
 
-Date: 2026-11-01. Scanner: `repo-sniff 0.1.0`, release build of the branch
-with the repository contents family (commit `0383fc2`, stacked on the
-architecture refactor). Each repository was scanned from its default branch
-with `repo-sniff scan <url>` (default `--fail-on high`) and a 600 second limit
-per repository including the clone. No repository timed out or hit the file
-limit. Re-run with `scripts/benchmark.sh`; the commits below are the heads
-that were current at the time of the run. The same heads scanned with the
-previous scanner gave the results of the earlier run (see the end of this
-page), so every difference below comes from the new rules.
+Date: 2026-11-01, second run. Scanner: `repo-sniff 0.1.0`, release build of a
+local branch that merges the hardening pull requests into `main` (`6c671ad`):
+#75 at `979fd45` (clone and secrets), #76 at `f238457` (symlinks, including
+links in remote clones) and #77 at `1ddfa3c` (UTF-16 scripts). Each
+repository was scanned from its default branch with `repo-sniff scan <url>`
+(default `--fail-on high`) and a 600 second limit per repository including the
+clone. No repository timed out or hit the file limit. Re-run with
+`TIMEOUT=600 scripts/benchmark.sh`; the commits below are the heads that were
+current at the time of the run (only cpython moved since the first run on
+this page).
 
 The target for honest repositories is 0 critical findings. **It is met:**
-0 CRITICAL in all ten. **No repository is INCONCLUSIVE any more**: the
-executables that made pip, vscode and terminal inconclusive are now HIGH
-findings that name each file.
+0 CRITICAL in all ten, and no repository is INCONCLUSIVE. The findings are the
+same, file for file, as in the run with the repository contents family
+(scanner commit `0383fc2`). The difference is in the list of entries that
+were not fully analyzed: symbolic links in remote clones are now recognized
+from the clone's index (#76), so cargo lists 121 links, cpython 4, git 3,
+requests 2, ripgrep and vscode 1 each. None of them points outside its
+repository, and none is a VS Code tasks file.
 
 ## Results
 
 | Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Seconds |
 |---|---|---|---|---|---|---|---|---|---|---|
-| BurntSushi/ripgrep | 91f5d22ef48b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 7 binary, 1 git metadata | 1 |
-| rust-lang/cargo | 809bcc525b61 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 1 git metadata | 3 |
-| psf/requests | 3c7baaa05ab4 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 6 binary, 1 git metadata | 1 |
+| BurntSushi/ripgrep | 91f5d22ef48b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 7 binary, 1 symlink, 1 git metadata | 1 |
+| rust-lang/cargo | 809bcc525b61 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 121 symlink, 1 git metadata | 1 |
+| psf/requests | 3c7baaa05ab4 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 6 binary, 2 symlink, 1 git metadata | 1 |
 | pallets/flask | 49943b5a9441 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 5 binary, 1 git metadata | 1 |
-| pypa/pip | ec43c48b2f2d | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 2 |
+| pypa/pip | ec43c48b2f2d | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 1 |
 | expressjs/express | 1c6f1b0fe400 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 1 git metadata | 1 |
-| microsoft/vscode | 1306698e328e | findings | 1 | 0 | 8 | 0 | 50 | 0 | 330 binary, 7 executable, 1 git metadata | 16 |
-| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 3 | 5 | 0 | 16 binary, 1 git metadata | 5 |
-| python/cpython | 410fdda081ba | findings | 1 | 0 | 2 | 1 | 28 | 0 | 146 binary, 1 git metadata | 9 |
-| microsoft/terminal | 703ef7f969d9 | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 5 |
+| microsoft/vscode | 1306698e328e | findings | 1 | 0 | 8 | 0 | 50 | 0 | 330 binary, 7 executable, 1 symlink, 1 git metadata | 14 |
+| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 3 | 5 | 0 | 16 binary, 3 symlink, 1 git metadata | 5 |
+| python/cpython | 9c0cfb141c23 | findings | 1 | 0 | 2 | 1 | 28 | 0 | 146 binary, 4 symlink, 1 git metadata | 9 |
+| microsoft/terminal | 703ef7f969d9 | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 4 |
 
 Seconds include the clone. "Binary" means a file with a known binary header or
 with NUL bytes that does not read as text; the line rules read its ASCII only.
 "Executable" files are listed because nothing analyzes their code, but each
 one is reported above as a finding, so they no longer make a scan
-inconclusive.
+inconclusive. "Symlink" entries are listed as links, not followed; their
+targets are judged when they are inside the repository.
 
 ## CRITICAL, HIGH and MEDIUM findings
 

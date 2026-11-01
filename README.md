@@ -168,8 +168,10 @@ and other binary files affect the status is described in
 ## Benchmark
 
 Ten popular honest repositories, scanned from their default branches with
-`repo-sniff scan <url>` on 2026-11-01 (scanner commit `0383fc2`). The target
-is 0 CRITICAL findings on honest code.
+`repo-sniff scan <url>` on 2026-11-01. The scanner was `main` (`6c671ad`) with
+the open hardening pull requests #75, #76 and #77 merged locally. The target
+is 0 CRITICAL findings on honest code; it is met, and no scan is
+INCONCLUSIVE.
 
 | Repository | Exit | Critical | High | Medium | Low |
 |---|---|---|---|---|---|
