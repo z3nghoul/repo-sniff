@@ -84,6 +84,8 @@ needing a new engine variant each.
 
 - [ ] One check signature `fn(&Ctx) -> Vec<Hit>` with lazily cached views (`ctx.bytes()`, `ctx.text()`, `ctx.jsonc()`, later `yaml`, `toml`, `xml`, AST) and the repository index available to every check
 - [ ] File classification before rules: BOM and UTF-16 decoding, shebang, magic bytes, language; rules may select by `languages = [...]` next to `files` (UTF-16 `.ps1` and Trojan Source in UTF-16 reach line rules)
+  - [x] Already done in the gate pull requests: executables recognized by magic bytes (ELF, PE, Mach-O, fat Mach-O) ([#25](https://github.com/z3nghoul/repo-sniff/pull/25)); scripts recognized by extension or shebang, and UTF-16 with a byte order mark decoded for script extensions, so a UTF-16 `.ps1` reaches the line rules ([#26](https://github.com/z3nghoul/repo-sniff/pull/26)); known binary headers and the NUL-density test that tells text with stray NUL bytes from data, which is then read as ASCII only ([#47](https://github.com/z3nghoul/repo-sniff/pull/47)); the same classification for files over 5 MiB read as a stream ([#52](https://github.com/z3nghoul/repo-sniff/pull/52))
+  - [ ] Still open: a language per file and `languages = [...]` next to `files`; UTF-16 decoding for every text file, not only scripts (Trojan Source in a UTF-16 `.rs` file is read as ASCII only today, so the bidi rule misses it); UTF-16 without a byte order mark
 - [ ] `Finding` gains column, byte span and a short snippet (more fields come with the milestones that need them)
 - [ ] Generic fixture harness: a fixture folder plus `expected.toml`, so a new rule needs no new test code (separate small pull request)
 
