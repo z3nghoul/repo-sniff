@@ -169,10 +169,10 @@ them (full list in
   file is reported;
 - archives are flagged, never unpacked;
 - remote repositories are cloned over https only, by a git that runs with an
-  empty environment and an empty configuration (so no filter, credential
-  helper or fsmonitor from any configuration runs), with hooks and templates
-  off, symlinks written as plain files, submodules not fetched and no
-  interactive prompts;
+  empty environment, an empty configuration and an empty home directory (so
+  no filter, credential helper or fsmonitor from any configuration runs),
+  with hooks and templates off, symlinks written as plain files, submodules
+  not fetched and no interactive prompts;
 - credentials in a URL are hidden in everything that is printed;
 - an inconclusive scan (file limit reached, a file not read, an executable
   binary that no rule reported) is never reported as clean;
