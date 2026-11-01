@@ -8,7 +8,7 @@
 //!
 //! | Content | Name | Rule | Level |
 //! |---|---|---|---|
-//! | native | promises something else: an extension in `NOT_CODE`, a double extension whose inner one is in `NOT_CODE` (`invoice.pdf.exe`), or bidi or invisible characters | `repo.disguised-executable` | CRITICAL |
+//! | native | promises something else: an extension in `NOT_CODE`, a double extension that runs on a double click with a lure inside (`invoice.pdf.exe`, see `LURES`), or bidi or invisible characters | `repo.disguised-executable` | CRITICAL |
 //! | PE | `.scr` | `repo.windows-dropper` | HIGH |
 //! | native | anything else, or none | `repo.committed-binary` | HIGH |
 //! | Java class (validated, see `java_class`) | `.class` | `repo.committed-binary` | MEDIUM |
@@ -148,6 +148,19 @@ pub const NOT_CODE: &[&str] = &[
     "bat",
     "cmd",
     "vbs",
+];
+
+/// Extensions Windows runs on a double click, the outer half of a disguise by
+/// double extension (`invoice.pdf.exe`).
+const DOUBLE_CLICK: &[&str] = &["exe", "scr", "com", "pif"];
+
+/// What a lure pretends to be in a double extension: documents, images,
+/// media, archives and plain text. Data and source formats are left out,
+/// because dotted names such as `Newtonsoft.Json.dll` or `System.Xml.exe` are
+/// ordinary .NET assembly names.
+const LURES: &[&str] = &[
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "rtf", "txt", "png", "jpg", "jpeg",
+    "gif", "bmp", "mp3", "mp4", "avi", "mov", "wav", "zip", "rar", "7z",
 ];
 
 /// Extensions of native executables and libraries. Used only when the bytes
@@ -323,12 +336,12 @@ fn disguise(name: &str) -> Option<String> {
     {
         return Some(format!("its name ends in `.{extension}`"));
     }
-    if let Some(inner) = inner_extension(name)
-        && NOT_CODE.contains(&inner)
+    if let (Some(inner), Some(outer)) = (inner_extension(name), extension(name))
+        && LURES.contains(&inner)
+        && DOUBLE_CLICK.contains(&outer)
     {
         return Some(format!(
-            "its name ends in `.{inner}.{}`, a double extension",
-            extension(name).unwrap_or_default()
+            "its name ends in `.{inner}.{outer}`, a double extension"
         ));
     }
     None
@@ -555,6 +568,11 @@ mod tests {
         assert!(disguise("libfoo.so.1.2").is_none());
         assert!(disguise("python3.12.exe").is_none());
         assert!(disguise("data.bin").is_none());
+        // Dotted .NET assembly names are not double extensions.
+        assert!(disguise("newtonsoft.json.dll").is_none());
+        assert!(disguise("system.xml.exe").is_none());
+        assert!(disguise("report.pdf.dll").is_none());
+        assert!(disguise("photo.jpg.scr").is_some());
     }
 
     #[test]
