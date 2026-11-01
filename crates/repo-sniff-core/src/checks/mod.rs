@@ -74,6 +74,8 @@ pub(crate) struct Views<'a> {
     decode: Decode,
     /// The native executable format the scanner found, if any.
     executable: Option<&'static str>,
+    /// The size of the whole file, when `bytes` is only its head.
+    size: Option<u64>,
     text: OnceCell<Cow<'a, str>>,
     jsonc: OnceCell<Result<Node, ParseError>>,
     /// The last `line_of` answer, `(offset, line)`, to count on from.
@@ -86,6 +88,7 @@ impl<'a> Views<'a> {
             bytes,
             decode,
             executable: None,
+            size: None,
             text: OnceCell::new(),
             jsonc: OnceCell::new(),
             line_cursor: Cell::new((0, 1)),
@@ -99,6 +102,12 @@ impl<'a> Views<'a> {
     /// Records the native executable format the scanner found for the file.
     pub(crate) fn with_executable(mut self, executable: Option<&'static str>) -> Self {
         self.executable = executable;
+        self
+    }
+
+    /// Records the size of the whole file.
+    pub(crate) fn with_size(mut self, size: Option<u64>) -> Self {
+        self.size = size;
         self
     }
 
@@ -212,6 +221,12 @@ impl<'a> Ctx<'a> {
     /// for head checks; `None` for other engines.
     pub fn executable(&self) -> Option<&'static str> {
         self.views.executable
+    }
+
+    /// The size of the whole file in bytes, for a head check, whose `bytes`
+    /// are only the first ones; `None` when unknown and for other engines.
+    pub fn file_size(&self) -> Option<u64> {
+        self.views.size
     }
 
     /// The 1-based line of a byte offset in `text` (see `Views::line_of`).
