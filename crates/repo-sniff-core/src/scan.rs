@@ -1141,15 +1141,34 @@ fn first_nul_line(bytes: &[u8]) -> Option<usize> {
 
 /// Names the executable format a file starts with, by its magic bytes:
 /// ELF, PE (the `MZ` header), Mach-O in all four byte orders, and fat Mach-O
-/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The fat header `CAFEBABE` is also the header of a Java class
-/// file; both are code that runs, so both count.
+/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The
+/// fat header `CAFEBABE` is also the header of a Java class file; both are
+/// code that runs, so both count.
+///
+/// An `MZ` header counts as PE unless it points at the `PE\0\0` signature
+/// (through `e_lfanew` at offset 0x3C) inside the given bytes and that
+/// signature is not there: data that only happens to start with `MZ` is not
+/// a program. When the bytes are too short to tell, it still counts.
 fn executable_format(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x7F, b'E', b'L', b'F', ..] => Some("ELF"),
-        [b'M', b'Z', ..] => Some("PE"),
+        [b'M', b'Z', ..] => pe_signature_not_missing(bytes).then_some("PE"),
         [0xFE, 0xED, 0xFA, 0xCE | 0xCF, ..] | [0xCE | 0xCF, 0xFA, 0xED, 0xFE, ..] => Some("Mach-O"),
         [0xCA, 0xFE, 0xBA, 0xBE | 0xBF, ..] => Some("Mach-O fat (or Java class)"),
         _ => None,
+    }
+}
+
+/// False only when an `MZ` header's `e_lfanew` points inside `bytes` and the
+/// four bytes there are not `PE\0\0`.
+fn pe_signature_not_missing(bytes: &[u8]) -> bool {
+    let Some(&[a, b, c, d]) = bytes.get(0x3C..0x40) else {
+        return true;
+    };
+    let offset = u32::from_le_bytes([a, b, c, d]) as usize;
+    match offset.checked_add(4).and_then(|end| bytes.get(offset..end)) {
+        Some(signature) => signature == b"PE\0\0",
+        None => true,
     }
 }
 
@@ -1365,6 +1384,35 @@ mod tests {
 
         assert!(report.is_complete());
         assert_eq!(report.inconclusive_count(), 0);
+    }
+
+    #[test]
+    fn an_mz_header_is_a_pe_only_with_its_signature() {
+        let mut pe = vec![0u8; 0x48];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C] = 0x40;
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        assert_eq!(executable_format(&pe), Some("PE"));
+        pe[0x40..0x44].copy_from_slice(b"text");
+        assert_eq!(
+            executable_format(&pe),
+            None,
+            "MZ data without a PE signature"
+        );
+        // When the bytes cannot tell, it still counts.
+        assert_eq!(
+            executable_format(b"MZ\x90\0\x03\0"),
+            Some("PE"),
+            "too short"
+        );
+        let mut far = vec![0u8; 0x48];
+        far[..2].copy_from_slice(b"MZ");
+        far[0x3C..0x40].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+        assert_eq!(
+            executable_format(&far),
+            Some("PE"),
+            "signature past the bytes"
+        );
     }
 
     #[test]
