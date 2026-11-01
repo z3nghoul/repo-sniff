@@ -235,6 +235,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             head_of(&bytes),
             None,
             class.executable,
+            Some(bytes.len() as u64),
         );
         report.findings.extend(headed.findings);
 
@@ -293,13 +294,14 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     // Only the first bytes are read, for the head rules (and
                     // a PE signature, see `native_format`).
                     let path = root.join(&entry.path);
-                    let (head, executable) = read_head(&path).unwrap_or_default();
+                    let (head, executable, size) = read_head(&path).unwrap_or_default();
                     let headed = env.run_head_checks(
                         &entry.path,
                         &slash_path,
                         &head,
                         Some(issue.clone()),
                         executable,
+                        size,
                     );
                     report.findings.extend(headed.findings);
                 }
@@ -320,7 +322,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                 // Head rules get at most the first bytes of a regular file the
                 // link points at inside the repository; there may be any number
                 // of links, so nothing more is read for them.
-                let (head, executable) = target_text
+                let (head, executable, size) = target_text
                     .as_deref()
                     .and_then(|target| {
                         link_target_file(&slash_path, target, &regular_files, &lowercase_files)
@@ -337,6 +339,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     &head,
                     Some(issue.clone()),
                     executable,
+                    size,
                 );
                 report.findings.extend(headed.findings);
                 // File rules get the whole target, as before, and only when one
@@ -405,8 +408,11 @@ impl Env<'_> {
         head: &[u8],
         issue: Option<FileIssue>,
         executable: Option<&'static str>,
+        size: Option<u64>,
     ) -> Checked {
-        let views = Views::new(head, classify(slash_path, head).decode).with_executable(executable);
+        let views = Views::new(head, classify(slash_path, head).decode)
+            .with_executable(executable)
+            .with_size(size);
         self.run_checks(self.head_rules, relative, slash_path, &views, issue)
     }
 
@@ -478,15 +484,17 @@ fn symlink_target_bytes(
     fs::read(root.join(resolved)).unwrap_or_default()
 }
 
-/// The first `HEAD_LEN` bytes of a file, read without reading the rest, and
-/// its native executable format (see `native_format`).
-fn read_head(path: &Path) -> Option<(Vec<u8>, Option<&'static str>)> {
+/// The first `HEAD_LEN` bytes of a file, read without reading the rest, its
+/// native executable format (see `native_format`) and its size.
+type Head = (Vec<u8>, Option<&'static str>, Option<u64>);
+
+fn read_head(path: &Path) -> Option<Head> {
     let file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     let mut head = Vec::new();
     file.take(HEAD_LEN as u64).read_to_end(&mut head).ok()?;
     let executable = native_format(&head, Some((path, size)));
-    Some((head, executable))
+    Some((head, executable, Some(size)))
 }
 
 /// The Windows loader accepts a PE header up to this far into the file.
@@ -746,7 +754,14 @@ fn scan_streamed(
     // Head rules need only the name and the first bytes, so a large file is
     // no way around them, and they never make it count as too large.
     let executable = native_format(&head, Some((&path, size)));
-    let headed = env.run_head_checks(relative, slash_path, head_of(&head), None, executable);
+    let headed = env.run_head_checks(
+        relative,
+        slash_path,
+        head_of(&head),
+        None,
+        executable,
+        Some(size),
+    );
     let named_executable = headed.named_executable;
     out.findings.extend(headed.findings);
     let applicable: Vec<&Rule> = rules

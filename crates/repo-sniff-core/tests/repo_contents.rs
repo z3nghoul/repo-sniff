@@ -57,6 +57,25 @@ fn java_class() -> Vec<u8> {
     synthetic(&[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52, 0, 20, 10, 0, 2])
 }
 
+/// A fat binary of 45 architectures made to look like a class file: its first
+/// entry reads as a class header (version 45, a pool of 20, tag 10), and its
+/// second is an ARM64 slice at a page boundary with an `align` of 16, which
+/// the loader does not check.
+fn padded_fat_class() -> Vec<u8> {
+    let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 45];
+    bytes.extend_from_slice(&[0, 20, 10, 0]);
+    bytes.resize(8 + 20, 0x41);
+    bytes.extend_from_slice(&0x0100_000Cu32.to_be_bytes());
+    bytes.extend_from_slice(&0u32.to_be_bytes());
+    bytes.extend_from_slice(&0x4000u32.to_be_bytes());
+    bytes.extend_from_slice(&0x40u32.to_be_bytes());
+    bytes.extend_from_slice(&16u32.to_be_bytes());
+    bytes.resize(8 + 20 * 45, 0);
+    bytes.extend_from_slice(MARKER);
+    bytes.resize(0x4040, 0);
+    bytes
+}
+
 /// The CPython 3.12 magic number, `\r\n`, and a zero flags word.
 fn pyc() -> Vec<u8> {
     synthetic(&[0xCB, 0x0D, b'\r', b'\n', 0, 0, 0, 0])
@@ -124,6 +143,7 @@ fn fixture_repository() -> tempfile::TempDir {
     write(root, "positive/disguised/invoice.pdf.exe", &pe());
     write(root, "positive/disguised/photo\u{202E}gpj.exe", &pe());
     write(root, "positive/disguised/fake.class", &fat_mach_o());
+    write(root, "positive/disguised/Loader.class", &padded_fat_class());
     write(root, "positive/disguised/invoice.pdf          .exe", &pe());
     // COM resolves member names in any case.
     write(
@@ -322,6 +342,7 @@ fn every_fixture_gets_exactly_its_expected_findings() {
             Critical,
         ),
         row("positive/disguised/fake.class", "committed-binary", High),
+        row("positive/disguised/Loader.class", "committed-binary", High),
         row(
             "positive/disguised/invoice.pdf          .exe",
             "disguised-executable",
@@ -407,9 +428,9 @@ fn reported_executables_are_still_listed_and_the_scan_is_complete() {
             _ => None,
         })
         .collect();
-    // Eight committed, eight disguised, the screen saver, and the two files
+    // Eight committed, eight disguised, the screen saver, and the three files
     // that start with CAFEBABE (the scanner lists every one as executable).
-    assert_eq!(executables.len(), 19, "{:?}", report.skipped);
+    assert_eq!(executables.len(), 20, "{:?}", report.skipped);
     assert!(executables.iter().all(|&reported| reported));
 }
 

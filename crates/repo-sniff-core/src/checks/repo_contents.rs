@@ -253,11 +253,16 @@ enum Code {
 /// Recognizes code from a file's first bytes, its normalized name and the
 /// native format the scanner found (`Ctx::executable`), so that a check and
 /// the scanner's "executable" listing never disagree.
-fn code(head: &[u8], name: &str, executable: Option<&'static str>) -> Option<Code> {
+fn code(
+    head: &[u8],
+    name: &str,
+    executable: Option<&'static str>,
+    size: Option<u64>,
+) -> Option<Code> {
     let extension = extension(name);
     if let Some(format) = executable {
         if head.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]) {
-            return Some(if extension == Some("class") && java_class(head) {
+            return Some(if extension == Some("class") && java_class(head, size) {
                 Code::Bytecode("Java class")
             } else {
                 Code::Native("Mach-O fat")
@@ -277,7 +282,7 @@ fn code(head: &[u8], name: &str, executable: Option<&'static str>) -> Option<Cod
 /// file needs, no entry of the fat architecture table (as far as the head
 /// reaches) names a CPU a loader would run, and (see `code`) the file is named
 /// `.class`. Anything else is treated as native code, which keeps it at HIGH.
-fn java_class(head: &[u8]) -> bool {
+fn java_class(head: &[u8], size: Option<u64>) -> bool {
     let field = |at: usize| {
         head.get(at..at + 2)
             .map(|b| u16::from_be_bytes([b[0], b[1]]))
@@ -288,17 +293,18 @@ fn java_class(head: &[u8]) -> bool {
     (45..=80).contains(&major)
         && pool >= 1
         && matches!(tag, 1 | 3..=12 | 15..=20)
-        && !names_a_known_cpu(head)
+        && !names_a_known_cpu(head, size)
 }
 
 /// Whether one of the first `nfat_arch` entries of the fat architecture
 /// table (as far as the head reaches) is one a loader would run: the CPU type
-/// of x86, x86-64, ARM, ARM64, ARM64_32, PowerPC or PowerPC 64, an alignment
-/// of at most 2^15, an offset aligned to it and past the table. A fat binary
-/// needs such an entry to run anywhere. Looking only at those entries, and
-/// only at sane ones, keeps ordinary class files, whose constant pool can
-/// hold a 7 or a 12 anywhere, from being taken for fat binaries.
-fn names_a_known_cpu(head: &[u8]) -> bool {
+/// of x86, x86-64, ARM, ARM64, ARM64_32, PowerPC or PowerPC 64, with a slice
+/// that starts on a page boundary past the table and ends inside the file.
+/// Those are what the macOS loader checks before it maps a slice (it does
+/// not check the `align` field). Ordinary class files, whose constant pool
+/// can hold a 7 or a 12 anywhere, almost never pass all of it; when the file
+/// size is unknown, the slice end is not checked, which errs towards native.
+fn names_a_known_cpu(head: &[u8], size: Option<u64>) -> bool {
     const KNOWN: [u32; 7] = [
         7,
         0x0100_0007,
@@ -308,6 +314,7 @@ fn names_a_known_cpu(head: &[u8]) -> bool {
         18,
         0x0100_0012,
     ];
+    const PAGE: u64 = 4096;
     let word = |bytes: &[u8], at: usize| {
         bytes
             .get(at..at + 4)
@@ -324,15 +331,16 @@ fn names_a_known_cpu(head: &[u8]) -> bool {
         .iter()
         .take(count as usize)
         .any(|entry| {
-            let (Some(cpu), Some(offset), Some(align)) =
-                (word(entry, 0), word(entry, 8), word(entry, 16))
+            let (Some(cpu), Some(offset), Some(length)) =
+                (word(entry, 0), word(entry, 8), word(entry, 12))
             else {
                 return false;
             };
+            let (offset, length) = (u64::from(offset), u64::from(length));
             KNOWN.contains(&cpu)
-                && align <= 15
-                && offset % (1u32 << align) == 0
-                && u64::from(offset) >= table_end
+                && offset % PAGE == 0
+                && offset >= table_end
+                && size.is_none_or(|size| offset + length <= size)
         })
 }
 
@@ -434,7 +442,8 @@ fn hit(severity: Severity, reason: String) -> Vec<Hit> {
 /// name and the head of its in-repository target.
 pub fn disguised_executable(ctx: &Ctx<'_>) -> Vec<Hit> {
     let name = normalized_name(ctx.path);
-    let Some(Code::Native(format)) = code(ctx.bytes(), &name, ctx.executable()) else {
+    let Some(Code::Native(format)) = code(ctx.bytes(), &name, ctx.executable(), ctx.file_size())
+    else {
         return Vec::new();
     };
     let Some(why) = disguise(&name) else {
@@ -475,7 +484,7 @@ pub fn committed_binary(ctx: &Ctx<'_>) -> Vec<Hit> {
             Vec::new()
         };
     }
-    let code = code(ctx.bytes(), &name, ctx.executable());
+    let code = code(ctx.bytes(), &name, ctx.executable(), ctx.file_size());
     match code {
         Some(Code::Native(_)) if disguise(&name).is_some() || native_screen_saver(&name, code) => {
             Vec::new() // reported as disguised, or as a dropper
@@ -516,7 +525,10 @@ pub fn windows_dropper(ctx: &Ctx<'_>) -> Vec<Hit> {
     let runs = match extension {
         "hta" => true,
         "lnk" => by_name || head.starts_with(&LNK_HEADER),
-        "scr" => by_name || native_screen_saver(&name, code(head, &name, ctx.executable())),
+        "scr" => {
+            by_name
+                || native_screen_saver(&name, code(head, &name, ctx.executable(), ctx.file_size()))
+        }
         _ => false,
     };
     if !runs {
@@ -622,7 +634,12 @@ mod tests {
 
     /// `code` with the format the scanner finds for a file of these bytes.
     fn code_of(head: &[u8], name: &str) -> Option<Code> {
-        code(head, name, native_format(head, None))
+        code(
+            head,
+            name,
+            native_format(head, None),
+            Some(head.len() as u64),
+        )
     }
 
     #[test]
@@ -704,10 +721,26 @@ mod tests {
         tricky.extend_from_slice(&[0x01, 0, 0, 0x07, 0, 0, 0, 3]);
         tricky.extend_from_slice(&0x1000u32.to_be_bytes()); // offset
         tricky.extend_from_slice(&0x2000u32.to_be_bytes()); // size
-        tricky.extend_from_slice(&12u32.to_be_bytes()); // align 2^12
+        tricky.extend_from_slice(&16u32.to_be_bytes()); // align: not checked
+        let sized =
+            |bytes: &[u8], size| code(bytes, "main.class", native_format(bytes, None), size);
+        // In a file large enough to hold that slice, it is a fat binary...
         assert_eq!(
-            code_of(&tricky, "main.class"),
+            sized(&tricky, Some(0x4000)),
             Some(Code::Native("Mach-O fat"))
+        );
+        assert_eq!(sized(&tricky, None), Some(Code::Native("Mach-O fat")));
+        // ... in one that ends before the slice ends, nothing runs it.
+        assert_eq!(
+            sized(&tricky, Some(0x2000)),
+            Some(Code::Bytecode("Java class"))
+        );
+        // A slice that does not start on a page boundary is not mapped.
+        let mut unaligned = tricky.clone();
+        unaligned[8 + 20 + 8..8 + 20 + 12].copy_from_slice(&0x1010u32.to_be_bytes());
+        assert_eq!(
+            sized(&unaligned, Some(0x4000)),
+            Some(Code::Bytecode("Java class"))
         );
         // A class file whose constant pool happens to hold a 7 on a 20-byte
         // boundary past the first entries: still a class.
