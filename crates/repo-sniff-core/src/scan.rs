@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::ops::Range;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::checks::{Check, Ctx, Decode, FileIssue, HEAD_LEN, Hit, RepoIndex, TextSpan, Views};
 use crate::finding::{Finding, Severity};
@@ -58,6 +58,12 @@ const MAX_LOCATED_HITS: usize = 100;
 
 /// Added to findings from a file that has NUL bytes and does not read as text.
 const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
+
+/// JSONC and file rules read the targets of the links they select in full,
+/// and one file may be the target of any number of links. Once this many
+/// bytes have been read through links in one scan, every further link such a
+/// rule selects is listed as too large instead (inconclusive).
+const MAX_THROUGH_LINK_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Added to findings of a JSONC check on a symbolic link: the check read the
 /// file the link points at, under the link's name, as the tool that opens the
@@ -336,6 +342,7 @@ pub fn scan_with_links(
     // Entries the walk did not hand over still matter to a rule that asks for
     // that file by name: an oversized file or a symlink is not a way around it.
     let walk_skips: Vec<Skipped> = skipped.clone();
+    let mut through_link_bytes: u64 = 0;
     for entry in &walk_skips {
         let slash_path = to_slash(&entry.path);
         let checked = match &entry.reason {
@@ -381,7 +388,7 @@ pub fn scan_with_links(
                     .and_then(|path| read_head(&root.join(path)))
                     .unwrap_or_default();
                 let issue = FileIssue::Symlink {
-                    target: target_text,
+                    target: target_text.clone(),
                     resolved,
                 };
                 let headed = env.run_head_checks(
@@ -395,30 +402,66 @@ pub fn scan_with_links(
                 report.findings.extend(headed.findings);
                 // File and JSONC rules get the whole target, and only when one
                 // selects the link: VS Code follows a `.vscode/tasks.json`
-                // that is a link and runs its tasks.
+                // that is a link and runs its tasks. The target is found the
+                // way the head rules find it (both separators, any case), so
+                // `..\\NOTES.TXT` is no way around it.
                 let mut jsonc = has_jsonc_rule(&slash_path);
-                let target_size =
-                    symlink_target_file(&entry.path, target.as_deref(), &regular_files)
-                        .and_then(|path| fs::metadata(root.join(path)).ok())
-                        .map(|metadata| metadata.len());
-                if jsonc
-                    && let Some(size) = target_size.filter(|&size| size > limits.max_buffered_size)
-                {
-                    // As for a file that size: a JSONC rule cannot read it whole.
-                    skipped.push(Skipped {
-                        path: entry.path.clone(),
-                        reason: SkipReason::TooLarge { size },
+                let file_rule = has_file_rule(&slash_path);
+                let mut bytes = Vec::new();
+                if jsonc || file_rule {
+                    let target_file = target_text.as_deref().and_then(|target| {
+                        link_target_file(&slash_path, target, &regular_files, &lowercase_files)
                     });
-                    jsonc = false;
+                    let mut not_read = |error: &str| {
+                        skipped.push(Skipped {
+                            path: entry.path.clone(),
+                            reason: SkipReason::Unreadable {
+                                error: error.to_string(),
+                            },
+                        });
+                    };
+                    match target_file {
+                        Some(path) => {
+                            let path = root.join(path);
+                            let size = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+                            if (jsonc && size > limits.max_buffered_size)
+                                || through_link_bytes + size > MAX_THROUGH_LINK_BYTES
+                            {
+                                // As for a file that size, or once the budget
+                                // for reading through links is spent.
+                                skipped.push(Skipped {
+                                    path: entry.path.clone(),
+                                    reason: SkipReason::TooLarge { size },
+                                });
+                                jsonc = false;
+                            } else {
+                                match fs::read(&path) {
+                                    Ok(read) => {
+                                        through_link_bytes += read.len() as u64;
+                                        bytes = read;
+                                    }
+                                    Err(err) => {
+                                        not_read(&format!("link target not read: {err}"));
+                                        jsonc = false;
+                                    }
+                                }
+                            }
+                        }
+                        // A rule that would judge the file behind the link
+                        // could not: the target is outside, another link
+                        // (#69), a folder or missing. Not a clean result.
+                        None if jsonc => {
+                            not_read(
+                                "link target not read: it is not a regular file in the repository",
+                            );
+                            jsonc = false;
+                        }
+                        None => {}
+                    }
                 }
-                let bytes = if jsonc || has_file_rule(&slash_path) {
-                    symlink_target_bytes(root, &entry.path, target.as_deref(), &regular_files)
-                } else {
-                    Vec::new()
-                };
                 // Read the way the target would be read under the link's name.
                 let views = Views::new(&bytes, classify(&slash_path, &bytes).decode);
-                if jsonc && !bytes.is_empty() {
+                if jsonc {
                     let mut through = env.run_checks(
                         &jsonc_rules,
                         &entry.path,
@@ -553,33 +596,6 @@ impl Env<'_> {
     }
 }
 
-/// The content of the file a symlink points at, if that is a regular file
-/// inside the repository; empty otherwise. The target is resolved as text, so
-/// nothing outside the scanned directory is ever opened.
-fn symlink_target_bytes(
-    root: &Path,
-    link: &Path,
-    target: Option<&Path>,
-    regular_files: &HashSet<String>,
-) -> Vec<u8> {
-    symlink_target_file(link, target, regular_files)
-        .and_then(|resolved| fs::read(root.join(resolved)).ok())
-        .unwrap_or_default()
-}
-
-/// The path, relative to the root, of the regular file inside the repository
-/// that a symlink points at, if it points at one. Resolved as text only.
-fn symlink_target_file(
-    link: &Path,
-    target: Option<&Path>,
-    regular_files: &HashSet<String>,
-) -> Option<PathBuf> {
-    let resolved = target.and_then(|target| resolve_inside(link, target))?;
-    regular_files
-        .contains(&to_slash(&resolved))
-        .then_some(resolved)
-}
-
 /// The first `HEAD_LEN` bytes of a file, read without reading the rest, its
 /// native executable format (see `native_format`) and its size.
 type Head = (Vec<u8>, Option<&'static str>, Option<u64>);
@@ -696,23 +712,6 @@ fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<St
         }
     }
     Some(parts.join("/"))
-}
-
-/// Resolves `target` relative to the directory of `link`, purely lexically.
-/// Returns `None` for absolute targets and for targets that leave the root.
-fn resolve_inside(link: &Path, target: &Path) -> Option<PathBuf> {
-    let mut resolved: Vec<_> = link.parent()?.components().collect();
-    for component in target.components() {
-        match component {
-            Component::Normal(_) => resolved.push(component),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                resolved.pop()?;
-            }
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(resolved.into_iter().collect())
 }
 
 /// Runs the line-regex rules over lines fed one at a time, keeping at most
@@ -2060,25 +2059,6 @@ mod tests {
         unique.dedup();
         assert_eq!(on_link, unique);
         assert!(!on_link.is_empty());
-    }
-
-    #[test]
-    fn symlink_targets_are_resolved_without_touching_anything_outside() {
-        let link = Path::new("a/b/link.pth");
-        assert_eq!(
-            resolve_inside(link, Path::new("../c.txt")),
-            Some(PathBuf::from("a/c.txt"))
-        );
-        assert_eq!(
-            resolve_inside(link, Path::new("./d/e.txt")),
-            Some(PathBuf::from("a/b/d/e.txt"))
-        );
-        assert_eq!(resolve_inside(link, Path::new("../../../x")), None);
-        assert_eq!(resolve_inside(link, Path::new("/etc/passwd")), None);
-        assert_eq!(
-            resolve_inside(Path::new("top.pth"), Path::new("../x")),
-            None
-        );
     }
 
     #[test]

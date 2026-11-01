@@ -13,7 +13,8 @@
 //! symbolic link to a regular file inside the repository, with that file's
 //! content and `FileIssue::Symlink`, because the tool that opens the link
 //! follows it. A file or link target it cannot read whole is listed as too
-//! large instead, which makes the scan inconclusive.
+//! large instead, and a link whose target is not a regular file in the
+//! repository as unreadable; both make the scan inconclusive.
 
 mod pylines;
 pub mod python_pth;
