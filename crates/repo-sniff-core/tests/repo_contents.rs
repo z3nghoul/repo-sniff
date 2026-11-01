@@ -611,3 +611,61 @@ fn an_mz_file_whose_signature_is_missing_is_data_for_the_scanner_and_the_rules()
         report.skipped
     );
 }
+
+#[derive(serde::Deserialize)]
+struct Expected {
+    files_scanned: usize,
+    finding: Vec<ExpectedFinding>,
+}
+
+#[derive(serde::Deserialize)]
+struct ExpectedFinding {
+    file: String,
+    line: usize,
+    rule: String,
+    severity: Severity,
+    explanation_contains: Option<String>,
+}
+
+/// `repo-contents.expected.toml` is read by the fixture harness of #58 once
+/// both land; until then this keeps it from drifting from the rules.
+#[test]
+fn the_committed_fixtures_match_their_expectations_file() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text = fs::read_to_string(fixtures.join("repo-contents.expected.toml")).unwrap();
+    let expected: Expected = toml::from_str(&text).unwrap();
+
+    let report = scan(
+        &fixtures.join("repo-contents"),
+        &builtin_rules().unwrap(),
+        Limits::default(),
+    );
+
+    let found: BTreeSet<(String, usize, String, Severity)> = report
+        .findings
+        .iter()
+        .map(|f| {
+            let file = f.file.to_string_lossy().replace('\\', "/");
+            (file, f.line, f.rule_id.clone(), f.severity)
+        })
+        .collect();
+    let wanted: BTreeSet<_> = expected
+        .finding
+        .iter()
+        .map(|f| (f.file.clone(), f.line, f.rule.clone(), f.severity))
+        .collect();
+    assert_eq!(found, wanted);
+    assert_eq!(report.files_scanned, expected.files_scanned);
+    for want in &expected.finding {
+        if let Some(text) = &want.explanation_contains {
+            assert!(
+                report.findings.iter().any(|f| f.rule_id == want.rule
+                    && f.file.to_string_lossy().replace('\\', "/") == want.file
+                    && f.explanation.contains(text.as_str())),
+                "{} {}: no explanation contains {text:?}",
+                want.file,
+                want.rule
+            );
+        }
+    }
+}

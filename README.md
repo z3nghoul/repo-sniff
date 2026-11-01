@@ -145,7 +145,8 @@ with `Scan: INCONCLUSIVE` and says why, and the exit status is 3 even with
 `--fail-on none`. An executable binary is a HIGH finding (CRITICAL when its
 name hides it), so it fails the default threshold; with `--fail-on critical` or
 `--fail-on none` a plainly named executable is shown but no longer fails the
-scan. The `.git` folder at the root is listed as
+scan. A Java class file whose header checks out is MEDIUM (bytecode a runtime
+loads), so it no longer fails the default threshold either. The `.git` folder at the root is listed as
 `git metadata, not analyzed` and does not change the status. This makes
 `repo-sniff scan . --fail-on high` usable as a CI check without mistaking "nothing found in what was read" for "safe".
 
