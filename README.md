@@ -185,8 +185,9 @@ INCONCLUSIVE.
 
 27 of the 30 HIGH findings are vendored executables (true detections of
 benign files) and one is a real folder-open task in vscode (#43). cpython's 2
-are a known false positive (#42), and they alone cause its exit 1. `main`
-alone gives the same findings. Commits of the
+are a known false positive (#42), and they alone cause its exit 1. The
+previous run, with the scanner that is now on `main`, gave the same findings
+on the same heads (cpython has moved since). Commits of the
 scanned repositories, every HIGH and MEDIUM finding with a verdict, and how to
 re-run it are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
