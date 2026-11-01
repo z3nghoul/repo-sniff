@@ -125,6 +125,14 @@ fn fixture_repository() -> tempfile::TempDir {
     write(root, "positive/disguised/photo\u{202E}gpj.exe", &pe());
     write(root, "positive/disguised/fake.class", &fat_mach_o());
     write(root, "positive/disguised/invoice.pdf          .exe", &pe());
+    // COM resolves member names in any case.
+    write(
+        root,
+        "positive/wsh/case.js",
+        b"// SYNTHETIC TEST FIXTURE - not functional\n\
+          var fso = WScript.createobject(\"Scripting.FileSystemObject\");\n\
+          WScript.echo(\"hello\");\n",
+    );
     write(root, "positive/dropper/invoice.lnk", &lnk());
     write(root, "positive/dropper/screensaver.scr", &pe());
     write(
@@ -329,6 +337,7 @@ fn every_fixture_gets_exactly_its_expected_findings() {
         row("positive/scripts/old.jse", "windows-script", High),
         row("positive/wsh/run.js", "wsh-javascript", Medium),
         row("positive/wsh/fso.js", "wsh-javascript", Medium),
+        row("positive/wsh/case.js", "wsh-javascript", Medium),
     ]
     .into_iter()
     .collect();
