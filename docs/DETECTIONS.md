@@ -261,6 +261,29 @@ localization item is a requirement for milestone 6. None of them is a proof that
 the scanner is free of bugs or that a repository is safe: a clean result means
 "no rule matched in what was read", and the report says what was not read.
 
+### Exit status and binary files
+
+`repo-sniff scan` exits with 0 when nothing reached `--fail-on` and the scan was
+complete, 1 when a finding reached it, 2 when the scan could not run, and 3
+when nothing reached it but the scan was inconclusive. Findings win over an
+inconclusive scan. How binary files affect that:
+
+- An executable binary (ELF, PE with its `PE\0\0` signature, Mach-O, fat
+  Mach-O, found by magic bytes whatever the file is called) is a finding of
+  the repository contents family: HIGH, CRITICAL when its name hides it, so it
+  fails the default threshold. It is also listed as an executable whose code
+  was not analyzed. With `--fail-on critical` or `--fail-on none` a plainly
+  named executable is shown but does not fail the scan. One that no rule that
+  names executables reported would make the scan inconclusive.
+- A Java class file whose header checks out is MEDIUM (bytecode a runtime
+  loads), so it does not fail the default threshold.
+- Other binary files (images, archives, compressed test data) are read by the
+  line rules as ASCII only and listed as `binary format, ASCII rules only`;
+  they do not change the status.
+- The `.git` folder at the root is listed as `git metadata, not analyzed` and
+  does not change the status; a nested `.git` folder makes the scan
+  inconclusive.
+
 **False positives.** A `.repo-sniff.toml` file holds exclusions, each with a
 **mandatory justification** field. A benchmark on popular honest repositories
 (for example ripgrep) targets "0 critical on clean repos", with the results
