@@ -218,6 +218,7 @@ pub fn scan_with_links(
         .iter()
         .map(|path| to_slash(path).to_lowercase())
         .collect();
+    let link_key_lengths: HashSet<usize> = link_keys.iter().map(String::len).collect();
     let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
@@ -446,6 +447,7 @@ pub fn scan_with_links(
                             &exact_files,
                             &lowercase_exact,
                             &link_keys,
+                            &link_key_lengths,
                         ),
                         None => Ok(None),
                     };
@@ -764,6 +766,7 @@ fn link_target_to_read(
     exact_files: &HashMap<String, Option<PathBuf>>,
     lowercase_exact: &HashMap<String, Vec<String>>,
     link_keys: &HashSet<String>,
+    link_key_lengths: &HashSet<usize>,
 ) -> Result<Option<PathBuf>, &'static str> {
     let Some(target) = target.to_str() else {
         return Err("its target is not valid UTF-8");
@@ -774,7 +777,7 @@ fn link_target_to_read(
             continue;
         };
         if link_keys.contains(&path.to_lowercase())
-            || crosses_link(link, target, separators, link_keys)
+            || crosses_link(link, target, separators, link_keys, link_key_lengths)
         {
             return Err("a reading of its target goes through another symbolic link");
         }
@@ -808,20 +811,34 @@ fn crosses_link(
     target: &str,
     separators: &[char],
     link_keys: &HashSet<String>,
+    link_key_lengths: &HashSet<usize>,
 ) -> bool {
+    // The lowercase path so far and its length before each part, so a prefix
+    // costs one push and a `..` one truncate: linear in the target.
     let mut parts: Vec<&str> = link.split('/').collect();
     parts.pop();
+    let mut prefix = parts.join("/").to_lowercase();
+    let mut lengths: Vec<usize> = Vec::new();
     for part in target.split(separators) {
         match part {
             "" | "." => {}
-            ".." => {
-                if parts.pop().is_none() {
-                    return false;
-                }
-            }
+            ".." => match lengths.pop() {
+                Some(length) => prefix.truncate(length),
+                None => match prefix.rfind('/') {
+                    Some(at) => prefix.truncate(at),
+                    None if prefix.is_empty() => return false,
+                    None => prefix.clear(),
+                },
+            },
             _ => {
-                parts.push(part);
-                if link_keys.contains(&parts.join("/").to_lowercase()) {
+                lengths.push(prefix.len());
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(&part.to_lowercase());
+                // Hashing a prefix costs its length, so only a prefix as long
+                // as some link's path is looked up.
+                if link_key_lengths.contains(&prefix.len()) && link_keys.contains(prefix.as_str()) {
                     return true;
                 }
             }
@@ -1669,6 +1686,85 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `crosses_link` must agree with walking the target one part at a time
+    /// (the system resolves `..` inside a directory link), and must stay
+    /// linear: the target is long, and there can be a hundred thousand links.
+    #[test]
+    fn crosses_link_is_linear_and_follows_dot_dot_through_a_link() {
+        let keys: HashSet<String> = ["a/dl".to_string()].into();
+        let lengths: HashSet<usize> = keys.iter().map(String::len).collect();
+        let sep: &[char] = &['/'];
+        assert!(crosses_link(
+            "a/tasks.json",
+            "dl/../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(crosses_link(
+            "a/tasks.json",
+            "DL/x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(crosses_link(
+            "a/tasks.json",
+            "./dl//../x",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "dl2/../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "../b/x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "../../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "../../../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(crosses_link(
+            "x/tasks.json",
+            "../a/dl/y",
+            sep,
+            &keys,
+            &lengths
+        ));
+
+        let long = "a/".repeat(2047);
+        let started = std::time::Instant::now();
+        for _ in 0..2000 {
+            assert!(!crosses_link(
+                "w/x.code-workspace",
+                &long,
+                sep,
+                &keys,
+                &lengths
+            ));
+        }
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+    }
+
     use std::path::PathBuf;
 
     use globset::{GlobBuilder, GlobSetBuilder};
