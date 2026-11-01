@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -71,10 +71,11 @@ const SYMLINK_MODE: &str = "120000";
 #[derive(Debug)]
 pub struct Checkout {
     dir: TempDir,
-    /// Relative paths with `/`, as git lists them. The clone writes every
-    /// link as a plain file holding its target (`core.symlinks=false`), so
-    /// without this list the scan would read links as content.
-    pub symlinks: HashSet<String>,
+    /// Relative paths built from git's bytes, as git lists them. The clone
+    /// writes every link as a plain file holding its target
+    /// (`core.symlinks=false`), so without this list the scan would not know
+    /// they are links.
+    pub symlinks: HashSet<PathBuf>,
 }
 
 impl Checkout {
@@ -178,18 +179,33 @@ fn clone_unchecked(
 
 /// The paths of the symbolic links in `git ls-files --stage -z` output, whose
 /// entries are `<mode> <object> <stage>\t<path>` ended by NUL. Git paths are
-/// bytes; one that is not UTF-8 is kept with U+FFFD, which matches no file, so
-/// that link is read as a plain file, as before.
-fn symlinks_in_index_listing(listing: &[u8]) -> HashSet<String> {
+/// bytes and are kept exactly: on Unix as the same bytes, elsewhere only when
+/// they are UTF-8 (as Git for Windows writes them). A path that cannot be
+/// represented is left out, so that link is scanned as a plain file only.
+fn symlinks_in_index_listing(listing: &[u8]) -> HashSet<PathBuf> {
+    let prefix = format!("{SYMLINK_MODE} ");
     listing
         .split(|&b| b == 0)
         .filter_map(|entry| {
             let tab = entry.iter().position(|&b| b == b'\t')?;
             let (info, path) = (&entry[..tab], &entry[tab + 1..]);
-            info.starts_with(format!("{SYMLINK_MODE} ").as_bytes())
-                .then(|| String::from_utf8_lossy(path).into_owned())
+            if !info.starts_with(prefix.as_bytes()) || path.is_empty() {
+                return None;
+            }
+            path_from_git(path)
         })
         .collect()
+}
+
+#[cfg(unix)]
+fn path_from_git(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(not(unix))]
+fn path_from_git(bytes: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
 /// The error for a failed clone. Both the URL and git's text are cleaned:
@@ -796,7 +812,7 @@ mod tests {
         let checkout =
             clone_unchecked(&file_url(source.path()), None, "file", pass_through_all()).unwrap();
 
-        assert_eq!(checkout.symlinks, HashSet::from(["link".to_string()]));
+        assert_eq!(checkout.symlinks, HashSet::from([PathBuf::from("link")]));
     }
 
     /// A repository with the given regular files and symbolic links (written
@@ -877,12 +893,25 @@ mod tests {
         assert_eq!(
             found,
             [
+                // Its own file, as a system without symlinks reads it: not JSON.
+                (
+                    ".vscode/tasks.json".to_string(),
+                    "ide.vscode-folder-open-task".to_string()
+                ),
+                // The file it points at, as a system with symlinks reads it.
                 (
                     ".vscode/tasks.json".to_string(),
                     "ide.vscode-folder-open-task".to_string()
                 ),
                 ("escape".to_string(), "repo.symlink-outside".to_string()),
             ]
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.explanation.contains("runs automatically")
+                    && f.explanation.contains("symbolic link"))
         );
         let links = report
             .skipped
@@ -904,6 +933,43 @@ mod tests {
         );
     }
 
+    /// A link's blob can be any bytes. Git for Windows writes it as a plain
+    /// file by default, so a `.vscode/tasks.json` "link" whose blob is a tasks
+    /// file is a tasks file there, and must still be reported.
+    #[test]
+    fn a_link_whose_blob_is_content_is_still_scanned_as_content() {
+        let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+        let long = format!("{autorun}{}", " ".repeat(5000));
+        let source = repository_with_links(
+            &[("main.rs", "fn main() {}\n")],
+            &[
+                (".vscode/tasks.json", autorun),
+                ("b/.vscode/tasks.json", &long),
+            ],
+        );
+        let checkout =
+            clone_unchecked(&file_url(source.path()), None, "file", pass_through_all()).unwrap();
+        assert_eq!(checkout.symlinks.len(), 2);
+
+        let report = repo_sniff_core::scan_with_links(
+            checkout.path(),
+            &repo_sniff_core::builtin_rules().unwrap(),
+            repo_sniff_core::Limits::default(),
+            &checkout.symlinks,
+        );
+
+        let autoruns: Vec<String> = report
+            .findings
+            .iter()
+            .filter(|f| {
+                f.rule_id == "ide.vscode-folder-open-task"
+                    && f.explanation.contains("runs automatically")
+            })
+            .map(|f| f.file.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(autoruns, [".vscode/tasks.json", "b/.vscode/tasks.json"]);
+    }
+
     #[test]
     fn symlinks_are_picked_from_an_index_listing_by_mode() {
         let listing = b"100644 0123 0\tfile.txt\0\
@@ -912,9 +978,15 @@ mod tests {
                         160000 cdef 0\tvendor/sub\0\
                         120000 0123 0\tname with\ttab and spaces\0\
                         garbage\0\0";
-        let mut links: Vec<String> = symlinks_in_index_listing(listing).into_iter().collect();
+        let mut links: Vec<PathBuf> = symlinks_in_index_listing(listing).into_iter().collect();
         links.sort();
-        assert_eq!(links, ["dir/link", "name with\ttab and spaces"]);
+        assert_eq!(
+            links,
+            [
+                PathBuf::from("dir/link"),
+                PathBuf::from("name with\ttab and spaces")
+            ]
+        );
         assert!(symlinks_in_index_listing(b"").is_empty());
     }
 
