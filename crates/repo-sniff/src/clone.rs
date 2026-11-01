@@ -165,7 +165,7 @@ fn git_environment(
         .filter_map(|&name| source(name).map(|value| (name.into(), value)))
         .collect();
 
-    let fixed: [(&str, OsString); 8] = [
+    let fixed: [(&str, OsString); 9] = [
         ("HOME", home.into()),
         ("USERPROFILE", home.into()),
         // Skip the system-wide configuration file.
@@ -177,6 +177,10 @@ fn git_environment(
         ("GIT_TERMINAL_PROMPT", "0".into()),
         ("GCM_INTERACTIVE", "never".into()),
         ("GIT_LFS_SKIP_SMUDGE", "1".into()),
+        // Skip `$(prefix)/etc/gitattributes`, which `GIT_CONFIG_NOSYSTEM` does
+        // not cover and which the user can write on Homebrew and on per-user
+        // Git for Windows installs.
+        ("GIT_ATTR_NOSYSTEM", "1".into()),
     ];
     vars.extend(fixed.into_iter().map(|(name, value)| (name.into(), value)));
     vars
@@ -582,6 +586,7 @@ mod tests {
         assert_eq!(env["GIT_ALLOW_PROTOCOL"], "https");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
         assert_eq!(env["GCM_INTERACTIVE"], "never");
+        assert_eq!(env["GIT_ATTR_NOSYSTEM"], "1");
     }
 
     #[test]
@@ -823,16 +828,24 @@ mod tests {
         };
 
         // Control: with the user's home, git reads the filter from it.
-        let mut leaky = git_environment(&source, Path::new("/unused"), home.path(), "file");
-        leaky.retain(|(name, _)| name != "GIT_CONFIG_NOSYSTEM");
+        let leaky = git_environment(&source, Path::new("/unused"), home.path(), "file");
         assert!(
             global_config(leaky).contains("filter.evil.smudge"),
             "setup is broken: git should read the home directory's .gitconfig"
         );
 
+        // A marker in the sandbox home shows that git did read a .gitconfig,
+        // only not the user's: the assertion cannot pass because git failed.
         let sandbox = tempfile::tempdir().unwrap();
+        fs::write(
+            sandbox.path().join(".gitconfig"),
+            "[marker]\n\tseen = yes\n",
+        )
+        .unwrap();
         let env = git_environment(&source, Path::new("/unused"), sandbox.path(), "file");
-        assert!(!global_config(env).contains("filter.evil"));
+        let listed = global_config(env);
+        assert!(listed.contains("marker.seen=yes"), "{listed}");
+        assert!(!listed.contains("filter.evil"), "{listed}");
     }
 
     /// `~/.config/git/attributes` is read by every git version whatever
