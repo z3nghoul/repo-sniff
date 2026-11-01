@@ -794,13 +794,31 @@ fn scan_streamed(
     }
 
     let script = is_script(slash_path, &head);
-    if has_utf16_bom(&head) && has_script_extension(slash_path) {
-        // Decoding UTF-16 needs the whole file; nothing can be said about it.
-        out.skipped.push(too_large);
-        return out;
-    }
     if whole_file_rule {
         out.skipped.push(too_large);
+    }
+    if has_utf16_bom(&head) && has_script_extension(slash_path) {
+        // Decoded as it is read, as for a file read whole (`Decode::Utf16Bom`).
+        // Not a script for the NUL rule, and the text is never the file byte
+        // for byte, so no spans; columns are exact.
+        let mut lines = LineScanner::new(&applicable);
+        if !lines.is_empty() {
+            let mut decoder = Utf16Lines::new(limits.max_line_size);
+            let fed = stream_utf16(&path, &mut decoder, |number, text| {
+                lines.feed(relative, number, text, None, true);
+            });
+            match fed {
+                Ok(None) => {}
+                Ok(Some(line)) => out.skipped.push(Skipped {
+                    path: relative.to_path_buf(),
+                    reason: SkipReason::LineTooLong { line },
+                }),
+                Err(err) => out.skipped.push(unreadable(err)),
+            }
+        }
+        out.findings.append(&mut lines.finish(relative, unlisted));
+        out.scanned = true;
+        return out;
     }
 
     // First pass: how much of the file is NUL, and is the rest text.
@@ -917,6 +935,134 @@ fn scan_streamed(
     out.findings.append(&mut found);
     out.scanned = true;
     out
+}
+
+/// Reads a UTF-16 file with a byte order mark through `decoder`, handing each
+/// line to `feed` as it is completed. Returns the line that was too long, if
+/// one stopped the reading.
+fn stream_utf16(
+    path: &Path,
+    decoder: &mut Utf16Lines,
+    mut feed: impl FnMut(usize, &str),
+) -> io::Result<Option<usize>> {
+    let mut file = File::open(path)?;
+    let mut bom = [0; 2];
+    file.read_exact(&mut bom)?;
+    let little_endian = bom == [0xFF, 0xFE];
+    let mut chunk = vec![0; 64 * 1024];
+    let mut odd: Option<u8> = None;
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let mut bytes = &chunk[..read];
+        if let Some(first) = odd.take() {
+            let pair = [first, bytes[0]];
+            bytes = &bytes[1..];
+            if let Some(line) = decoder.unit(utf16_unit(pair, little_endian), &mut feed) {
+                return Ok(Some(line));
+            }
+        }
+        let (pairs, rest) = bytes.as_chunks::<2>();
+        for &pair in pairs {
+            if let Some(line) = decoder.unit(utf16_unit(pair, little_endian), &mut feed) {
+                return Ok(Some(line));
+            }
+        }
+        odd = rest.first().copied();
+    }
+    // A trailing odd byte is one unit of U+FFFD, as in `decode_utf16_bom`.
+    if odd.is_some()
+        && let Some(line) = decoder.unit(0xFFFD, &mut feed)
+    {
+        return Ok(Some(line));
+    }
+    Ok(decoder.finish(&mut feed))
+}
+
+fn utf16_unit(pair: [u8; 2], little_endian: bool) -> u16 {
+    if little_endian {
+        u16::from_le_bytes(pair)
+    } else {
+        u16::from_be_bytes(pair)
+    }
+}
+
+/// Turns UTF-16 code units into the lines `str::lines` would give for
+/// `decode_utf16_bom` of the whole file: unpaired surrogates become U+FFFD,
+/// lines end at `\n` with one `\r` before it removed, and a last line without
+/// an ending still counts. A line is kept in memory up to `max_line` bytes.
+struct Utf16Lines {
+    line: String,
+    number: usize,
+    high: Option<u16>,
+    max_line: usize,
+}
+
+impl Utf16Lines {
+    fn new(max_line: usize) -> Self {
+        Utf16Lines {
+            line: String::new(),
+            number: 0,
+            high: None,
+            max_line,
+        }
+    }
+
+    /// Takes one code unit. Returns the number of a line that grew past the
+    /// limit, after which nothing more should be fed.
+    fn unit(&mut self, unit: u16, feed: &mut impl FnMut(usize, &str)) -> Option<usize> {
+        if let Some(high) = self.high.take() {
+            if (0xDC00..0xE000).contains(&unit) {
+                let code =
+                    0x10000 + ((u32::from(high) - 0xD800) << 10) + (u32::from(unit) - 0xDC00);
+                return self.char(
+                    char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER),
+                    feed,
+                );
+            }
+            if let Some(line) = self.char(char::REPLACEMENT_CHARACTER, feed) {
+                return Some(line);
+            }
+        }
+        if (0xD800..0xDC00).contains(&unit) {
+            self.high = Some(unit);
+            return None;
+        }
+        let c = char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER);
+        self.char(c, feed)
+    }
+
+    fn char(&mut self, c: char, feed: &mut impl FnMut(usize, &str)) -> Option<usize> {
+        if c == '\n' {
+            if self.line.ends_with('\r') {
+                self.line.pop();
+            }
+            self.number += 1;
+            feed(self.number, &self.line);
+            self.line.clear();
+            return None;
+        }
+        self.line.push(c);
+        (self.line.len() > self.max_line).then_some(self.number + 1)
+    }
+
+    /// Ends the text: a pending high surrogate is U+FFFD, and a last line
+    /// without `\n` is fed as it is.
+    fn finish(&mut self, feed: &mut impl FnMut(usize, &str)) -> Option<usize> {
+        if self.high.take().is_some()
+            && let Some(line) = self.char(char::REPLACEMENT_CHARACTER, feed)
+        {
+            return Some(line);
+        }
+        if !self.line.is_empty() {
+            self.number += 1;
+            feed(self.number, &self.line);
+            self.line.clear();
+        }
+        None
+    }
 }
 
 /// Runs line, JSONC and other text rules over one file's text. `relative` is
@@ -1190,17 +1336,15 @@ fn classify(slash_path: &str, bytes: &[u8]) -> Class {
             decode: Decode::AsciiOnly,
         };
     }
-    if looks_binary(bytes) {
+    if has_utf16_bom(bytes) && has_script_extension(slash_path) {
+        // Windows PowerShell and WSH read a script with a UTF-16 byte order
+        // mark as UTF-16, whatever its first bytes hold: text made only of
+        // characters such as U+0101 has no NUL byte at all.
+        utf16 = true;
+    } else if looks_binary(bytes) && !script && known_binary_magic(bytes) {
         // A script with a NUL byte is still a script, and the NUL is reported
         // by its own rule (`nul_line`).
-        if !script {
-            if has_utf16_bom(bytes) && has_script_extension(slash_path) {
-                // Windows PowerShell and WSH read UTF-16 scripts.
-                utf16 = true;
-            } else if known_binary_magic(bytes) {
-                binary_looking = true;
-            }
-        }
+        binary_looking = true;
     }
     // Any other file with a NUL byte that does not read as text, and any file
     // with a known binary header, may still be sourced by a shell: `dash` drops
@@ -2761,23 +2905,127 @@ mod tests {
         assert!(!report.is_complete());
     }
 
+    /// UTF-16 with a byte order mark, as Windows PowerShell writes it.
+    fn utf16(text: &str, little_endian: bool) -> Vec<u8> {
+        let mut bytes = if little_endian {
+            vec![0xFF, 0xFE]
+        } else {
+            vec![0xFE, 0xFF]
+        };
+        for unit in text.encode_utf16() {
+            bytes.extend(if little_endian {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        bytes
+    }
+
+    /// #64: text made only of characters whose two UTF-16 bytes are both
+    /// non-zero has no NUL byte, and such a script was read as lossy UTF-8.
     #[test]
-    fn a_streamed_utf16_script_cannot_be_decoded_and_is_listed_as_too_large() {
+    fn a_utf16_script_without_a_nul_byte_up_front_is_still_decoded() {
+        let padding = "\u{101}".repeat(5000) + "\n";
+        // 0x01 0x01 is U+0101 either way, and U+202E is 0x2E 0x20: one line,
+        // no NUL byte anywhere in the file.
+        let no_nul_at_all = utf16(&format!("{}\u{202E}\u{101}", "\u{101}".repeat(5000)), true);
+        assert!(!no_nul_at_all.contains(&0));
+        let late_nul = utf16(&format!("{padding}# \u{202E}evil\n"), true);
+        assert!(!looks_binary(&late_nul) && late_nul.contains(&0));
+        let big_endian = utf16(&format!("{padding}' \u{202E}evil\n"), false);
         let dir = tempfile::tempdir().unwrap();
-        let mut bytes = vec![0xFF, 0xFE];
-        bytes.extend("# evil\n".encode_utf16().flat_map(u16::to_le_bytes));
-        write(dir.path(), "big.ps1", &bytes);
+        write(dir.path(), "no-nul.ps1", &no_nul_at_all);
+        write(dir.path(), "late-nul.psm1", &late_nul);
+        write(dir.path(), "big-endian.vbs", &big_endian);
+        // Not a script extension: still read as before, without decoding.
+        write(dir.path(), "notes.txt", &no_nul_at_all);
         let rules = builtin_rules().unwrap();
 
-        let report = scan(dir.path(), &rules, streaming());
+        for limits in [Limits::default(), streaming()] {
+            let report = scan(dir.path(), &rules, limits);
 
-        assert!(matches!(
-            report.skipped[..],
+            let bidi: Vec<_> = report
+                .findings
+                .iter()
+                .filter(|f| f.rule_id == "deception.bidi-control")
+                .map(|f| (to_slash(&f.file), f.line, f.column))
+                .collect();
+            assert_eq!(
+                bidi,
+                [
+                    ("big-endian.vbs".to_string(), 2, Some(3)),
+                    ("late-nul.psm1".to_string(), 2, Some(3)),
+                    ("no-nul.ps1".to_string(), 1, Some(5001)),
+                ],
+                "{limits:?}"
+            );
+            assert!(report.is_complete(), "{limits:?}: {:?}", report.skipped);
+        }
+    }
+
+    #[test]
+    fn a_streamed_utf16_script_gets_the_same_result_as_one_read_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut odd = utf16("# a\r\n# \u{202E}x\r\nTODO", true);
+        odd.push(0x41);
+        let mut lone_high = utf16("# \u{202E}\n", true);
+        lone_high.extend([0x00, 0xD8, 0x41, 0x00]);
+        let mut trailing_high = utf16("TODO\r", false);
+        trailing_high.extend([0xD8, 0x00]);
+        let files: [(&str, Vec<u8>); 6] = [
+            (
+                "crlf.ps1",
+                utf16("# one\r\n\r\n# \u{202E}two\r\nTODO\r\n", true),
+            ),
+            ("be.vbs", utf16("' \u{1F600} \u{202E}\nTODO\n\n", false)),
+            ("odd.ps1", odd),
+            ("lone-high.ps1", lone_high),
+            ("trailing-high.bat", trailing_high),
+            ("empty.ps1", vec![0xFF, 0xFE]),
+        ];
+        for (name, contents) in &files {
+            write(dir.path(), name, contents);
+        }
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(RULES, "test.toml").unwrap());
+
+        let whole = scan(dir.path(), &rules, Limits::default());
+        let streamed = scan(dir.path(), &rules, streaming());
+
+        assert!(whole.findings.len() >= 6, "{:?}", whole.findings);
+        assert_eq!(whole.findings, streamed.findings);
+        assert_eq!(whole.skipped, streamed.skipped);
+        assert_eq!(whole.files_scanned, streamed.files_scanned);
+    }
+
+    #[test]
+    fn a_streamed_utf16_line_over_the_limit_makes_the_scan_inconclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "long.ps1",
+            &utf16(
+                &format!("# ok\n{}\n# \u{202E}\n", "\u{101}".repeat(40)),
+                true,
+            ),
+        );
+        let limits = Limits {
+            max_buffered_size: 1,
+            max_line_size: 64,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &builtin_rules().unwrap(), limits);
+
+        assert_eq!(
+            report.skipped,
             [Skipped {
-                reason: SkipReason::TooLarge { .. },
-                ..
+                path: PathBuf::from("long.ps1"),
+                reason: SkipReason::LineTooLong { line: 2 },
             }]
-        ));
+        );
+        assert!(!report.is_complete());
     }
 
     #[test]
