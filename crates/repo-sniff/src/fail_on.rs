@@ -50,6 +50,9 @@ mod tests {
                     attack: vec![],
                     file: PathBuf::from("a.txt"),
                     line: 1,
+                    column: None,
+                    span: None,
+                    snippet: None,
                     explanation: String::new(),
                 })
                 .collect(),

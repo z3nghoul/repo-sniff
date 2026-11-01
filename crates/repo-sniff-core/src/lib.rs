@@ -12,9 +12,9 @@ pub mod sanitize;
 pub mod scan;
 pub mod walk;
 
-pub use checks::{FileCheck, FileCtx, FileIssue, Hit, JsoncCheck, RepoIndex};
+pub use checks::{Check, Ctx, FileIssue, Hit, RepoIndex, TextSpan};
 pub use finding::{Finding, Severity, Stage, UnknownSeverity};
 pub use rule::{Engine, Matcher, Rule, RuleError, builtin_rules, parse_rules};
-pub use sanitize::{display_path, display_safe};
+pub use sanitize::{display_path, display_safe, snippet_safe};
 pub use scan::{Report, Unlisted, scan};
 pub use walk::{Limits, SkipReason, Skipped, WalkResult, walk};
