@@ -14,6 +14,7 @@
 mod pylines;
 pub mod python_pth;
 pub mod python_start;
+pub mod repo_contents;
 pub mod vscode_autorun;
 
 use std::borrow::Cow;
@@ -71,6 +72,10 @@ pub(crate) enum Decode {
 pub(crate) struct Views<'a> {
     bytes: &'a [u8],
     decode: Decode,
+    /// The native executable format the scanner found, if any.
+    executable: Option<&'static str>,
+    /// The size of the whole file, when `bytes` is only its head.
+    size: Option<u64>,
     text: OnceCell<Cow<'a, str>>,
     jsonc: OnceCell<Result<Node, ParseError>>,
     /// The last `line_of` answer, `(offset, line)`, to count on from.
@@ -82,6 +87,8 @@ impl<'a> Views<'a> {
         Views {
             bytes,
             decode,
+            executable: None,
+            size: None,
             text: OnceCell::new(),
             jsonc: OnceCell::new(),
             line_cursor: Cell::new((0, 1)),
@@ -90,6 +97,18 @@ impl<'a> Views<'a> {
 
     pub(crate) fn bytes(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Records the native executable format the scanner found for the file.
+    pub(crate) fn with_executable(mut self, executable: Option<&'static str>) -> Self {
+        self.executable = executable;
+        self
+    }
+
+    /// Records the size of the whole file.
+    pub(crate) fn with_size(mut self, size: Option<u64>) -> Self {
+        self.size = size;
+        self
     }
 
     /// The file as the line rules read it.
@@ -194,6 +213,22 @@ impl<'a> Ctx<'a> {
         self.views.text()
     }
 
+    /// The native executable format the scanner found for the file (`ELF`,
+    /// `PE`, `Mach-O`, ...), or `None`. A check that asks this and the
+    /// scanner's own "executable" listing always agree. It is found from the
+    /// first bytes, and for a PE from the `PE\0\0` signature where `e_lfanew`
+    /// points, read from the file even past the bytes a head check sees. Set
+    /// for head checks; `None` for other engines.
+    pub fn executable(&self) -> Option<&'static str> {
+        self.views.executable
+    }
+
+    /// The size of the whole file in bytes, for a head check, whose `bytes`
+    /// are only the first ones; `None` when unknown and for other engines.
+    pub fn file_size(&self) -> Option<u64> {
+        self.views.size
+    }
+
     /// The 1-based line of a byte offset in `text` (see `Views::line_of`).
     /// Use it instead of counting lines from the start for every hit, which is
     /// quadratic on a file with many hits.
@@ -266,11 +301,21 @@ impl RepoIndex {
 pub enum FileIssue {
     /// Larger than the scan's file size limit; `bytes` is empty.
     TooLarge { size: u64 },
-    /// A symbolic link. `target` is where it points (as text). `bytes` holds
-    /// the target's content when that is a regular file inside the repository,
-    /// and is empty otherwise.
-    Symlink { target: Option<String> },
+    /// A symbolic link. `target` is where it points (as text). `resolved` is
+    /// the repository path it points at when, resolved as text from the link's
+    /// folder, it stays inside the repository; `None` when the target is
+    /// absolute, leaves the repository or could not be read. `bytes` holds the
+    /// target's content when that is a regular file inside the repository, and
+    /// is empty otherwise.
+    Symlink {
+        target: Option<String>,
+        resolved: Option<String>,
+    },
 }
+
+/// How many leading bytes an `engine = "head"` check is given: the same
+/// window the scanner reads to tell text from binary data.
+pub const HEAD_LEN: usize = 8 * 1024;
 
 /// Every file check, keyed by the id of the rule it implements.
 const FILE_CHECKS: &[(&str, Check)] = &[
@@ -281,6 +326,26 @@ const FILE_CHECKS: &[(&str, Check)] = &[
 /// Finds the file check registered for a rule id.
 pub fn file_check(rule_id: &str) -> Option<Check> {
     FILE_CHECKS
+        .iter()
+        .find(|(id, _)| *id == rule_id)
+        .map(|(_, check)| *check)
+}
+
+/// Every head check, keyed by the id of the rule it implements.
+const HEAD_CHECKS: &[(&str, Check)] = &[
+    ("repo.committed-binary", repo_contents::committed_binary),
+    (
+        "repo.disguised-executable",
+        repo_contents::disguised_executable,
+    ),
+    ("repo.symlink-outside", repo_contents::symlink_outside),
+    ("repo.windows-dropper", repo_contents::windows_dropper),
+    ("repo.windows-script", repo_contents::windows_script),
+];
+
+/// Finds the head check registered for a rule id.
+pub fn head_check(rule_id: &str) -> Option<Check> {
+    HEAD_CHECKS
         .iter()
         .find(|(id, _)| *id == rule_id)
         .map(|(_, check)| *check)
@@ -321,6 +386,21 @@ mod tests {
             assert!(
                 matches!(rule.matcher, Matcher::Jsonc(_)),
                 "rule `{id}` must use engine = \"jsonc\""
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_head_check_has_a_builtin_rule() {
+        let rules = builtin_rules().unwrap();
+        for (id, _) in HEAD_CHECKS {
+            let rule = rules
+                .iter()
+                .find(|rule| rule.id == *id)
+                .unwrap_or_else(|| panic!("check `{id}` has no rule in rules/*.toml"));
+            assert!(
+                matches!(rule.matcher, Matcher::Head(_)),
+                "rule `{id}` must use engine = \"head\""
             );
         }
     }

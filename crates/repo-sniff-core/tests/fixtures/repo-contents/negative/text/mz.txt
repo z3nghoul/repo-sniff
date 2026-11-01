@@ -1,0 +1,2 @@
+MZ SYNTHETIC TEST FIXTURE — not functional: text that starts like a PE header
+MZ is a postal code prefix here, not a program header.
