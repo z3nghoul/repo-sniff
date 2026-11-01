@@ -140,6 +140,7 @@ fn issue_hit(issue: &FileIssue, inert: bool) -> Hit {
     };
     Hit {
         line: 1,
+        span: None,
         severity,
         reason,
     }
@@ -166,6 +167,7 @@ fn analyse(ctx: &Ctx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
     if lossy && inert.is_none() {
         hits.push(Hit {
             line: 1,
+            span: None,
             severity: Severity::Medium,
             reason: "this .pth file is not valid UTF-8; honest ones are plain ASCII, and Python \
                      may decode it with the system's locale encoding"
@@ -214,6 +216,7 @@ fn analyse(ctx: &Ctx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
         for exec in &execs {
             hits.push(Hit {
                 line: exec.number,
+                span: None,
                 severity: Severity::Low,
                 reason: format!(
                     "Python's site module ignores this file because {why}, but this line starts \
@@ -230,6 +233,7 @@ fn analyse(ctx: &Ctx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
     if exec_total == 0 {
         hits.push(Hit {
             line: first,
+            span: None,
             severity: Severity::Info,
             reason: "only adds paths to sys.path; it has no executable line".to_string(),
         });
@@ -247,6 +251,7 @@ fn analyse(ctx: &Ctx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
     if exec_total > execs.len() {
         hits.push(Hit {
             line: execs.last().map_or(1, |exec| exec.number),
+            span: None,
             severity: ctx.base,
             reason: format!(
                 "{} more executable lines in this file are not listed",
@@ -261,6 +266,7 @@ fn ordinary_hit(base: Severity, exec: &ExecLine) -> Hit {
     match &exec.critical {
         Some(why) => Hit {
             line: exec.number,
+            span: None,
             severity: Severity::Critical,
             reason: format!(
                 "this line starts with `import`, so Python runs it every time it starts, and it {why}"
@@ -268,6 +274,7 @@ fn ordinary_hit(base: Severity, exec: &ExecLine) -> Hit {
         },
         None => Hit {
             line: exec.number,
+            span: None,
             severity: base,
             reason: "this line starts with `import`, so Python runs it every time it starts"
                 .to_string(),
@@ -301,6 +308,7 @@ fn honest_hit(ctx: &Ctx<'_>, exec: &ExecLine) -> Hit {
     };
     Hit {
         line: exec.number,
+        span: None,
         severity,
         reason: format!(
             "this is a line that a known tool writes into .pth files (setuptools, virtualenv, an \

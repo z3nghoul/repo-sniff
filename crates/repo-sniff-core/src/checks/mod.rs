@@ -19,6 +19,7 @@ pub mod vscode_autorun;
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell};
 use std::collections::{BTreeSet, HashSet};
+use std::ops::Range;
 
 use crate::finding::Severity;
 use crate::jsonc::{self, Node, ParseError};
@@ -32,7 +33,19 @@ pub struct Hit {
     /// What is wrong, shown to the user. May contain text from the scanned
     /// file; the scanner cleans it with `display_safe` before reporting.
     pub reason: String,
+    /// Where in `Ctx::text` the hit is, if the check knows. The scanner turns
+    /// it into the finding's column and snippet, and into a byte range of the
+    /// file when the text is the file byte for byte. A span that is out of
+    /// bounds, splits a character or is not on `line` is ignored. A check that
+    /// works on `Ctx::bytes` leaves it `None`.
+    pub span: Option<TextSpan>,
 }
+
+/// A byte range in `Ctx::text`, which is not always the file's bytes (UTF-16
+/// is decoded, NUL bytes are dropped, invalid UTF-8 is replaced). The type
+/// keeps it apart from a range of the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSpan(pub Range<usize>);
 
 /// Every check has this signature, whatever the format it reads: it asks the
 /// context for the view it needs (`bytes`, `text`, `jsonc`) and reports hits.
@@ -102,6 +115,27 @@ impl<'a> Views<'a> {
         };
         self.line_cursor.set((offset, line));
         line
+    }
+
+    /// Whether `text` is the file byte for byte, so an offset in one is the
+    /// same offset in the other. False until `text` has been computed, and
+    /// for decoded UTF-16, dropped NUL bytes, replaced invalid UTF-8 and the
+    /// ASCII-only view.
+    pub(crate) fn text_is_bytes(&self) -> bool {
+        matches!(
+            self.text.get(),
+            Some(Cow::Borrowed(text))
+                if text.as_ptr() == self.bytes.as_ptr() && text.len() == self.bytes.len()
+        )
+    }
+
+    /// Whether a count of characters in `text` is a column an editor would
+    /// show: the text is the file itself, or the file decoded from UTF-16.
+    /// Dropped NUL bytes, replaced invalid UTF-8 and the ASCII-only view shift
+    /// or split characters, so they give no column. Like `text_is_bytes`, it
+    /// is meant to be asked once `text` has been computed.
+    pub(crate) fn columns_are_exact(&self) -> bool {
+        self.text_is_bytes() || self.decode == Decode::Utf16Bom
     }
 
     /// `text` parsed as JSONC.
