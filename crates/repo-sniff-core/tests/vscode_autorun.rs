@@ -1,9 +1,10 @@
 //! The `ide.vscode-folder-open-task` rule against its fixtures.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use repo_sniff_core::{Finding, Limits, Severity, Stage, builtin_rules, scan};
+use repo_sniff_core::{Finding, Limits, Report, Severity, SkipReason, Stage, builtin_rules, scan};
 
 const RULE_ID: &str = "ide.vscode-folder-open-task";
 
@@ -108,4 +109,54 @@ fn findings_carry_rule_metadata_and_a_specific_explanation() {
         "{}",
         broken.explanation
     );
+}
+
+/// Scans a repository whose only file is `.vscode/tasks.json`.
+fn scan_tasks(contents: &[u8], limits: Limits) -> Report {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".vscode").join("tasks.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, contents).unwrap();
+    scan(dir.path(), &builtin_rules().unwrap(), limits)
+}
+
+#[test]
+fn a_tasks_file_the_jsonc_rule_cannot_read_whole_is_listed_not_judged() {
+    // Pins today's behaviour: the jsonc rule only sees files read whole, and
+    // the file is listed instead, so the scan is never reported as clean.
+    let autorun = br#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let size = autorun.len() as u64;
+    let reasons = |report: &Report| -> Vec<SkipReason> {
+        report.skipped.iter().map(|s| s.reason.clone()).collect()
+    };
+
+    // Over the hard limit: not read at all.
+    let tiny = Limits {
+        max_file_size: 10,
+        ..Limits::default()
+    };
+    let report = scan_tasks(autorun, tiny);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.files_scanned, 0);
+    assert_eq!(reasons(&report), [SkipReason::TooLarge { size }]);
+
+    // Over the in-memory limit: the line rules read it as a stream, and it is
+    // listed as too large for the jsonc rule.
+    let streamed = Limits {
+        max_buffered_size: 10,
+        ..Limits::default()
+    };
+    let report = scan_tasks(autorun, streamed);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.files_scanned, 1);
+    assert_eq!(reasons(&report), [SkipReason::TooLarge { size }]);
+    assert!(!report.is_complete());
+
+    // An executable under that name: listed as one, never parsed or counted.
+    let mut elf = b"\x7fELF\x02\x01\x01\0".to_vec();
+    elf.extend_from_slice(autorun);
+    let report = scan_tasks(&elf, Limits::default());
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.files_scanned, 0);
+    assert_eq!(reasons(&report), [SkipReason::Executable { format: "ELF" }]);
 }
