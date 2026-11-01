@@ -452,3 +452,29 @@ fn a_link_target_that_names_no_single_file_for_certain_is_not_guessed() {
         assert!(!report.is_complete());
     }
 }
+
+/// APFS treats the NFC and NFD spellings of a name as one file. The Unix
+/// reading of `..\café.json` (NFC) from `.vscode` is the link
+/// `.vscode/..\café.json` (named in NFD), which points at the payload, while
+/// the Windows reading is the harmless `café.json`. Link names are only
+/// lowercased when compared, so the link is missed and the harmless file is
+/// judged. This is also the case on main, where a linked `tasks.json` is not
+/// judged at all; expected to pass once names are compared normalized.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "issue #84"]
+fn nfc_and_nfd_spellings_of_a_link_name_do_not_hide_the_unix_reading() {
+    use std::os::unix::fs::symlink;
+
+    let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let honest = r#"{"tasks": [{"label": "build", "command": "make"}]}"#;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join("payload.json"), autorun).unwrap();
+    fs::write(root.join("caf\u{e9}.json"), honest).unwrap();
+    symlink("../payload.json", root.join(".vscode/..\\cafe\u{301}.json")).unwrap();
+    symlink("..\\caf\u{e9}.json", root.join(".vscode/tasks.json")).unwrap();
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+    assert!(!report.is_complete(), "{:?}", report.skipped);
+}
