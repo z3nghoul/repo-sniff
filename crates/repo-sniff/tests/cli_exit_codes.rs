@@ -248,6 +248,20 @@ fn clean_dir_with_executable(header: &[u8]) -> tempfile::TempDir {
     dir
 }
 
+/// Source next to a vendored repository with its own `.git` folder, which the
+/// scan does not read, so the scan is inconclusive.
+fn clean_dir_with_nested_git() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir_all(dir.path().join("vendor/lib/.git")).unwrap();
+    fs::write(
+        dir.path().join("vendor/lib/.git/HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
+    dir
+}
+
 #[test]
 fn compressed_test_files_are_listed_but_do_not_change_the_exit_status() {
     let dir = clean_dir_with_compressed_test_files();
@@ -274,26 +288,30 @@ fn compressed_test_files_are_listed_but_do_not_change_the_exit_status() {
 }
 
 #[test]
-fn an_elf_file_makes_the_scan_inconclusive() {
+fn an_elf_file_is_a_finding_and_still_listed() {
     let dir = clean_dir_with_executable(b"\x7fELF\x02\x01\x01\0");
 
     let output = run(dir.path(), &["scan", "."]);
 
-    assert_eq!(code(&output), 3);
+    assert_eq!(code(&output), 1);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("tool  executable binary (ELF), not analyzed"),
+        stdout.contains("HIGH      tool:1  repo.committed-binary"),
         "{stdout}"
     );
-    assert!(stdout.contains("Scan: INCONCLUSIVE"), "{stdout}");
     assert!(
-        stdout.contains("1 executable binaries were not analyzed"),
+        stdout.contains("tool  executable binary (ELF), reported above, its code not analyzed"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("1 executable binaries are reported as findings"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("INCONCLUSIVE"), "{stdout}");
 }
 
 #[test]
-fn every_executable_format_makes_the_scan_inconclusive() {
+fn every_executable_format_is_a_high_finding_instead_of_an_inconclusive_scan() {
     for (name, header) in [
         ("PE", &b"MZ\x90\0\x03\0\0\0"[..]),
         ("Mach-O 32-bit", &[0xFE, 0xED, 0xFA, 0xCE][..]),
@@ -302,9 +320,11 @@ fn every_executable_format_makes_the_scan_inconclusive() {
     ] {
         let dir = clean_dir_with_executable(header);
 
-        let output = run(dir.path(), &["scan", "."]);
-
-        assert_eq!(code(&output), 3, "{name}");
+        // HIGH: a non-pass at the default threshold, as the inconclusive scan
+        // was. Above it, the finding is shown but no longer fails the scan.
+        assert_eq!(code(&run(dir.path(), &["scan", "."])), 1, "{name}");
+        let above = ["scan", ".", "--fail-on", "critical"];
+        assert_eq!(code(&run(dir.path(), &above)), 0, "{name}");
     }
 }
 
@@ -343,14 +363,14 @@ fn a_file_over_5_mib_is_read_as_a_stream_and_the_scan_stays_complete() {
 #[test]
 fn findings_at_the_threshold_win_over_an_inconclusive_scan() {
     let dir = high_only_dir();
-    fs::write(dir.path().join("tool"), b"\x7fELF\0\0\0\0").unwrap();
+    fs::create_dir_all(dir.path().join("vendor/lib/.git")).unwrap();
 
     assert_eq!(code(&run(dir.path(), &["scan", "."])), 1);
 }
 
 #[test]
 fn fail_on_none_does_not_turn_an_inconclusive_scan_into_a_pass() {
-    let dir = clean_dir_with_executable(b"\x7fELF");
+    let dir = clean_dir_with_nested_git();
 
     assert_eq!(
         code(&run(dir.path(), &["scan", ".", "--fail-on", "none"])),

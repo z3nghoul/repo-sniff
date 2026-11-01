@@ -1,0 +1,68 @@
+# What the built-in rules report when the committed text fixtures in
+# repo-contents/ are scanned as one repository, in the format of the fixture
+# harness (tests/fixture_expectations.rs, PR #58). The binary fixtures and
+# symlinks of this family are never committed: tests/repo_contents.rs
+# generates them in a temporary copy of the folder and checks them there.
+
+files_scanned = 18
+
+[[finding]]
+file = "positive/dropper/update.hta"
+line = 1
+rule = "repo.windows-dropper"
+severity = "high"
+
+[[finding]]
+file = "positive/scripts/build.bat"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/scripts/setup.cmd"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/scripts/deploy.ps1"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/scripts/tools.psm1"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/scripts/helper.vbs"
+line = 1
+rule = "repo.windows-script"
+severity = "medium"
+
+[[finding]]
+file = "positive/scripts/job.wsf"
+line = 1
+rule = "repo.windows-script"
+severity = "medium"
+
+[[finding]]
+file = "positive/scripts/old.jse"
+line = 1
+rule = "repo.windows-script"
+severity = "high"
+explanation_contains = "Script Encoder"
+
+[[finding]]
+file = "positive/wsh/run.js"
+line = 2
+rule = "repo.wsh-javascript"
+severity = "medium"
+
+[[finding]]
+file = "positive/wsh/fso.js"
+line = 2
+rule = "repo.wsh-javascript"
+severity = "medium"
