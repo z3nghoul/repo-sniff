@@ -33,15 +33,12 @@ const ALLOWED_PROTOCOLS: &str = "https";
 const MAX_GIT_ERROR_CHARS: usize = 500;
 
 /// The only variables copied from our environment into git's. They are what
-/// git needs to find itself, a home directory, a temporary directory, to open
-/// sockets on Windows, to reach the network through a proxy, and to verify
-/// certificates. Everything else (`GIT_*`, `SSH_*`, tokens, ...) is dropped.
+/// git needs to find itself, a temporary directory, to open sockets on
+/// Windows, to reach the network through a proxy, and to verify certificates.
+/// Everything else (`GIT_*`, `SSH_*`, tokens, ...) is dropped. The home
+/// directory is not passed on: git gets an empty one (see `git_environment`).
 const PASS_THROUGH: &[&str] = &[
     "PATH",
-    "HOME",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
     "TMPDIR",
     "TMP",
     "TEMP",
@@ -110,19 +107,22 @@ fn clone_unchecked(
         .context("failed to create a temporary directory")?;
 
     // Holds what git is pointed at instead of the real configuration: an
-    // empty directory for hooks and an empty configuration file.
+    // empty directory for hooks, an empty configuration file and an empty
+    // home directory.
     let sandbox = tempfile::Builder::new()
         .prefix("repo-sniff-git-")
         .tempdir()
         .context("failed to create a temporary directory")?;
     let hooks_dir = sandbox.path().join("hooks");
+    let home = sandbox.path().join("home");
     let global_config = sandbox.path().join("gitconfig");
     fs::create_dir(&hooks_dir).context("failed to prepare the git sandbox")?;
+    fs::create_dir(&home).context("failed to prepare the git sandbox")?;
     fs::write(&global_config, "").context("failed to prepare the git sandbox")?;
 
     let output = Command::new("git")
         .env_clear()
-        .envs(git_environment(env, &global_config, protocols))
+        .envs(git_environment(env, &global_config, &home, protocols))
         .args(clone_args(url, git_ref, dir.path(), &hooks_dir))
         .output()
         .context("failed to run `git`; is it installed and on PATH?")?;
@@ -146,9 +146,17 @@ fn clone_failure(url: &str, stderr: &str) -> anyhow::Error {
 
 /// The environment git runs in: the allowed variables from `source`, plus the
 /// settings that isolate it from the machine's configuration.
+///
+/// The home directory is the empty `home`, not the user's. `GIT_CONFIG_GLOBAL`
+/// alone is not enough: git before 2.32 ignores it and reads `~/.gitconfig`
+/// (filters, `include.path`, `http.sslVerify`), and every version reads
+/// `~/.config/git/attributes` and lets curl read `~/.netrc` from the home
+/// directory. On Windows git takes its home from `HOME`, then `HOMEDRIVE` and
+/// `HOMEPATH`, then `USERPROFILE`; the middle two are not passed on.
 fn git_environment(
     source: impl Fn(&str) -> Option<OsString>,
     global_config: &Path,
+    home: &Path,
     protocols: &str,
 ) -> Vec<(OsString, OsString)> {
     let mut vars: Vec<(OsString, OsString)> = PASS_THROUGH
@@ -156,7 +164,9 @@ fn git_environment(
         .filter_map(|&name| source(name).map(|value| (name.into(), value)))
         .collect();
 
-    let fixed: [(&str, OsString); 6] = [
+    let fixed: [(&str, OsString); 8] = [
+        ("HOME", home.into()),
+        ("USERPROFILE", home.into()),
         // Skip the system-wide configuration file.
         ("GIT_CONFIG_NOSYSTEM", "1".into()),
         // Read this (empty) file instead of ~/.gitconfig and the XDG file.
@@ -289,15 +299,20 @@ mod tests {
     }
 
     fn environment(vars: &[(&str, &str)]) -> HashMap<String, String> {
-        git_environment(env_of(vars), Path::new("/empty-config"), "https")
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.to_string_lossy().into_owned(),
-                )
-            })
-            .collect()
+        git_environment(
+            env_of(vars),
+            Path::new("/empty-config"),
+            Path::new("/empty-home"),
+            "https",
+        )
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
     }
 
     #[test]
@@ -441,7 +456,7 @@ mod tests {
             ("LD_PRELOAD", "/tmp/evil.so"),
         ]);
 
-        for kept in ["PATH", "HOME", "HTTPS_PROXY", "SSL_CERT_FILE", "SYSTEMROOT"] {
+        for kept in ["PATH", "HTTPS_PROXY", "SSL_CERT_FILE", "SYSTEMROOT"] {
             assert!(env.contains_key(kept), "{kept} should be passed on");
         }
         for dropped in [
@@ -454,6 +469,22 @@ mod tests {
             "SSH_AUTH_SOCK",
             "LD_PRELOAD",
         ] {
+            assert!(!env.contains_key(dropped), "{dropped} must not reach git");
+        }
+    }
+
+    #[test]
+    fn git_gets_an_empty_home_directory_instead_of_the_users() {
+        let env = environment(&[
+            ("HOME", "/home/user"),
+            ("USERPROFILE", "C:\\Users\\user"),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", "\\Users\\user"),
+            ("XDG_CONFIG_HOME", "/home/user/.config"),
+        ]);
+        assert_eq!(env["HOME"], "/empty-home");
+        assert_eq!(env["USERPROFILE"], "/empty-home");
+        for dropped in ["HOMEDRIVE", "HOMEPATH", "XDG_CONFIG_HOME"] {
             assert!(!env.contains_key(dropped), "{dropped} must not reach git");
         }
     }
@@ -478,6 +509,8 @@ mod tests {
         assert_eq!(env["GIT_CONFIG_GLOBAL"], "/empty-config");
         assert_eq!(env["GIT_CONFIG_NOSYSTEM"], "1");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
+        let env = environment(&[("HOME", "/home/user")]);
+        assert_eq!(env["HOME"], "/empty-home");
     }
 
     #[test]
@@ -676,6 +709,87 @@ mod tests {
         assert!(
             !checkout.path().join(MARKER).exists(),
             "the filter from the home directory ran"
+        );
+    }
+
+    /// Git before 2.32 does not know `GIT_CONFIG_GLOBAL` and reads
+    /// `$HOME/.gitconfig`. Shown here by asking a current git for its global
+    /// configuration with that variable left out, in the environment the clone
+    /// gets: the user's filter is not visible, because `HOME` is the sandbox.
+    #[test]
+    fn without_git_config_global_the_users_gitconfig_is_still_not_read() {
+        let home = home_with_filter();
+        let home_path = home.path().to_string_lossy().into_owned();
+        let source = move |name: &str| match name {
+            "HOME" | "USERPROFILE" => Some(OsString::from(&home_path)),
+            other => std::env::var_os(other),
+        };
+        let global_config = |env: Vec<(OsString, OsString)>| {
+            let output = Command::new("git")
+                .env_clear()
+                .envs(
+                    env.into_iter()
+                        .filter(|(name, _)| name != "GIT_CONFIG_GLOBAL"),
+                )
+                .args(["config", "--global", "--list"])
+                .output()
+                .expect("git is required for these tests");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+
+        // Control: with the user's home, git reads the filter from it.
+        let mut leaky = git_environment(&source, Path::new("/unused"), home.path(), "file");
+        leaky.retain(|(name, _)| name != "GIT_CONFIG_NOSYSTEM");
+        assert!(
+            global_config(leaky).contains("filter.evil.smudge"),
+            "setup is broken: git should read the home directory's .gitconfig"
+        );
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let env = git_environment(&source, Path::new("/unused"), sandbox.path(), "file");
+        assert!(!global_config(env).contains("filter.evil"));
+    }
+
+    /// `~/.config/git/attributes` is read by every git version whatever
+    /// `GIT_CONFIG_GLOBAL` says. An `eol=crlf` there would change the checked
+    /// out bytes; with the sandbox as home it does not apply.
+    #[test]
+    fn attributes_in_the_users_home_do_not_apply() {
+        let source = source_repository();
+        let home = tempfile::tempdir().unwrap();
+        let attributes = home.path().join(".config").join("git");
+        fs::create_dir_all(&attributes).unwrap();
+        fs::write(attributes.join("attributes"), "file.txt text eol=crlf\n").unwrap();
+
+        // Control: plain git with this home writes CRLF.
+        let control = tempfile::tempdir().unwrap();
+        let empty = control.path().join("empty-config");
+        fs::write(&empty, "").unwrap();
+        let mut command = Command::new("git");
+        command
+            .env("HOME", home.path())
+            .env_remove("XDG_CONFIG_HOME")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &empty)
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .args(["clone", "-q", &file_url(source.path())])
+            .arg(control.path().join("out"));
+        run(command);
+        assert_eq!(
+            fs::read(control.path().join("out").join("file.txt")).unwrap(),
+            b"hello\r\n",
+            "setup is broken: the home directory's attributes should apply"
+        );
+
+        let home_path = home.path().to_string_lossy().into_owned();
+        let env = move |name: &str| match name {
+            "HOME" | "USERPROFILE" => Some(OsString::from(&home_path)),
+            other => std::env::var_os(other),
+        };
+        let checkout = clone_unchecked(&file_url(source.path()), None, "file", env).unwrap();
+        assert_eq!(
+            fs::read(checkout.path().join("file.txt")).unwrap(),
+            b"hello\n"
         );
     }
 
