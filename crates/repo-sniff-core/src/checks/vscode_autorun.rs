@@ -9,7 +9,7 @@
 //! comments, line breaks between key and value, and `\uXXXX` escapes in keys
 //! cannot hide the setting.
 
-use super::Hit;
+use super::{Ctx, Hit, TextSpan};
 use crate::finding::Severity;
 use crate::jsonc::{self, Node};
 use crate::sanitize::display_safe;
@@ -66,13 +66,14 @@ impl FileKind {
 }
 
 /// Reports every task in the file that runs on folder open.
-pub fn check(path: &str, text: &str, base: Severity) -> Vec<Hit> {
-    let Some(kind) = FileKind::from_path(path) else {
+pub fn check(ctx: &Ctx<'_>) -> Vec<Hit> {
+    // Decided from the path alone, so other files are never parsed.
+    let Some(kind) = FileKind::from_path(ctx.path) else {
         return Vec::new();
     };
-    let root = match jsonc::parse(text) {
+    let root = match ctx.jsonc() {
         Ok(root) => root,
-        Err(err) => return unparseable(text, err, base),
+        Err(err) => return unparseable(ctx, err),
     };
 
     let tasks = match kind {
@@ -85,11 +86,11 @@ pub fn check(path: &str, text: &str, base: Severity) -> Vec<Hit> {
 
     tasks
         .iter()
-        .filter_map(|task| check_task(task, text, base))
+        .filter_map(|task| check_task(task, ctx))
         .collect()
 }
 
-fn check_task(task: &Node, text: &str, base: Severity) -> Option<Hit> {
+fn check_task(task: &Node, ctx: &Ctx<'_>) -> Option<Hit> {
     let run_on = task.get("runOptions")?.get("runOn")?;
     // VS Code itself only accepts the exact value; comparing without case is
     // a deliberate over-approximation that costs nothing.
@@ -97,7 +98,8 @@ fn check_task(task: &Node, text: &str, base: Severity) -> Option<Hit> {
         return None;
     }
 
-    let line = jsonc::line_of(text, run_on.offset);
+    let line = ctx.line_of(run_on.offset);
+    let span = Some(TextSpan(run_on.offset..run_on.end));
     let label = display_safe(
         task.get("label")
             .and_then(Node::as_str)
@@ -110,6 +112,7 @@ fn check_task(task: &Node, text: &str, base: Severity) -> Option<Hit> {
     match SUSPICIOUS.iter().find(|s| lower.contains(*s)) {
         Some(fragment) => Some(Hit {
             line,
+            span,
             severity: Severity::Critical,
             reason: format!(
                 "task \"{label}\" runs automatically when the folder is opened, \
@@ -119,7 +122,8 @@ fn check_task(task: &Node, text: &str, base: Severity) -> Option<Hit> {
         }),
         None => Some(Hit {
             line,
-            severity: base,
+            span,
+            severity: ctx.base,
             reason: format!("task \"{label}\" runs automatically when the folder is opened"),
         }),
     }
@@ -159,12 +163,14 @@ fn command_text(task: &Node) -> String {
 /// Instead of silently skipping it, report it for a manual look: at the rule's
 /// base severity if the key words appear in the text, otherwise at MEDIUM
 /// (they may still be hidden behind escapes).
-fn unparseable(text: &str, err: jsonc::ParseError, base: Severity) -> Vec<Hit> {
-    let line = jsonc::line_of(text, err.offset);
+fn unparseable(ctx: &Ctx<'_>, err: &jsonc::ParseError) -> Vec<Hit> {
+    let line = ctx.line_of(err.offset);
+    let text = ctx.text();
     let mentions = text.contains("runOn") && text.contains("folderOpen");
     vec![Hit {
         line,
-        severity: if mentions { base } else { Severity::Medium },
+        span: None,
+        severity: if mentions { ctx.base } else { Severity::Medium },
         reason: format!(
             "file could not be parsed ({}); VS Code may still accept it, review it by hand",
             err.message
@@ -177,6 +183,10 @@ mod tests {
     use super::*;
 
     const TASKS: &str = ".vscode/tasks.json";
+
+    fn check(path: &str, text: &str, base: Severity) -> Vec<Hit> {
+        crate::checks::run_on_text(super::check, path, text, base)
+    }
 
     #[test]
     fn file_kind_from_path() {

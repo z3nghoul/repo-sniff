@@ -25,7 +25,7 @@
 use std::borrow::Cow;
 
 use super::pylines::{is_python_space, python_lines};
-use super::{FileCtx, FileIssue, Hit};
+use super::{Ctx, FileIssue, Hit};
 use crate::finding::Severity;
 
 /// A recorded executable line is at most this many; the rest are counted.
@@ -100,7 +100,7 @@ const SETUPTOOLS_LINES: &str =
 /// The line of `pytest-cov.pth` (pytest-cov up to 6.2.1).
 const PYTEST_COV_LINE: &str = include_str!("../../data/honest-pth/pytest-cov.txt");
 
-pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
+pub fn check(ctx: &Ctx<'_>) -> Vec<Hit> {
     let name = ctx.path.rsplit('/').next().unwrap_or(ctx.path);
     let inert = inert_reason(name);
     let mut hits = Vec::new();
@@ -109,7 +109,7 @@ pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
         hits.push(issue_hit(issue, inert.is_some()));
     }
     // An oversized file was not read; a symlink may have brought its target.
-    if ctx.bytes.is_empty() {
+    if ctx.bytes().is_empty() {
         return hits;
     }
     hits.extend(analyse(ctx, name, inert));
@@ -140,6 +140,7 @@ fn issue_hit(issue: &FileIssue, inert: bool) -> Hit {
     };
     Hit {
         line: 1,
+        span: None,
         severity,
         reason,
     }
@@ -153,11 +154,12 @@ struct ExecLine {
     honest_module: Option<Option<String>>,
 }
 
-fn analyse(ctx: &FileCtx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
+fn analyse(ctx: &Ctx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
     let mut hits = Vec::new();
 
     // A byte order mark is dropped only at the very start of the file.
-    let bytes = ctx.bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(ctx.bytes);
+    let raw = ctx.bytes();
+    let bytes = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw);
     let (text, lossy): (Cow<'_, str>, bool) = match std::str::from_utf8(bytes) {
         Ok(text) => (Cow::Borrowed(text), false),
         Err(_) => (String::from_utf8_lossy(bytes), true),
@@ -165,6 +167,7 @@ fn analyse(ctx: &FileCtx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hi
     if lossy && inert.is_none() {
         hits.push(Hit {
             line: 1,
+            span: None,
             severity: Severity::Medium,
             reason: "this .pth file is not valid UTF-8; honest ones are plain ASCII, and Python \
                      may decode it with the system's locale encoding"
@@ -213,6 +216,7 @@ fn analyse(ctx: &FileCtx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hi
         for exec in &execs {
             hits.push(Hit {
                 line: exec.number,
+                span: None,
                 severity: Severity::Low,
                 reason: format!(
                     "Python's site module ignores this file because {why}, but this line starts \
@@ -229,6 +233,7 @@ fn analyse(ctx: &FileCtx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hi
     if exec_total == 0 {
         hits.push(Hit {
             line: first,
+            span: None,
             severity: Severity::Info,
             reason: "only adds paths to sys.path; it has no executable line".to_string(),
         });
@@ -246,6 +251,7 @@ fn analyse(ctx: &FileCtx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hi
     if exec_total > execs.len() {
         hits.push(Hit {
             line: execs.last().map_or(1, |exec| exec.number),
+            span: None,
             severity: ctx.base,
             reason: format!(
                 "{} more executable lines in this file are not listed",
@@ -260,6 +266,7 @@ fn ordinary_hit(base: Severity, exec: &ExecLine) -> Hit {
     match &exec.critical {
         Some(why) => Hit {
             line: exec.number,
+            span: None,
             severity: Severity::Critical,
             reason: format!(
                 "this line starts with `import`, so Python runs it every time it starts, and it {why}"
@@ -267,6 +274,7 @@ fn ordinary_hit(base: Severity, exec: &ExecLine) -> Hit {
         },
         None => Hit {
             line: exec.number,
+            span: None,
             severity: base,
             reason: "this line starts with `import`, so Python runs it every time it starts"
                 .to_string(),
@@ -275,7 +283,7 @@ fn ordinary_hit(base: Severity, exec: &ExecLine) -> Hit {
 }
 
 /// A line of a file whose name and every line are known honest forms.
-fn honest_hit(ctx: &FileCtx<'_>, exec: &ExecLine) -> Hit {
+fn honest_hit(ctx: &Ctx<'_>, exec: &ExecLine) -> Hit {
     let module = exec.honest_module.clone().flatten();
     let (severity, detail) = match module {
         None => (Severity::Low, "it imports no module of its own".to_string()),
@@ -300,6 +308,7 @@ fn honest_hit(ctx: &FileCtx<'_>, exec: &ExecLine) -> Hit {
     };
     Hit {
         line: exec.number,
+        span: None,
         severity,
         reason: format!(
             "this is a line that a known tool writes into .pth files (setuptools, virtualenv, an \

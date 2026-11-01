@@ -1,6 +1,7 @@
 //! What the scanner reports: one `Finding` per suspicious spot.
 
 use std::fmt;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -117,6 +118,22 @@ pub struct Finding {
     pub file: PathBuf,
     /// 1-based line number.
     pub line: usize,
+    /// 1-based column where the match starts, in Unicode scalar values of the
+    /// line (a byte order mark on the first line is not counted). Given only
+    /// when the text the rule read is the file itself or the file decoded from
+    /// UTF-16; with NUL bytes dropped, invalid UTF-8 replaced or binary data
+    /// read as ASCII only, a count would not be the column an editor shows, so
+    /// it is `None`, as it is when the rule points at a whole line or file.
+    pub column: Option<usize>,
+    /// Byte range of the match in the file. `None` when it is not known, and
+    /// also when the text the rule read is not the file byte for byte (decoded
+    /// UTF-16, dropped NUL bytes, replaced invalid UTF-8, the ASCII-only view
+    /// of binary data), so a range that is given is never wrong.
+    pub span: Option<Range<usize>>,
+    /// The line of the match as the rule read it, cut to a short window around
+    /// the match and escaped with `snippet_safe`. It is still text from the
+    /// scanned file. `None` when the rule points at a whole line or file.
+    pub snippet: Option<String>,
     /// Why this is suspicious, in plain words.
     pub explanation: String,
 }

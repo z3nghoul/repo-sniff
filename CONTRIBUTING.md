@@ -152,7 +152,7 @@ them (full list in
   interactive prompts;
 - credentials in a URL are hidden in everything that is printed;
 - an inconclusive scan (file limit reached, a file not read, an executable
-  binary not analyzed) is never reported as clean;
+  binary that no rule reported) is never reported as clean;
 - nothing from the scanned repository (locales, configuration, rules) can
   silently change what the report shows: the scanner never loads locales or
   rules from it, and any exclusions it declares are surfaced in the report,
