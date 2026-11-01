@@ -1686,6 +1686,126 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `crosses_link` as it was in ca78a99: the whole prefix is joined and
+    /// lowercased again for every part. Quadratic, but obviously right.
+    fn crosses_link_reference(
+        link: &str,
+        target: &str,
+        separators: &[char],
+        link_keys: &HashSet<String>,
+    ) -> bool {
+        let mut parts: Vec<&str> = link.split('/').collect();
+        parts.pop();
+        for part in target.split(separators) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    if parts.pop().is_none() {
+                        return false;
+                    }
+                }
+                _ => {
+                    parts.push(part);
+                    if link_keys.contains(&parts.join("/").to_lowercase()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// A fixed-seed generator (xorshift64*), so a failure repeats.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn crosses_link_agrees_with_the_quadratic_reference() {
+        // Names whose lowercase differs in bytes from the original (the
+        // dotted capital I, capital sharp s, Cyrillic, final sigma) next to
+        // plain ones, with the dot parts, empty parts and backslashes.
+        const NAMES: [&str; 12] = [
+            "a", "A", "dl", "DL", "x\\y", "\u{130}", "\u{1E9E}", "\u{41A}", "\u{43A}", "\u{3A3}",
+            "\u{3C2}", "a\u{3A3}",
+        ];
+        const DOTS: [&str; 4] = [".", "..", "..", ""];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let (mut crossed, mut not_crossed, mut max_segments) = (0, 0, 0);
+        for case in 0..30_000 {
+            let depth = 1 + rng.below(4);
+            let mut link: Vec<&str> = (0..depth).map(|_| NAMES[rng.below(NAMES.len())]).collect();
+            link.push("tasks.json");
+            let link = link.join("/");
+
+            // Links of different path lengths, built from the same names so
+            // that prefixes of the targets hit them.
+            let parent: Vec<&str> = link.split('/').collect();
+            let keys: HashSet<String> = (0..1 + rng.below(4))
+                .map(|_| {
+                    // Half of the links sit under a prefix of the link's own
+                    // directory, which is where `..` takes a target back to.
+                    let mut path: Vec<&str> = if rng.below(2) == 0 {
+                        parent[..rng.below(parent.len())].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    path.extend((0..1 + rng.below(2)).map(|_| NAMES[rng.below(NAMES.len())]));
+                    path.join("/").to_lowercase()
+                })
+                .collect();
+            let lengths: HashSet<usize> = keys.iter().map(String::len).collect();
+
+            let segments = if case % 50 == 0 {
+                1 + rng.below(64)
+            } else {
+                1 + rng.below(8)
+            };
+            max_segments = max_segments.max(segments);
+            let parts: Vec<&str> = (0..segments)
+                .map(|_| {
+                    if rng.below(3) == 0 {
+                        DOTS[rng.below(DOTS.len())]
+                    } else {
+                        NAMES[rng.below(NAMES.len())]
+                    }
+                })
+                .collect();
+            let target = parts.join(if rng.below(4) == 0 { "\\" } else { "/" });
+
+            for separators in [&['/'][..], &['/', '\\'][..]] {
+                let want = crosses_link_reference(&link, &target, separators, &keys);
+                let got = crosses_link(&link, &target, separators, &keys, &lengths);
+                assert_eq!(
+                    got, want,
+                    "link {link:?} target {target:?} separators {separators:?} keys {keys:?}"
+                );
+                if want {
+                    crossed += 1;
+                } else {
+                    not_crossed += 1;
+                }
+            }
+        }
+        // The generator must reach both answers, and long targets.
+        assert!(
+            crossed > 1000 && not_crossed > 1000,
+            "{crossed} {not_crossed}"
+        );
+        assert!(max_segments >= 60, "{max_segments}");
+    }
+
     /// `crosses_link` must agree with walking the target one part at a time
     /// (the system resolves `..` inside a directory link), and must stay
     /// linear: the target is long, and there can be a hundred thousand links.
