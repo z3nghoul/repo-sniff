@@ -158,7 +158,13 @@ fn a_tasks_file_the_jsonc_rule_cannot_read_whole_is_listed_not_judged() {
     let report = scan_tasks(&elf, Limits::default());
     assert!(report.findings.is_empty(), "{:?}", report.findings);
     assert_eq!(report.files_scanned, 0);
-    assert_eq!(reasons(&report), [SkipReason::Executable { format: "ELF" }]);
+    assert_eq!(
+        reasons(&report),
+        [SkipReason::Executable {
+            format: "ELF",
+            reported: false
+        }]
+    );
 }
 
 #[test]

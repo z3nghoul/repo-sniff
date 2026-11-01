@@ -214,7 +214,13 @@ mod tests {
             }),
             3
         );
-        assert_eq!(status(SkipReason::Executable { format: "ELF" }), 3);
+        assert_eq!(
+            status(SkipReason::Executable {
+                format: "ELF",
+                reported: false,
+            }),
+            3
+        );
         assert_eq!(status(SkipReason::Binary), 0);
         assert_eq!(status(SkipReason::Symlink { target: None }), 0);
     }
