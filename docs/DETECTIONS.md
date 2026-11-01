@@ -261,7 +261,21 @@ localization item is a requirement for milestone 6. None of them is a proof that
 the scanner is free of bugs or that a repository is safe: a clean result means
 "no rule matched in what was read", and the report says what was not read.
 
-### Exit status and binary files
+**False positives.** A `.repo-sniff.toml` file holds exclusions, each with a
+**mandatory justification** field. A benchmark on popular honest repositories
+(for example ripgrep) targets "0 critical on clean repos", with the results
+published in the README.
+
+**What we scan.** The branch or tag the user is going to build (the default
+branch unless told otherwise), not the whole history. For a remote
+repository the ref is chosen with `--ref` (a branch or tag).
+
+**Implementation order.** Stages 0–3 (automatic execution) and stage 6
+(Trojan Source, whitespace hiding) first, because they give the most value
+for the least effort. Then stage 5 capabilities, then obfuscation decoding.
+The exact set of detections for each milestone is agreed before it starts.
+
+## 6. Exit status and binary files
 
 `repo-sniff scan` exits with 0 when nothing reached `--fail-on` and the scan was
 complete, 1 when a finding reached it, 2 when the scan could not run, and 3
@@ -283,17 +297,3 @@ inconclusive scan. How binary files affect that:
 - The `.git` folder at the root is listed as `git metadata, not analyzed` and
   does not change the status; a nested `.git` folder makes the scan
   inconclusive.
-
-**False positives.** A `.repo-sniff.toml` file holds exclusions, each with a
-**mandatory justification** field. A benchmark on popular honest repositories
-(for example ripgrep) targets "0 critical on clean repos", with the results
-published in the README.
-
-**What we scan.** The branch or tag the user is going to build (the default
-branch unless told otherwise), not the whole history. For a remote
-repository the ref is chosen with `--ref` (a branch or tag).
-
-**Implementation order.** Stages 0–3 (automatic execution) and stage 6
-(Trojan Source, whitespace hiding) first, because they give the most value
-for the least effort. Then stage 5 capabilities, then obfuscation decoding.
-The exact set of detections for each milestone is agreed before it starts.

@@ -54,7 +54,7 @@ targets are judged when they are inside the repository.
 | git/git | `git-gui/lib/win32_shortcut.js:4`, `:5`, `:27` | `repo.wsh-javascript` | MEDIUM (3) | True detection, benign | A real Windows Script Host script that creates shortcuts for git-gui |
 | python/cpython | `Lib/test/empty.vbs` | `repo.windows-script` | MEDIUM | True detection, benign | An empty VBScript used by the test suite |
 
-There are no CRITICAL findings. A first run of this branch reported
+There are no CRITICAL findings. A first run of the repository contents branch reported
 `dep/WinAppDriver/Newtonsoft.Json.dll` as a CRITICAL disguised executable
 (".json" before ".dll" read as a double extension); dotted .NET assembly
 names are now excluded, and a double extension counts only when the outer
@@ -116,7 +116,7 @@ because of it:
 
 ## Earlier run (before the repository contents family)
 
-On the same heads, the scanner before this family (commit `a289486`) gave:
+On the heads of the first run (cpython has moved since), the scanner before this family (commit `a289486`) gave:
 0 CRITICAL; pip, vscode and terminal INCONCLUSIVE only because of their
 executables (exit 3, 1 with its HIGH finding, and 3); cpython 2 HIGH (issue 42); vscode 1 HIGH
 (issue 43); the other six clean.
