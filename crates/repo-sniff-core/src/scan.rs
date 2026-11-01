@@ -1,11 +1,12 @@
 //! Running rules over a repository.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
-use crate::checks::{FileCheck, FileCtx, FileIssue, RepoIndex};
+use crate::checks::{Check, Ctx, Decode, FileIssue, RepoIndex, Views};
 use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
 use crate::sanitize::{display_safe, to_slash};
@@ -122,7 +123,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             ),
     );
     let regular_files: HashSet<String> = walked.files.iter().map(|path| to_slash(path)).collect();
-    let file_rules: Vec<(&Rule, FileCheck)> = rules
+    let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
             Matcher::File(check) => Some((rule, check)),
@@ -183,53 +184,29 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             }
         };
 
-        // File-level rules go first and see the raw bytes, so a file is judged
-        // the way its consumer reads it, even if it looks like a binary here.
-        let checked = env.run_file_checks(relative, &slash_path, &bytes, None);
+        let class = classify(&slash_path, &bytes);
+        let views = Views::new(&bytes, class.decode);
+
+        // File-level rules see the raw bytes whatever the classification says,
+        // so a file is judged the way its consumer reads it, even if it looks
+        // like a binary here.
+        let checked = env.run_file_checks(relative, &slash_path, &views, None);
         report.findings.extend(checked.findings);
 
-        let script = is_script(&slash_path, &bytes);
-        let nul_line = script.then(|| first_nul_line(&bytes)).flatten();
-        let mut utf16_text = None;
-        let mut binary_looking = false;
-
-        if looks_binary(&bytes) {
-            // An executable is listed even when a file rule looked at it, and
-            // even when its name says script: the rule saw the bytes of a
-            // `.pth` or `.start` file, not the code of the program.
-            if let Some(format) = executable_format(&bytes) {
-                skipped.push(Skipped {
-                    path: relative.clone(),
-                    reason: SkipReason::Executable { format },
-                });
-                if checked.examined {
-                    report.files_scanned += 1;
-                }
-                continue;
+        // An executable is listed even when a file rule looked at it, and even
+        // when its name says script: the rule saw the bytes of a `.pth` or
+        // `.start` file, not the code of the program.
+        if let Some(format) = class.executable {
+            skipped.push(Skipped {
+                path: relative.clone(),
+                reason: SkipReason::Executable { format },
+            });
+            if checked.examined {
+                report.files_scanned += 1;
             }
-            // A script with a NUL byte is still a script, and the NUL is
-            // reported by its own rule (`nul_line`).
-            if !script {
-                if has_utf16_bom(&bytes) && has_script_extension(&slash_path) {
-                    // Windows PowerShell and WSH read UTF-16 scripts.
-                    utf16_text = Some(decode_utf16_bom(&bytes));
-                } else if known_binary_magic(&bytes) {
-                    binary_looking = true;
-                }
-            }
+            continue;
         }
-        // Any other file with a NUL byte that does not read as text, and any
-        // file with a known binary header, may still be sourced by a shell:
-        // `dash` drops the NULs and runs the rest, whatever else is in the
-        // file (`GIF89a=1` is a valid assignment). So it goes to the line
-        // rules too, but only as ASCII (see `ascii_only_text`), because on
-        // data such as icons and audio a rule that looks for a non-ASCII
-        // character matches by chance. It is listed, so the report shows
-        // that its binary contents were not looked at.
-        if !script && utf16_text.is_none() && bytes.contains(&0) && !nul_file_is_text(&bytes) {
-            binary_looking = true;
-        }
-        if binary_looking {
+        if class.binary_looking {
             skipped.push(Skipped {
                 path: relative.clone(),
                 reason: SkipReason::Binary,
@@ -237,20 +214,16 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         }
 
         report.files_scanned += 1;
-        let text = match utf16_text {
-            Some(text) => text,
-            None if binary_looking => ascii_only_text(&bytes),
-            None => text_without_nuls(&bytes),
-        };
         let mut found = scan_text(
             relative,
             &slash_path,
-            &text,
-            nul_line,
+            &views,
+            class.nul_line,
+            &env,
             rules,
             &mut report.unlisted,
         );
-        if binary_looking {
+        if class.binary_looking {
             for finding in &mut found {
                 finding.explanation.push_str(BINARY_LOOKING_NOTE);
             }
@@ -267,7 +240,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             SkipReason::TooLarge { size } => env.run_file_checks(
                 &entry.path,
                 &slash_path,
-                &[],
+                &Views::new(&[], Decode::Utf8WithoutNuls),
                 Some(FileIssue::TooLarge { size: *size }),
             ),
             SkipReason::Symlink { target } => {
@@ -276,7 +249,9 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                 let issue = FileIssue::Symlink {
                     target: target.as_deref().map(to_slash),
                 };
-                env.run_file_checks(&entry.path, &slash_path, &bytes, Some(issue))
+                // Read the way the target would be read under the link's name.
+                let views = Views::new(&bytes, classify(&slash_path, &bytes).decode);
+                env.run_file_checks(&entry.path, &slash_path, &views, Some(issue))
             }
             _ => continue,
         };
@@ -294,7 +269,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
 struct Env<'a> {
     index: &'a RepoIndex,
     truncated: bool,
-    file_rules: &'a [(&'a Rule, FileCheck)],
+    file_rules: &'a [(&'a Rule, Check)],
 }
 
 /// The outcome of offering one file to the file-level rules.
@@ -305,11 +280,11 @@ struct Checked {
 }
 
 impl Env<'_> {
-    fn run_file_checks(
-        &self,
+    fn run_file_checks<'v>(
+        &'v self,
         relative: &Path,
-        slash_path: &str,
-        bytes: &[u8],
+        slash_path: &'v str,
+        views: &'v Views<'v>,
         issue: Option<FileIssue>,
     ) -> Checked {
         let mut checked = Checked {
@@ -321,14 +296,14 @@ impl Env<'_> {
                 continue;
             }
             checked.examined = true;
-            let ctx = FileCtx {
-                path: slash_path,
-                bytes,
-                issue: issue.clone(),
-                repo: self.index,
-                truncated: self.truncated,
-                base: rule.severity,
-            };
+            let ctx = Ctx::new(
+                slash_path,
+                issue.clone(),
+                self.index,
+                self.truncated,
+                rule.severity,
+                views,
+            );
             let mut hits = check(&ctx);
             let unlisted = hits.len().saturating_sub(MAX_FINDINGS_PER_FILE_CHECK);
             hits.truncate(MAX_FINDINGS_PER_FILE_CHECK);
@@ -621,7 +596,7 @@ fn scan_streamed(
                 }
             }
             let text = if binary_looking {
-                ascii_only_text(&line)
+                Cow::Owned(ascii_only_text(&line))
             } else {
                 text_without_nuls(&line)
             };
@@ -642,11 +617,12 @@ fn scan_streamed(
 /// Runs line, JSONC and other text rules over one file's text. `relative` is
 /// the path shown in findings; `slash_path` is matched against each rule's
 /// `files` globs.
-fn scan_text(
+fn scan_text<'v>(
     relative: &Path,
-    slash_path: &str,
-    text: &str,
+    slash_path: &'v str,
+    views: &'v Views<'v>,
     nul_line: Option<usize>,
+    env: &'v Env<'v>,
     rules: &[Rule],
     unlisted: &mut Vec<Unlisted>,
 ) -> Vec<Finding> {
@@ -658,6 +634,7 @@ fn scan_text(
         return Vec::new();
     }
 
+    let text = views.text();
     let mut findings = Vec::new();
     let mut lines = LineScanner::new(&applicable);
     for (index, line) in text.lines().enumerate() {
@@ -669,7 +646,15 @@ fn scan_text(
             // Done above, in one pass over the lines.
             Matcher::LineRegex(_) => {}
             Matcher::Jsonc(check) => {
-                for hit in check(slash_path, text, rule.severity) {
+                let ctx = Ctx::new(
+                    slash_path,
+                    None,
+                    env.index,
+                    env.truncated,
+                    rule.severity,
+                    views,
+                );
+                for hit in check(&ctx) {
                     findings.push(Finding {
                         rule_id: rule.id.clone(),
                         severity: hit.severity,
@@ -701,6 +686,81 @@ fn scan_text(
         }
     }
     findings
+}
+
+/// What the scanner decides about a file before any rule runs.
+struct Class {
+    /// The executable format, if the file is one. Such a file is listed and
+    /// not read by the text rules.
+    executable: Option<&'static str>,
+    /// The 1-based line of the first NUL byte in a script.
+    nul_line: Option<usize>,
+    /// Data with NUL bytes that does not read as text, or with a known binary
+    /// header: listed, and read by the line rules as ASCII only.
+    binary_looking: bool,
+    /// How the text rules read the file.
+    decode: Decode,
+}
+
+/// Classifies a file from its path and content.
+fn classify(slash_path: &str, bytes: &[u8]) -> Class {
+    let script = is_script(slash_path, bytes);
+    let nul_line = script.then(|| first_nul_line(bytes)).flatten();
+    let mut utf16 = false;
+    let mut binary_looking = false;
+
+    if looks_binary(bytes) {
+        if let Some(format) = executable_format(bytes) {
+            return Class {
+                executable: Some(format),
+                nul_line,
+                binary_looking: false,
+                decode: Decode::AsciiOnly,
+            };
+        }
+        // A script with a NUL byte is still a script, and the NUL is reported
+        // by its own rule (`nul_line`).
+        if !script {
+            if has_utf16_bom(bytes) && has_script_extension(slash_path) {
+                // Windows PowerShell and WSH read UTF-16 scripts.
+                utf16 = true;
+            } else if known_binary_magic(bytes) {
+                binary_looking = true;
+            }
+        }
+    }
+    // Any other file with a NUL byte that does not read as text, and any file
+    // with a known binary header, may still be sourced by a shell: `dash` drops
+    // the NULs and runs the rest, whatever else is in the file (`GIF89a=1` is a
+    // valid assignment). So it goes to the line rules too, but only as ASCII
+    // (see `ascii_only_text`), because on data such as icons and audio a rule
+    // that looks for a non-ASCII character matches by chance. It is listed, so
+    // the report shows that its binary contents were not looked at.
+    if !script && !utf16 && bytes.contains(&0) && !nul_file_is_text(bytes) {
+        binary_looking = true;
+    }
+    let decode = if utf16 {
+        Decode::Utf16Bom
+    } else if binary_looking {
+        Decode::AsciiOnly
+    } else {
+        Decode::Utf8WithoutNuls
+    };
+    Class {
+        executable: None,
+        nul_line,
+        binary_looking,
+        decode,
+    }
+}
+
+/// The text of a file as the rules read it.
+pub(crate) fn decode(decode: Decode, bytes: &[u8]) -> Cow<'_, str> {
+    match decode {
+        Decode::Utf8WithoutNuls => text_without_nuls(bytes),
+        Decode::AsciiOnly => Cow::Owned(ascii_only_text(bytes)),
+        Decode::Utf16Bom => Cow::Owned(decode_utf16_bom(bytes)),
+    }
 }
 
 /// Whether the file is meant to be read as a script: it has a script
@@ -769,12 +829,13 @@ fn known_binary_magic(bytes: &[u8]) -> bool {
 
 /// The file as `dash` and `bash` read it: the NUL bytes are dropped first and
 /// the rest is decoded, so a multi-byte character cut by a NUL is whole again.
-fn text_without_nuls(bytes: &[u8]) -> String {
+/// Borrowed exactly when the text is byte for byte the file.
+fn text_without_nuls(bytes: &[u8]) -> Cow<'_, str> {
     if !bytes.contains(&0) {
-        return String::from_utf8_lossy(bytes).into_owned();
+        return String::from_utf8_lossy(bytes);
     }
     let kept: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
-    String::from_utf8_lossy(&kept).into_owned()
+    Cow::Owned(String::from_utf8_lossy(&kept).into_owned())
 }
 
 /// Like `text_without_nuls`, but every non-ASCII byte becomes U+FFFD, so a
@@ -920,14 +981,14 @@ mod tests {
     }
 
     /// A file-level rule that reports what the engine handed to its check.
-    fn probe(ctx: &FileCtx<'_>) -> Vec<Hit> {
+    fn probe(ctx: &Ctx<'_>) -> Vec<Hit> {
         vec![Hit {
             line: 1,
             severity: ctx.base,
             reason: format!(
                 "path={} bytes={} issue={:?} helper={} truncated={}",
                 ctx.path,
-                ctx.bytes.len(),
+                ctx.bytes().len(),
                 ctx.issue,
                 ctx.repo.has_module("helper"),
                 ctx.truncated
@@ -935,7 +996,7 @@ mod tests {
         }]
     }
 
-    fn file_rule(glob: &str, check: FileCheck) -> Rule {
+    fn file_rule(glob: &str, check: Check) -> Rule {
         let mut globs = GlobSetBuilder::new();
         globs.add(
             GlobBuilder::new(glob)
@@ -1351,8 +1412,43 @@ mod tests {
     }
 
     #[test]
+    fn jsonc_checks_see_the_repository_index_and_the_decoded_text() {
+        fn probe_jsonc(ctx: &Ctx<'_>) -> Vec<Hit> {
+            vec![Hit {
+                line: 1,
+                severity: ctx.base,
+                reason: format!(
+                    "path={} helper={} truncated={} parsed={} text={:?}",
+                    ctx.path,
+                    ctx.repo.has_module("helper"),
+                    ctx.truncated,
+                    ctx.jsonc().is_ok(),
+                    ctx.text().trim_end(),
+                ),
+            }]
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "helper.py", b"");
+        // A jsonc check now gets the repository index like a file check does.
+        write(dir.path(), "a.json", b"{\"k\": 1}\n");
+        let mut rule = file_rule("**/*.json", probe_jsonc);
+        rule.matcher = Matcher::Jsonc(probe_jsonc);
+
+        let report = scan(dir.path(), &[rule], Limits::default());
+
+        assert_eq!(
+            explanations(&report),
+            [(
+                "a.json".to_string(),
+                r#"path=a.json helper=true truncated=false parsed=true text="{\"k\": 1}""#
+                    .to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn file_rule_explanations_are_cleaned_and_long_lists_are_capped() {
-        fn noisy(_: &FileCtx<'_>) -> Vec<Hit> {
+        fn noisy(_: &Ctx<'_>) -> Vec<Hit> {
             (1..=150)
                 .map(|line| Hit {
                     line,

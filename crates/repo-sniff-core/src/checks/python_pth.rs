@@ -25,7 +25,7 @@
 use std::borrow::Cow;
 
 use super::pylines::{is_python_space, python_lines};
-use super::{FileCtx, FileIssue, Hit};
+use super::{Ctx, FileIssue, Hit};
 use crate::finding::Severity;
 
 /// A recorded executable line is at most this many; the rest are counted.
@@ -100,7 +100,7 @@ const SETUPTOOLS_LINES: &str =
 /// The line of `pytest-cov.pth` (pytest-cov up to 6.2.1).
 const PYTEST_COV_LINE: &str = include_str!("../../data/honest-pth/pytest-cov.txt");
 
-pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
+pub fn check(ctx: &Ctx<'_>) -> Vec<Hit> {
     let name = ctx.path.rsplit('/').next().unwrap_or(ctx.path);
     let inert = inert_reason(name);
     let mut hits = Vec::new();
@@ -109,7 +109,7 @@ pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
         hits.push(issue_hit(issue, inert.is_some()));
     }
     // An oversized file was not read; a symlink may have brought its target.
-    if ctx.bytes.is_empty() {
+    if ctx.bytes().is_empty() {
         return hits;
     }
     hits.extend(analyse(ctx, name, inert));
@@ -153,11 +153,12 @@ struct ExecLine {
     honest_module: Option<Option<String>>,
 }
 
-fn analyse(ctx: &FileCtx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
+fn analyse(ctx: &Ctx<'_>, name: &str, inert: Option<&'static str>) -> Vec<Hit> {
     let mut hits = Vec::new();
 
     // A byte order mark is dropped only at the very start of the file.
-    let bytes = ctx.bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(ctx.bytes);
+    let raw = ctx.bytes();
+    let bytes = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw);
     let (text, lossy): (Cow<'_, str>, bool) = match std::str::from_utf8(bytes) {
         Ok(text) => (Cow::Borrowed(text), false),
         Err(_) => (String::from_utf8_lossy(bytes), true),
@@ -275,7 +276,7 @@ fn ordinary_hit(base: Severity, exec: &ExecLine) -> Hit {
 }
 
 /// A line of a file whose name and every line are known honest forms.
-fn honest_hit(ctx: &FileCtx<'_>, exec: &ExecLine) -> Hit {
+fn honest_hit(ctx: &Ctx<'_>, exec: &ExecLine) -> Hit {
     let module = exec.honest_module.clone().flatten();
     let (severity, detail) = match module {
         None => (Severity::Low, "it imports no module of its own".to_string()),
