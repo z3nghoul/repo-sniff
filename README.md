@@ -154,19 +154,16 @@ Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
 | 0 | Nothing reached the `--fail-on` threshold, and the scan was not inconclusive (files it did not analyze are listed in the report) |
 | 1 | The scan found something at or above the threshold |
 | 2 | The scan could not run (bad target, clone failure, wrong options) |
-| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, a nested `.git` repository was not read, or an executable binary (ELF, PE, Mach-O) was not reported by any rule |
+| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, a line of a large file was too long to analyze, a nested `.git` repository was not read, or an executable binary was not reported by any rule |
 
-Other binary files (images, archives, compressed test data) are read and listed
-as `binary format, ASCII rules only`, and do not change the status. A scan is never
-reported as clean when it could not vouch for what it looked at: the report ends
-with `Scan: INCONCLUSIVE` and says why, and the exit status is 3 even with
-`--fail-on none`. An executable binary is a HIGH finding (CRITICAL when its
-name hides it), so it fails the default threshold; with `--fail-on critical` or
-`--fail-on none` a plainly named executable is shown but no longer fails the
-scan. A Java class file whose header checks out is MEDIUM (bytecode a runtime
-loads), so it no longer fails the default threshold either. The `.git` folder at the root is listed as
-`git metadata, not analyzed` and does not change the status. This makes
-`repo-sniff scan . --fail-on high` usable as a CI check without mistaking "nothing found in what was read" for "safe".
+A scan that could not vouch for what it looked at is never reported as clean:
+the report ends with `Scan: INCONCLUSIVE`, says why, and the exit status is 3
+even with `--fail-on none`. Files that were read but not analyzed in depth
+(images, archives, the root `.git` folder) are listed and do not change the
+status. This makes `repo-sniff scan . --fail-on high` usable as a CI check
+without mistaking "nothing found in what was read" for "safe". How executables
+and other binary files affect the status is described in
+[docs/DETECTIONS.md](docs/DETECTIONS.md#exit-status-and-binary-files).
 
 ## Development
 
