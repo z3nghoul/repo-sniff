@@ -119,7 +119,20 @@ impl Report {
 /// All rules always run; hiding findings by severity, stage or family is
 /// left to the front end, so filters can change without rescanning.
 pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
-    let walked = walk::walk(root, limits);
+    scan_with_links(root, rules, limits, &HashSet::new())
+}
+
+/// Like `scan`, for a checkout whose symbolic links were written as plain
+/// files (see `walk::walk_with_links`): each path in `links` is treated as a
+/// link to the target its file holds, so the link rules and the checks that
+/// read through links see it as they would see a real one.
+pub fn scan_with_links(
+    root: &Path,
+    rules: &[Rule],
+    limits: Limits,
+    links: &HashSet<String>,
+) -> Report {
+    let walked = walk::walk_with_links(root, limits, links);
 
     // Where files are allowed to be looked up: everything the walk saw,
     // including files it did not hand over because of the size limit or

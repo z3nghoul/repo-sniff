@@ -9,6 +9,7 @@
 //! short list of variables it needs, with its configuration files replaced
 //! by an empty one, and with the risky settings overridden on the command line.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
@@ -62,10 +63,30 @@ const PASS_THROUGH: &[&str] = &[
     "CURL_CA_BUNDLE",
 ];
 
+/// The mode git records for a symbolic link in its index.
+const SYMLINK_MODE: &str = "120000";
+
+/// A finished clone: the files, which are deleted when this is dropped, and
+/// the paths the repository records as symbolic links.
+#[derive(Debug)]
+pub struct Checkout {
+    dir: TempDir,
+    /// Relative paths with `/`, as git lists them. The clone writes every
+    /// link as a plain file holding its target (`core.symlinks=false`), so
+    /// without this list the scan would read links as content.
+    pub symlinks: HashSet<String>,
+}
+
+impl Checkout {
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
 /// Shallow-clones `url` into a fresh temporary directory, at `git_ref` (a
 /// branch or tag) or at the repository's default branch.
 ///
-/// The returned `TempDir` deletes the checkout when it is dropped, so the
+/// The returned `Checkout` deletes the files when it is dropped, so the
 /// caller just has to keep it alive for as long as the scan runs.
 ///
 /// What this does to keep the clone from running anything:
@@ -77,7 +98,11 @@ const PASS_THROUGH: &[&str] = &[
 /// - hooks and templates are disabled, symlinks are written as plain files,
 ///   submodules are not fetched, objects are checked for corruption;
 /// - there are no interactive prompts.
-pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<TempDir> {
+///
+/// Afterwards the symbolic links are read from the clone's own index with
+/// `git ls-files`, run the same isolated way. The index was written by this
+/// clone, not taken from the remote, so it can be trusted.
+pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<Checkout> {
     validate(url, git_ref)?;
     clone_unchecked(url, git_ref, ALLOWED_PROTOCOLS, |name| {
         std::env::var_os(name)
@@ -102,7 +127,7 @@ fn clone_unchecked(
     git_ref: Option<&str>,
     protocols: &str,
     env: impl Fn(&str) -> Option<OsString>,
-) -> Result<TempDir> {
+) -> Result<Checkout> {
     let dir = tempfile::Builder::new()
         .prefix("repo-sniff-")
         .tempdir()
@@ -121,7 +146,7 @@ fn clone_unchecked(
 
     let output = Command::new("git")
         .env_clear()
-        .envs(git_environment(env, &global_config, protocols))
+        .envs(git_environment(&env, &global_config, protocols))
         .args(clone_args(url, git_ref, dir.path(), &hooks_dir))
         .output()
         .context("failed to run `git`; is it installed and on PATH?")?;
@@ -130,7 +155,41 @@ fn clone_unchecked(
         return Err(clone_failure(url, &String::from_utf8_lossy(&output.stderr)));
     }
 
-    Ok(dir)
+    let listed = Command::new("git")
+        .env_clear()
+        .envs(git_environment(&env, &global_config, protocols))
+        .current_dir(dir.path())
+        .args(["-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"])
+        .output()
+        .context("failed to run `git ls-files` in the clone")?;
+    if !listed.status.success() {
+        bail!(
+            "could not list the symbolic links of the clone: {}",
+            display_safe(
+                String::from_utf8_lossy(&listed.stderr).trim(),
+                MAX_GIT_ERROR_CHARS
+            )
+        );
+    }
+    let symlinks = symlinks_in_index_listing(&listed.stdout);
+
+    Ok(Checkout { dir, symlinks })
+}
+
+/// The paths of the symbolic links in `git ls-files --stage -z` output, whose
+/// entries are `<mode> <object> <stage>\t<path>` ended by NUL. Git paths are
+/// bytes; one that is not UTF-8 is kept with U+FFFD, which matches no file, so
+/// that link is read as a plain file, as before.
+fn symlinks_in_index_listing(listing: &[u8]) -> HashSet<String> {
+    listing
+        .split(|&b| b == 0)
+        .filter_map(|entry| {
+            let tab = entry.iter().position(|&b| b == b'\t')?;
+            let (info, path) = (&entry[..tab], &entry[tab + 1..]);
+            info.starts_with(format!("{SYMLINK_MODE} ").as_bytes())
+                .then(|| String::from_utf8_lossy(path).into_owned())
+        })
+        .collect()
 }
 
 /// The error for a failed clone. Both the URL and git's text are cleaned:
@@ -146,7 +205,7 @@ fn clone_failure(url: &str, stderr: &str) -> anyhow::Error {
 /// The environment git runs in: the allowed variables from `source`, plus the
 /// settings that isolate it from the machine's configuration.
 fn git_environment(
-    source: impl Fn(&str) -> Option<OsString>,
+    source: &impl Fn(&str) -> Option<OsString>,
     global_config: &Path,
     protocols: &str,
 ) -> Vec<(OsString, OsString)> {
@@ -288,7 +347,7 @@ mod tests {
     }
 
     fn environment(vars: &[(&str, &str)]) -> HashMap<String, String> {
-        git_environment(env_of(vars), Path::new("/empty-config"), "https")
+        git_environment(&env_of(vars), Path::new("/empty-config"), "https")
             .into_iter()
             .map(|(k, v)| {
                 (
@@ -728,6 +787,135 @@ mod tests {
         assert!(metadata.is_file(), "link should be a regular file");
         assert!(!metadata.file_type().is_symlink());
         assert_eq!(fs::read_to_string(&link).unwrap(), "file.txt");
+    }
+
+    #[test]
+    fn the_symbolic_links_of_the_clone_are_read_from_its_index() {
+        let source = source_repository();
+
+        let checkout =
+            clone_unchecked(&file_url(source.path()), None, "file", pass_through_all()).unwrap();
+
+        assert_eq!(checkout.symlinks, HashSet::from(["link".to_string()]));
+    }
+
+    /// A repository with the given regular files and symbolic links (written
+    /// into the index directly, so it works on every OS).
+    fn repository_with_links(files: &[(&str, &str)], links: &[(&str, &str)]) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let mut init = plain_git(path);
+        init.args(["init", "-q", "-b", "main"]);
+        run(init);
+        for (name, contents) in files {
+            let file = path.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, contents).unwrap();
+            let mut add = plain_git(path);
+            add.args(["add", name]);
+            run(add);
+        }
+        for (name, target) in links {
+            let mut hash = plain_git(path);
+            hash.args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            let mut child = hash.spawn().unwrap();
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), target.as_bytes()).unwrap();
+            let blob = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+            let mut link = plain_git(path);
+            link.args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{},{name}", blob.trim()),
+            ]);
+            run(link);
+        }
+        let mut commit = plain_git(path);
+        commit.args(["commit", "-q", "-m", "fixture"]);
+        run(commit);
+        dir
+    }
+
+    /// Links in a remote repository arrive as plain files, and the scan still
+    /// treats them as links (#67): one out of the repository is reported, and
+    /// a `.vscode/tasks.json` link is judged by the file it points at.
+    #[test]
+    fn links_of_a_clone_are_scanned_as_links() {
+        let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+        let source = repository_with_links(
+            &[("notes.txt", autorun), ("main.rs", "fn main() {}\n")],
+            &[
+                ("escape", "../../../../home/user/.ssh/id_rsa"),
+                (".vscode/tasks.json", "../notes.txt"),
+                ("docs/readme-link", "../main.rs"),
+            ],
+        );
+        let checkout =
+            clone_unchecked(&file_url(source.path()), None, "file", pass_through_all()).unwrap();
+        let rules = repo_sniff_core::builtin_rules().unwrap();
+
+        let report = repo_sniff_core::scan_with_links(
+            checkout.path(),
+            &rules,
+            repo_sniff_core::Limits::default(),
+            &checkout.symlinks,
+        );
+
+        let mut found: Vec<(String, String)> = report
+            .findings
+            .iter()
+            .map(|f| {
+                (
+                    f.file.to_string_lossy().replace('\\', "/"),
+                    f.rule_id.clone(),
+                )
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                (
+                    ".vscode/tasks.json".to_string(),
+                    "ide.vscode-folder-open-task".to_string()
+                ),
+                ("escape".to_string(), "repo.symlink-outside".to_string()),
+            ]
+        );
+        let links = report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, repo_sniff_core::SkipReason::Symlink { .. }))
+            .count();
+        assert_eq!(links, 3);
+        assert!(report.is_complete());
+
+        // Control: read without the list, the same clone has no link at all.
+        let blind =
+            repo_sniff_core::scan(checkout.path(), &rules, repo_sniff_core::Limits::default());
+        assert!(
+            !blind
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "repo.symlink-outside"),
+            "setup is broken: without the index the link should be a plain file"
+        );
+    }
+
+    #[test]
+    fn symlinks_are_picked_from_an_index_listing_by_mode() {
+        let listing = b"100644 0123 0\tfile.txt\0\
+                        120000 4567 0\tdir/link\0\
+                        100755 89ab 0\trun.sh\0\
+                        160000 cdef 0\tvendor/sub\0\
+                        120000 0123 0\tname with\ttab and spaces\0\
+                        garbage\0\0";
+        let mut links: Vec<String> = symlinks_in_index_listing(listing).into_iter().collect();
+        links.sort();
+        assert_eq!(links, ["dir/link", "name with\ttab and spaces"]);
+        assert!(symlinks_in_index_listing(b"").is_empty());
     }
 
     #[test]

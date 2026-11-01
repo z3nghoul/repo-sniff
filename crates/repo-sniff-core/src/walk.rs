@@ -10,10 +10,20 @@
 //! - oversized files and anything past the file-count limit are skipped,
 //!   and every skip is reported so nothing disappears silently.
 
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ignore::WalkBuilder;
+
+use crate::sanitize::to_slash;
+
+/// A recorded symbolic link (see `walk_with_links`) whose plain file is longer
+/// than this is listed without a target: no system resolves a link target
+/// that long (Linux allows 4095 bytes).
+pub const MAX_LINK_TARGET: u64 = 4096;
 
 /// Upper bounds for one scan.
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +148,17 @@ pub struct WalkResult {
 
 /// Lists the files under `root` that should be scanned.
 pub fn walk(root: &Path, limits: Limits) -> WalkResult {
+    walk_with_links(root, limits, &HashSet::new())
+}
+
+/// Like `walk`, for a checkout whose symbolic links were written as plain
+/// files: `links` holds the paths (relative, with `/`) that the repository
+/// records as links. A clone made with `core.symlinks=false` writes each link
+/// as a small file holding its target; such a file is listed as a symlink with
+/// that target, exactly as a real link would be, and is not read as content.
+/// Only a caller that made the checkout itself and read its git index should
+/// pass anything here.
+pub fn walk_with_links(root: &Path, limits: Limits, links: &HashSet<String>) -> WalkResult {
     // `.git` entries are not walked into, but each one is remembered so the
     // report can list it instead of dropping it.
     let git_entries = Arc::new(Mutex::new(Vec::new()));
@@ -191,6 +212,15 @@ pub fn walk(root: &Path, limits: Limits) -> WalkResult {
         if !file_type.is_file() {
             continue; // directories are walked into, not scanned
         }
+        if !links.is_empty() && links.contains(&to_slash(&path)) {
+            result.skipped.push(Skipped {
+                path,
+                reason: SkipReason::Symlink {
+                    target: recorded_link_target(entry.path()),
+                },
+            });
+            continue;
+        }
 
         let size = match entry.metadata() {
             Ok(metadata) => metadata.len(),
@@ -231,6 +261,29 @@ pub fn walk(root: &Path, limits: Limits) -> WalkResult {
     }
 
     result
+}
+
+/// The target of a link written as a plain file: its content, if it is short
+/// enough to be a target and, outside Unix, valid UTF-8 (git stores targets as
+/// bytes and Git for Windows writes them as UTF-8).
+fn recorded_link_target(path: &Path) -> Option<PathBuf> {
+    let file = File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LINK_TARGET + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_LINK_TARGET || bytes.contains(&0) {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes).ok().map(PathBuf::from)
+    }
 }
 
 fn relative(root: &Path, path: &Path) -> PathBuf {
@@ -327,6 +380,52 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn recorded_links_written_as_plain_files_are_listed_as_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "out", "../../etc/passwd");
+        write(dir.path(), "sub/in", "../main.rs");
+        write(
+            dir.path(),
+            "long",
+            &"a".repeat(MAX_LINK_TARGET as usize + 1),
+        );
+        write(dir.path(), "empty", "");
+        write(dir.path(), "main.rs", "fn main() {}");
+        let links: HashSet<String> = ["out", "sub/in", "long", "empty", "missing"]
+            .map(String::from)
+            .into();
+
+        let result = walk_with_links(dir.path(), Limits::default(), &links);
+
+        assert_eq!(result.files, [PathBuf::from("main.rs")]);
+        let mut skipped: Vec<(PathBuf, SkipReason)> = result
+            .skipped
+            .into_iter()
+            .map(|s| (s.path, s.reason))
+            .collect();
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        let link = |path: &str, target: Option<&str>| {
+            (
+                PathBuf::from(path),
+                SkipReason::Symlink {
+                    target: target.map(PathBuf::from),
+                },
+            )
+        };
+        assert_eq!(
+            skipped,
+            [
+                link("empty", None),
+                link("long", None),
+                link("out", Some("../../etc/passwd")),
+                link("sub/in", Some("../main.rs")),
+            ]
+        );
+        // Without the list, the same files are ordinary content.
+        assert_eq!(walk(dir.path(), Limits::default()).files.len(), 5);
     }
 
     #[test]
