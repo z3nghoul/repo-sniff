@@ -6,8 +6,8 @@
 //! line breaks do not matter and `\uXXXX` escapes are decoded, so the keys
 //! `"runOn"` and `"\u0072unOn"` are the same, exactly as VS Code sees them.
 //!
-//! Every value remembers the byte offset where it starts, so findings can still
-//! point at a line. Nesting depth is limited because the input is untrusted: a
+//! Every value remembers the byte range it was read from, so findings can still
+//! point at a line and a column. Nesting depth is limited because the input is untrusted: a
 //! file made of 100 000 `[` would otherwise overflow the stack.
 
 /// Deeper nesting than this is rejected instead of recursing further.
@@ -17,6 +17,9 @@ pub const MAX_DEPTH: usize = 64;
 pub struct Node {
     /// Byte offset of the first character of this value in the source text.
     pub offset: usize,
+    /// Byte offset just after the last character of this value (for a string,
+    /// after its closing quote).
+    pub end: usize,
     pub value: Value,
 }
 
@@ -180,7 +183,11 @@ impl Parser<'_> {
             Some(b'n') => self.literal("null")?,
             _ => return Err(self.error("expected a value")),
         };
-        Ok(Node { offset, value })
+        Ok(Node {
+            offset,
+            end: self.pos,
+            value,
+        })
     }
 
     fn literal(&mut self, word: &'static str) -> Result<Value, ParseError> {
@@ -396,6 +403,20 @@ mod tests {
         let root = parse(text).unwrap();
         let offset = root.get("a").unwrap().offset;
         assert_eq!(&text[offset..offset + 3], "\"x\"");
+    }
+
+    #[test]
+    fn nodes_remember_where_their_value_ends() {
+        let text = "{\"a\": \"x\\u0079\", \"b\": [1, 2], \"c\": -1.5e3}";
+        let root = parse(text).unwrap();
+        let span = |key| {
+            let node = root.get(key).unwrap();
+            &text[node.offset..node.end]
+        };
+        assert_eq!(span("a"), "\"x\\u0079\"");
+        assert_eq!(span("b"), "[1, 2]");
+        assert_eq!(span("c"), "-1.5e3");
+        assert_eq!((root.offset, root.end), (0, text.len()));
     }
 
     #[test]

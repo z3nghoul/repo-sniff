@@ -1,14 +1,16 @@
 //! Running rules over a repository.
 
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-use crate::checks::{FileCheck, FileCtx, FileIssue, RepoIndex};
+use crate::checks::{Check, Ctx, Decode, FileIssue, HEAD_LEN, Hit, RepoIndex, TextSpan, Views};
 use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
-use crate::sanitize::{display_safe, to_slash};
+use crate::sanitize::{display_safe, snippet_safe, to_slash};
 use crate::walk::{self, Limits, SkipReason, Skipped};
 use regex::Regex;
 
@@ -40,6 +42,19 @@ const MAX_FINDINGS_PER_FILE_CHECK: usize = 100;
 /// A line rule lists at most this many findings per file; the rest are only
 /// counted (`Report::unlisted`), so a hostile file cannot flood the report.
 const MAX_LINE_FINDINGS_PER_RULE: usize = 100;
+
+/// A snippet shows at most this many characters of its line.
+const MAX_SNIPPET_CHARS: usize = 120;
+
+/// When a match is further into a long line, its snippet starts this many
+/// characters before it, so the match is always in view.
+const SNIPPET_LEAD_CHARS: usize = 40;
+
+/// Column, span and snippet are worked out for at most this many hits of one
+/// check in one file; the rest keep their line. Locating a hit looks back to
+/// the start of its line, so without a cap a hostile file with many hits on one
+/// very long line would make that quadratic.
+const MAX_LOCATED_HITS: usize = 100;
 
 /// Added to findings from a file that has NUL bytes and does not read as text.
 const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
@@ -122,10 +137,23 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             ),
     );
     let regular_files: HashSet<String> = walked.files.iter().map(|path| to_slash(path)).collect();
-    let file_rules: Vec<(&Rule, FileCheck)> = rules
+    // The same paths by their lowercase form, for link targets spelled in
+    // another case (NTFS and APFS ignore case by default).
+    let lowercase_files: HashMap<String, String> = regular_files
+        .iter()
+        .map(|path| (path.to_lowercase(), path.clone()))
+        .collect();
+    let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
             Matcher::File(check) => Some((rule, check)),
+            _ => None,
+        })
+        .collect();
+    let head_rules: Vec<(&Rule, Check)> = rules
+        .iter()
+        .filter_map(|rule| match rule.matcher {
+            Matcher::Head(check) => Some((rule, check)),
             _ => None,
         })
         .collect();
@@ -133,7 +161,16 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         index: &index,
         truncated: walked.truncated,
         file_rules: &file_rules,
+        head_rules: &head_rules,
     };
+    // Files over the size limit that the walk itself listed. Head rules see
+    // them by name; files read as a stream get their head rules there.
+    let walk_too_large: HashSet<PathBuf> = walked
+        .skipped
+        .iter()
+        .filter(|entry| matches!(entry.reason, SkipReason::TooLarge { .. }))
+        .map(|entry| entry.path.clone())
+        .collect();
 
     let mut report = Report {
         truncated: walked.truncated,
@@ -162,6 +199,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                 rules,
                 &limits,
                 has_file_rule(&slash_path),
+                &env,
                 &mut report.unlisted,
             );
             report.findings.extend(streamed.findings);
@@ -183,53 +221,43 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             }
         };
 
-        // File-level rules go first and see the raw bytes, so a file is judged
-        // the way its consumer reads it, even if it looks like a binary here.
-        let checked = env.run_file_checks(relative, &slash_path, &bytes, None);
+        let class = classify(&slash_path, &bytes);
+        let views = Views::new(&bytes, class.decode);
+
+        // File-level rules see the raw bytes whatever the classification says,
+        // so a file is judged the way its consumer reads it, even if it looks
+        // like a binary here.
+        let checked = env.run_file_checks(relative, &slash_path, &views, None);
         report.findings.extend(checked.findings);
+        let headed = env.run_head_checks(
+            relative,
+            &slash_path,
+            head_of(&bytes),
+            None,
+            class.executable,
+            Some(bytes.len() as u64),
+        );
+        report.findings.extend(headed.findings);
 
-        let script = is_script(&slash_path, &bytes);
-        let nul_line = script.then(|| first_nul_line(&bytes)).flatten();
-        let mut utf16_text = None;
-        let mut binary_looking = false;
-
-        if looks_binary(&bytes) {
-            // An executable is listed even when a file rule looked at it, and
-            // even when its name says script: the rule saw the bytes of a
-            // `.pth` or `.start` file, not the code of the program.
-            if let Some(format) = executable_format(&bytes) {
-                skipped.push(Skipped {
-                    path: relative.clone(),
-                    reason: SkipReason::Executable { format },
-                });
-                if checked.examined {
-                    report.files_scanned += 1;
-                }
-                continue;
+        // An executable is always listed, since nothing analyzes its code. It
+        // makes the scan inconclusive unless a rule that names executables
+        // reported it; a finding of any other rule does not count, nor does a
+        // file rule that looked at it (that rule saw the bytes of a `.pth` or
+        // `.start` file, not the code of the program).
+        if let Some(format) = class.executable {
+            skipped.push(Skipped {
+                path: relative.clone(),
+                reason: SkipReason::Executable {
+                    format,
+                    reported: headed.named_executable,
+                },
+            });
+            if checked.examined {
+                report.files_scanned += 1;
             }
-            // A script with a NUL byte is still a script, and the NUL is
-            // reported by its own rule (`nul_line`).
-            if !script {
-                if has_utf16_bom(&bytes) && has_script_extension(&slash_path) {
-                    // Windows PowerShell and WSH read UTF-16 scripts.
-                    utf16_text = Some(decode_utf16_bom(&bytes));
-                } else if known_binary_magic(&bytes) {
-                    binary_looking = true;
-                }
-            }
+            continue;
         }
-        // Any other file with a NUL byte that does not read as text, and any
-        // file with a known binary header, may still be sourced by a shell:
-        // `dash` drops the NULs and runs the rest, whatever else is in the
-        // file (`GIF89a=1` is a valid assignment). So it goes to the line
-        // rules too, but only as ASCII (see `ascii_only_text`), because on
-        // data such as icons and audio a rule that looks for a non-ASCII
-        // character matches by chance. It is listed, so the report shows
-        // that its binary contents were not looked at.
-        if !script && utf16_text.is_none() && bytes.contains(&0) && !nul_file_is_text(&bytes) {
-            binary_looking = true;
-        }
-        if binary_looking {
+        if class.binary_looking {
             skipped.push(Skipped {
                 path: relative.clone(),
                 reason: SkipReason::Binary,
@@ -237,20 +265,16 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         }
 
         report.files_scanned += 1;
-        let text = match utf16_text {
-            Some(text) => text,
-            None if binary_looking => ascii_only_text(&bytes),
-            None => text_without_nuls(&bytes),
-        };
         let mut found = scan_text(
             relative,
             &slash_path,
-            &text,
-            nul_line,
+            &views,
+            class.nul_line,
+            &env,
             rules,
             &mut report.unlisted,
         );
-        if binary_looking {
+        if class.binary_looking {
             for finding in &mut found {
                 finding.explanation.push_str(BINARY_LOOKING_NOTE);
             }
@@ -264,19 +288,70 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
     for entry in &walk_skips {
         let slash_path = to_slash(&entry.path);
         let checked = match &entry.reason {
-            SkipReason::TooLarge { size } => env.run_file_checks(
-                &entry.path,
-                &slash_path,
-                &[],
-                Some(FileIssue::TooLarge { size: *size }),
-            ),
+            SkipReason::TooLarge { size } => {
+                let issue = FileIssue::TooLarge { size: *size };
+                if walk_too_large.contains(&entry.path) {
+                    // Only the first bytes are read, for the head rules (and
+                    // a PE signature, see `native_format`).
+                    let path = root.join(&entry.path);
+                    let (head, executable, size) = read_head(&path).unwrap_or_default();
+                    let headed = env.run_head_checks(
+                        &entry.path,
+                        &slash_path,
+                        &head,
+                        Some(issue.clone()),
+                        executable,
+                        size,
+                    );
+                    report.findings.extend(headed.findings);
+                }
+                env.run_file_checks(
+                    &entry.path,
+                    &slash_path,
+                    &Views::new(&[], Decode::Utf8WithoutNuls),
+                    Some(issue),
+                )
+            }
             SkipReason::Symlink { target } => {
-                let bytes =
-                    symlink_target_bytes(root, &entry.path, target.as_deref(), &regular_files);
+                let target_text = target
+                    .as_deref()
+                    .map(|target| target.to_string_lossy().into_owned());
+                let resolved = target_text
+                    .as_deref()
+                    .and_then(|target| resolve_link_text(&slash_path, target));
+                // Head rules get at most the first bytes of a regular file the
+                // link points at inside the repository; there may be any number
+                // of links, so nothing more is read for them.
+                let (head, executable, size) = target_text
+                    .as_deref()
+                    .and_then(|target| {
+                        link_target_file(&slash_path, target, &regular_files, &lowercase_files)
+                    })
+                    .and_then(|path| read_head(&root.join(path)))
+                    .unwrap_or_default();
                 let issue = FileIssue::Symlink {
-                    target: target.as_deref().map(to_slash),
+                    target: target_text,
+                    resolved,
                 };
-                env.run_file_checks(&entry.path, &slash_path, &bytes, Some(issue))
+                let headed = env.run_head_checks(
+                    &entry.path,
+                    &slash_path,
+                    &head,
+                    Some(issue.clone()),
+                    executable,
+                    size,
+                );
+                report.findings.extend(headed.findings);
+                // File rules get the whole target, as before, and only when one
+                // selects the link.
+                let bytes = if has_file_rule(&slash_path) {
+                    symlink_target_bytes(root, &entry.path, target.as_deref(), &regular_files)
+                } else {
+                    Vec::new()
+                };
+                // Read the way the target would be read under the link's name.
+                let views = Views::new(&bytes, classify(&slash_path, &bytes).decode);
+                env.run_file_checks(&entry.path, &slash_path, &views, Some(issue))
             }
             _ => continue,
         };
@@ -294,58 +369,90 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
 struct Env<'a> {
     index: &'a RepoIndex,
     truncated: bool,
-    file_rules: &'a [(&'a Rule, FileCheck)],
+    file_rules: &'a [(&'a Rule, Check)],
+    head_rules: &'a [(&'a Rule, Check)],
 }
 
-/// The outcome of offering one file to the file-level rules.
+/// The outcome of offering one file to the file-level or head rules.
 struct Checked {
-    /// True if at least one file-level rule applies to this path.
+    /// True if at least one of those rules applies to this path.
     examined: bool,
+    /// True if a rule that names executables (`Rule::names_executables`)
+    /// reported the file.
+    named_executable: bool,
     findings: Vec<Finding>,
 }
 
+/// The first bytes of a file, as head rules see them.
+fn head_of(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(HEAD_LEN)]
+}
+
 impl Env<'_> {
-    fn run_file_checks(
+    fn run_file_checks<'v>(
+        &'v self,
+        relative: &Path,
+        slash_path: &'v str,
+        views: &'v Views<'v>,
+        issue: Option<FileIssue>,
+    ) -> Checked {
+        self.run_checks(self.file_rules, relative, slash_path, views, issue)
+    }
+
+    /// Offers a file's name and first bytes to the head rules. `head` is
+    /// empty for a file that was not read.
+    fn run_head_checks(
         &self,
         relative: &Path,
         slash_path: &str,
-        bytes: &[u8],
+        head: &[u8],
+        issue: Option<FileIssue>,
+        executable: Option<&'static str>,
+        size: Option<u64>,
+    ) -> Checked {
+        let views = Views::new(head, classify(slash_path, head).decode)
+            .with_executable(executable)
+            .with_size(size);
+        self.run_checks(self.head_rules, relative, slash_path, &views, issue)
+    }
+
+    fn run_checks<'v>(
+        &'v self,
+        rules: &'v [(&'v Rule, Check)],
+        relative: &Path,
+        slash_path: &'v str,
+        views: &'v Views<'v>,
         issue: Option<FileIssue>,
     ) -> Checked {
         let mut checked = Checked {
             examined: false,
+            named_executable: false,
             findings: Vec::new(),
         };
-        for (rule, check) in self.file_rules {
+        let own_bytes = issue.is_none();
+        for (rule, check) in rules {
             if !rule.applies_to(slash_path) {
                 continue;
             }
             checked.examined = true;
-            let ctx = FileCtx {
-                path: slash_path,
-                bytes,
-                issue: issue.clone(),
-                repo: self.index,
-                truncated: self.truncated,
-                base: rule.severity,
-            };
+            let ctx = Ctx::new(
+                slash_path,
+                issue.clone(),
+                self.index,
+                self.truncated,
+                rule.severity,
+                views,
+            );
             let mut hits = check(&ctx);
+            checked.named_executable |= rule.names_executables && !hits.is_empty();
             let unlisted = hits.len().saturating_sub(MAX_FINDINGS_PER_FILE_CHECK);
             hits.truncate(MAX_FINDINGS_PER_FILE_CHECK);
 
             let start = checked.findings.len();
-            for hit in hits {
-                checked.findings.push(Finding {
-                    rule_id: rule.id.clone(),
-                    severity: hit.severity,
-                    stage: rule.stage,
-                    attack: rule.attack.clone(),
-                    file: relative.to_path_buf(),
-                    line: hit.line,
-                    // The reason may quote the scanned file, so it is cleaned
-                    // before it can reach a terminal.
-                    explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
-                });
+            for (index, hit) in hits.into_iter().enumerate() {
+                checked
+                    .findings
+                    .push(hit_finding(rule, relative, hit, index, views, own_bytes));
             }
             if unlisted > 0
                 && let Some(last) = checked.findings[start..].last_mut()
@@ -375,6 +482,124 @@ fn symlink_target_bytes(
         return Vec::new();
     }
     fs::read(root.join(resolved)).unwrap_or_default()
+}
+
+/// The first `HEAD_LEN` bytes of a file, read without reading the rest, its
+/// native executable format (see `native_format`) and its size.
+type Head = (Vec<u8>, Option<&'static str>, Option<u64>);
+
+fn read_head(path: &Path) -> Option<Head> {
+    let file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut head = Vec::new();
+    file.take(HEAD_LEN as u64).read_to_end(&mut head).ok()?;
+    let executable = native_format(&head, Some((path, size)));
+    Some((head, executable, Some(size)))
+}
+
+/// The Windows loader accepts a PE header up to this far into the file.
+const MAX_PE_OFFSET: u64 = 256 * 1024 * 1024;
+
+/// The native executable format of a file, from its first bytes. For an `MZ`
+/// header, the `PE\0\0` signature where `e_lfanew` (offset 0x3C) points
+/// decides, whatever else the bytes hold: a PE needs no NUL byte in its
+/// first 8 KiB, since every DOS header field but those two can be anything,
+/// and its header can lie up to 256 MiB into the file. When the signature is
+/// past `head`, `file` (the path and the size) lets one 4-byte read check
+/// it. When it cannot be checked at all, binary content starting with `MZ`
+/// still counts, as before. Other formats need binary content (a NUL byte
+/// in the first 8 KiB, which their headers always have).
+pub(crate) fn native_format(head: &[u8], file: Option<(&Path, u64)>) -> Option<&'static str> {
+    if !head.starts_with(b"MZ") {
+        return if looks_binary(head) {
+            executable_format(head)
+        } else {
+            None
+        };
+    }
+    if let Some(&[a, b, c, d]) = head.get(0x3C..0x40) {
+        let offset = u64::from(u32::from_le_bytes([a, b, c, d]));
+        let in_head = usize::try_from(offset)
+            .ok()
+            .and_then(|start| head.get(start..start.checked_add(4)?));
+        if let Some(signature) = in_head {
+            return (signature == b"PE\0\0").then_some("PE");
+        }
+        if let Some((path, size)) = file
+            && offset < MAX_PE_OFFSET
+            && offset + 4 <= size
+            && let Some(signature) = read_at(path, offset)
+        {
+            return (signature == *b"PE\0\0").then_some("PE");
+        }
+    }
+    looks_binary(head).then_some("PE")
+}
+
+/// Four bytes of a file at `offset`, or `None` if they cannot be read.
+fn read_at(path: &Path, offset: u64) -> Option<[u8; 4]> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = [0; 4];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// Resolves a symbolic link's target as text, whatever system the scan runs
+/// on, and returns the repository path (with `/`) it points at only when it
+/// stays inside the repository both the way Unix reads it (only `/`
+/// separates) and the way Windows reads it (`/` and `\` separate; a drive
+/// letter such as `C:`, or a UNC or device prefix such as `\\host`,
+/// `\\?\` or `\??\`, is absolute). `None` when either reading is absolute
+/// or climbs above the root. Of the two inside paths, the one for the system
+/// the scan runs on is returned.
+fn resolve_link_text(link: &str, target: &str) -> Option<String> {
+    let unix = resolve_link_with(link, target, &['/'])?;
+    let windows = resolve_link_with(link, target, &['/', '\\'])?;
+    Some(if cfg!(windows) { windows } else { unix })
+}
+
+/// The regular file in the repository a link points at, for reading its
+/// head: the Unix reading of the target, then the Windows one, each also
+/// looked up without case. `None` when neither names a regular file (a
+/// chain through another link, a link to a folder, or a target outside).
+fn link_target_file(
+    link: &str,
+    target: &str,
+    regular_files: &HashSet<String>,
+    lowercase_files: &HashMap<String, String>,
+) -> Option<String> {
+    [&['/'][..], &['/', '\\'][..]]
+        .into_iter()
+        .filter_map(|separators| resolve_link_with(link, target, separators))
+        .find_map(|path| {
+            if regular_files.contains(&path) {
+                Some(path)
+            } else {
+                lowercase_files.get(&path.to_lowercase()).cloned()
+            }
+        })
+}
+
+fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<String> {
+    let bytes = target.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if target.starts_with(['/', '\\']) || drive {
+        return None;
+    }
+    let mut parts: Vec<&str> = link.split('/').collect();
+    parts.pop();
+    for part in target.split(separators) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Resolves `target` relative to the directory of `link`, purely lexically.
@@ -424,16 +649,33 @@ impl<'a> LineScanner<'a> {
         self.rules.is_empty()
     }
 
-    fn feed(&mut self, relative: &Path, line_number: usize, line: &str) {
+    /// `file_offset` is where the line starts in the file, given only when
+    /// the file's text is its bytes exactly, so a span is never wrong;
+    /// `column_exact` says whether a count of characters is a column (see
+    /// `Views::columns_are_exact`).
+    fn feed(
+        &mut self,
+        relative: &Path,
+        line_number: usize,
+        line: &str,
+        file_offset: Option<usize>,
+        column_exact: bool,
+    ) {
         for (index, (rule, pattern)) in self.rules.iter().enumerate() {
-            if !pattern.is_match(line) {
-                continue;
-            }
             if self.listed[index] == MAX_LINE_FINDINGS_PER_RULE {
-                self.hidden[index] += 1;
+                if pattern.is_match(line) {
+                    self.hidden[index] += 1;
+                }
                 continue;
             }
+            // `find` matches exactly when `is_match` does, and says where.
+            let Some(found) = pattern.find(line) else {
+                continue;
+            };
             self.listed[index] += 1;
+            let span = file_offset.map(|start| start + found.start()..start + found.end());
+            let location =
+                Location::in_line(line, found.start(), line_number == 1, column_exact, span);
             self.findings.push(Finding {
                 rule_id: rule.id.clone(),
                 severity: rule.severity,
@@ -441,6 +683,9 @@ impl<'a> LineScanner<'a> {
                 attack: rule.attack.clone(),
                 file: relative.to_path_buf(),
                 line: line_number,
+                column: location.column,
+                span: location.span,
+                snippet: location.snippet,
                 explanation: rule.description.clone(),
             });
         }
@@ -487,6 +732,7 @@ fn scan_streamed(
     rules: &[Rule],
     limits: &Limits,
     file_rule_applies: bool,
+    env: &Env<'_>,
     unlisted: &mut Vec<Unlisted>,
 ) -> Streamed {
     let mut out = Streamed::default();
@@ -505,6 +751,19 @@ fn scan_streamed(
         out.skipped.push(unreadable(err));
         return out;
     }
+    // Head rules need only the name and the first bytes, so a large file is
+    // no way around them, and they never make it count as too large.
+    let executable = native_format(&head, Some((&path, size)));
+    let headed = env.run_head_checks(
+        relative,
+        slash_path,
+        head_of(&head),
+        None,
+        executable,
+        Some(size),
+    );
+    let named_executable = headed.named_executable;
+    out.findings.extend(headed.findings);
     let applicable: Vec<&Rule> = rules
         .iter()
         .filter(|rule| rule.applies_to(slash_path))
@@ -519,15 +778,17 @@ fn scan_streamed(
     };
     // A rule that selects the file by name gets to see it as too large (that
     // happens after the walk), executable or not, as for a file over the limit.
-    if looks_binary(&head)
-        && let Some(format) = executable_format(&head)
-    {
+    if let Some(format) = executable {
         if whole_file_rule {
             out.skipped.push(too_large);
         }
+        // As for a file read whole.
         out.skipped.push(Skipped {
             path: relative.to_path_buf(),
-            reason: SkipReason::Executable { format },
+            reason: SkipReason::Executable {
+                format,
+                reported: named_executable,
+            },
         });
         return out;
     }
@@ -567,9 +828,15 @@ fn scan_streamed(
         });
     }
     let nul_line = if script { probe.first_nul_line } else { None };
+    let identical = !binary_looking && probe.nuls == 0 && probe.is_text();
 
     for rule in &applicable {
         if let (Matcher::NulByte, Some(line)) = (&rule.matcher, nul_line) {
+            // As for a file read whole (`nul_span`).
+            let span = probe
+                .first_nul_offset
+                .and_then(|offset| usize::try_from(offset).ok())
+                .map(|offset| offset..offset + 1);
             out.findings.push(Finding {
                 rule_id: rule.id.clone(),
                 severity: rule.severity,
@@ -577,6 +844,9 @@ fn scan_streamed(
                 attack: rule.attack.clone(),
                 file: relative.to_path_buf(),
                 line,
+                column: None,
+                span,
+                snippet: None,
                 explanation: rule.description.clone(),
             });
         }
@@ -595,12 +865,15 @@ fn scan_streamed(
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut number = 0;
+        // Where the next line starts in the file.
+        let mut offset: u64 = 0;
         loop {
             line.clear();
             let cap = limits.max_line_size as u64 + 2;
+            let line_start = offset;
             match (&mut reader).take(cap).read_until(b'\n', &mut line) {
                 Ok(0) => break,
-                Ok(_) => {}
+                Ok(read) => offset += read as u64,
                 Err(err) => {
                     out.skipped.push(unreadable(err));
                     break;
@@ -621,11 +894,18 @@ fn scan_streamed(
                 }
             }
             let text = if binary_looking {
-                ascii_only_text(&line)
+                Cow::Owned(ascii_only_text(&line))
             } else {
                 text_without_nuls(&line)
             };
-            lines.feed(relative, number, &text);
+            // As for a file read whole, a span is given only when the whole
+            // file is its own text: no NUL bytes, valid UTF-8, not read as ASCII.
+            let file_offset = if identical {
+                usize::try_from(line_start).ok()
+            } else {
+                None
+            };
+            lines.feed(relative, number, &text, file_offset, identical);
         }
     }
     let mut found = lines.finish(relative, unlisted);
@@ -642,11 +922,12 @@ fn scan_streamed(
 /// Runs line, JSONC and other text rules over one file's text. `relative` is
 /// the path shown in findings; `slash_path` is matched against each rule's
 /// `files` globs.
-fn scan_text(
+fn scan_text<'v>(
     relative: &Path,
-    slash_path: &str,
-    text: &str,
+    slash_path: &'v str,
+    views: &'v Views<'v>,
     nul_line: Option<usize>,
+    env: &'v Env<'v>,
     rules: &[Rule],
     unlisted: &mut Vec<Unlisted>,
 ) -> Vec<Finding> {
@@ -658,10 +939,18 @@ fn scan_text(
         return Vec::new();
     }
 
+    let text = views.text();
+    let identical = views.text_is_bytes();
+    let column_exact = views.columns_are_exact();
     let mut findings = Vec::new();
     let mut lines = LineScanner::new(&applicable);
     for (index, line) in text.lines().enumerate() {
-        lines.feed(relative, index + 1, line);
+        // `lines` hands out slices of `text`, so the distance between the
+        // pointers is where the line starts.
+        let file_offset = identical
+            .then(|| (line.as_ptr() as usize).checked_sub(text.as_ptr() as usize))
+            .flatten();
+        lines.feed(relative, index + 1, line, file_offset, column_exact);
     }
     findings.extend(lines.finish(relative, unlisted));
     for rule in applicable {
@@ -669,22 +958,20 @@ fn scan_text(
             // Done above, in one pass over the lines.
             Matcher::LineRegex(_) => {}
             Matcher::Jsonc(check) => {
-                for hit in check(slash_path, text, rule.severity) {
-                    findings.push(Finding {
-                        rule_id: rule.id.clone(),
-                        severity: hit.severity,
-                        stage: rule.stage,
-                        attack: rule.attack.clone(),
-                        file: relative.to_path_buf(),
-                        line: hit.line,
-                        // The reason may quote the scanned file, so it is
-                        // cleaned before it can reach a terminal.
-                        explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
-                    });
+                let ctx = Ctx::new(
+                    slash_path,
+                    None,
+                    env.index,
+                    env.truncated,
+                    rule.severity,
+                    views,
+                );
+                for (index, hit) in check(&ctx).into_iter().enumerate() {
+                    findings.push(hit_finding(rule, relative, hit, index, views, true));
                 }
             }
-            // File-level rules already ran on the raw bytes.
-            Matcher::File(_) => {}
+            // File-level and head rules already ran on the raw bytes.
+            Matcher::File(_) | Matcher::Head(_) => {}
             Matcher::NulByte => {
                 if let Some(line) = nul_line {
                     findings.push(Finding {
@@ -694,6 +981,9 @@ fn scan_text(
                         attack: rule.attack.clone(),
                         file: relative.to_path_buf(),
                         line,
+                        column: None,
+                        span: nul_span(views.bytes()),
+                        snippet: None,
                         explanation: rule.description.clone(),
                     });
                 }
@@ -701,6 +991,249 @@ fn scan_text(
         }
     }
     findings
+}
+
+/// Turns what a check reported into a finding. `own_bytes` is false for an
+/// entry the walk did not hand over (an oversized file, or a symbolic link
+/// whose bytes are its target's): it has no text of its own to point into, so
+/// its findings get no location.
+fn hit_finding(
+    rule: &Rule,
+    relative: &Path,
+    hit: Hit,
+    index: usize,
+    views: &Views<'_>,
+    own_bytes: bool,
+) -> Finding {
+    let location = match &hit.span {
+        Some(TextSpan(span)) if own_bytes && index < MAX_LOCATED_HITS => {
+            locate_hit(views, hit.line, span)
+        }
+        _ => Location::default(),
+    };
+    Finding {
+        rule_id: rule.id.clone(),
+        severity: hit.severity,
+        stage: rule.stage,
+        attack: rule.attack.clone(),
+        file: relative.to_path_buf(),
+        line: hit.line,
+        column: location.column,
+        span: location.span,
+        snippet: location.snippet,
+        // The reason may quote the scanned file, so it is cleaned before it can
+        // reach a terminal.
+        explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
+    }
+}
+
+/// Where a check's span is, if it holds up: a span that is reversed, out of
+/// bounds or splits a character is dropped, and so is one that is not on the
+/// line the check reported. A check that splits lines its own way (the `.pth`
+/// rules split on more than `\n`) could otherwise get a column and a snippet
+/// from another line than the one it names.
+fn locate_hit(views: &Views<'_>, line: usize, span: &Range<usize>) -> Location {
+    let text = views.text();
+    if span.start > span.end
+        || !text.is_char_boundary(span.start)
+        || !text.is_char_boundary(span.end)
+        || views.line_of(span.start) != line
+    {
+        return Location::default();
+    }
+    let identical = views.text_is_bytes();
+    Location::in_text(text, span, views.columns_are_exact(), identical)
+}
+
+/// Where in its line a finding points.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Location {
+    column: Option<usize>,
+    span: Option<Range<usize>>,
+    snippet: Option<String>,
+}
+
+impl Location {
+    /// `line` is a whole line without its terminator and `at` a byte offset in
+    /// it. `column_exact` says whether a count of characters in the line is a
+    /// column (see `Views::columns_are_exact`); on the first line of a file a
+    /// byte order mark is not counted. `span` is passed through.
+    fn in_line(
+        line: &str,
+        at: usize,
+        first_line: bool,
+        column_exact: bool,
+        span: Option<Range<usize>>,
+    ) -> Location {
+        let (line, at) = match line.strip_prefix('\u{feff}') {
+            Some(rest) if first_line => (rest, at.saturating_sub('\u{feff}'.len_utf8())),
+            _ => (line, at),
+        };
+        let Some(before) = line.get(..at.min(line.len())) else {
+            return Location {
+                span,
+                ..Location::default()
+            };
+        };
+        Location {
+            column: column_exact.then(|| before.chars().count() + 1),
+            span,
+            snippet: Some(snippet(line, before.len())),
+        }
+    }
+
+    /// `span` is a valid byte range in `text`; `identical` says whether `text`
+    /// is the file byte for byte, so the range is also the file's.
+    fn in_text(text: &str, span: &Range<usize>, column_exact: bool, identical: bool) -> Location {
+        let line_start = text[..span.start].rfind('\n').map_or(0, |at| at + 1);
+        let line_end = text[span.start..]
+            .find('\n')
+            .map_or(text.len(), |at| span.start + at);
+        let line = &text[line_start..line_end];
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        Location::in_line(
+            line,
+            span.start - line_start,
+            line_start == 0,
+            column_exact,
+            identical.then(|| span.clone()),
+        )
+    }
+}
+
+/// The byte range of the first NUL byte of a file. A NUL finding gets only
+/// this: the byte is exact, while a column in text that has the NULs dropped
+/// would point next to it.
+fn nul_span(bytes: &[u8]) -> Option<Range<usize>> {
+    let at = bytes.iter().position(|&b| b == 0)?;
+    Some(at..at + 1)
+}
+
+/// A short, printable piece of `line` around byte offset `at`. Leading
+/// whitespace is dropped and tabs become spaces. Before the match, at most
+/// `SNIPPET_LEAD_CHARS` characters of output are kept, counted after escaping,
+/// so a run of escaped characters cannot push the match out of view; the match
+/// and what follows fill the rest of `MAX_SNIPPET_CHARS`. `...` marks each
+/// cut. Only the window is ever escaped, never the whole line.
+fn snippet(line: &str, at: usize) -> String {
+    let body = line.trim_start();
+    let at = at.saturating_sub(line.len() - body.len()).min(body.len());
+    let Some((before, after)) = body.split_at_checked(at) else {
+        return String::new();
+    };
+    let shown = |c: char| {
+        let mut buffer = [0; 4];
+        let text = if c == '\t' {
+            " "
+        } else {
+            &*c.encode_utf8(&mut buffer)
+        };
+        snippet_safe(text, 16)
+    };
+
+    let mut lead = Vec::new();
+    let mut used = 0;
+    let mut cut = false;
+    for c in before.chars().rev() {
+        let piece = shown(c);
+        let cost = piece.chars().count();
+        if used + cost > SNIPPET_LEAD_CHARS {
+            cut = true;
+            break;
+        }
+        used += cost;
+        lead.push(piece);
+    }
+
+    let mut out = String::new();
+    if cut {
+        out.push_str("...");
+    }
+    for piece in lead.iter().rev() {
+        out.push_str(piece);
+    }
+    let tail: String = after
+        .chars()
+        .take(MAX_SNIPPET_CHARS + 1)
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .collect();
+    out.push_str(&snippet_safe(tail.trim_end(), MAX_SNIPPET_CHARS - used));
+    out
+}
+
+/// What the scanner decides about a file before any rule runs.
+struct Class {
+    /// The executable format, if the file is one. Such a file is listed and
+    /// not read by the text rules.
+    executable: Option<&'static str>,
+    /// The 1-based line of the first NUL byte in a script.
+    nul_line: Option<usize>,
+    /// Data with NUL bytes that does not read as text, or with a known binary
+    /// header: listed, and read by the line rules as ASCII only.
+    binary_looking: bool,
+    /// How the text rules read the file.
+    decode: Decode,
+}
+
+/// Classifies a file from its path and content.
+fn classify(slash_path: &str, bytes: &[u8]) -> Class {
+    let script = is_script(slash_path, bytes);
+    let nul_line = script.then(|| first_nul_line(bytes)).flatten();
+    let mut utf16 = false;
+    let mut binary_looking = false;
+
+    if let Some(format) = native_format(bytes, None) {
+        return Class {
+            executable: Some(format),
+            nul_line,
+            binary_looking: false,
+            decode: Decode::AsciiOnly,
+        };
+    }
+    if looks_binary(bytes) {
+        // A script with a NUL byte is still a script, and the NUL is reported
+        // by its own rule (`nul_line`).
+        if !script {
+            if has_utf16_bom(bytes) && has_script_extension(slash_path) {
+                // Windows PowerShell and WSH read UTF-16 scripts.
+                utf16 = true;
+            } else if known_binary_magic(bytes) {
+                binary_looking = true;
+            }
+        }
+    }
+    // Any other file with a NUL byte that does not read as text, and any file
+    // with a known binary header, may still be sourced by a shell: `dash` drops
+    // the NULs and runs the rest, whatever else is in the file (`GIF89a=1` is a
+    // valid assignment). So it goes to the line rules too, but only as ASCII
+    // (see `ascii_only_text`), because on data such as icons and audio a rule
+    // that looks for a non-ASCII character matches by chance. It is listed, so
+    // the report shows that its binary contents were not looked at.
+    if !script && !utf16 && bytes.contains(&0) && !nul_file_is_text(bytes) {
+        binary_looking = true;
+    }
+    let decode = if utf16 {
+        Decode::Utf16Bom
+    } else if binary_looking {
+        Decode::AsciiOnly
+    } else {
+        Decode::Utf8WithoutNuls
+    };
+    Class {
+        executable: None,
+        nul_line,
+        binary_looking,
+        decode,
+    }
+}
+
+/// The text of a file as the rules read it.
+pub(crate) fn decode(decode: Decode, bytes: &[u8]) -> Cow<'_, str> {
+    match decode {
+        Decode::Utf8WithoutNuls => text_without_nuls(bytes),
+        Decode::AsciiOnly => Cow::Owned(ascii_only_text(bytes)),
+        Decode::Utf16Bom => Cow::Owned(decode_utf16_bom(bytes)),
+    }
 }
 
 /// Whether the file is meant to be read as a script: it has a script
@@ -769,12 +1302,13 @@ fn known_binary_magic(bytes: &[u8]) -> bool {
 
 /// The file as `dash` and `bash` read it: the NUL bytes are dropped first and
 /// the rest is decoded, so a multi-byte character cut by a NUL is whole again.
-fn text_without_nuls(bytes: &[u8]) -> String {
+/// Borrowed exactly when the text is byte for byte the file.
+fn text_without_nuls(bytes: &[u8]) -> Cow<'_, str> {
     if !bytes.contains(&0) {
-        return String::from_utf8_lossy(bytes).into_owned();
+        return String::from_utf8_lossy(bytes);
     }
     let kept: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
-    String::from_utf8_lossy(&kept).into_owned()
+    Cow::Owned(String::from_utf8_lossy(&kept).into_owned())
 }
 
 /// Like `text_without_nuls`, but every non-ASCII byte becomes U+FFFD, so a
@@ -818,17 +1352,21 @@ struct NulProbe {
     newlines: usize,
     /// The 1-based line of the first NUL byte, counting `\n` as shells do.
     first_nul_line: Option<usize>,
+    /// The byte offset of the first NUL byte in the file.
+    first_nul_offset: Option<u64>,
 }
 
 impl NulProbe {
     fn feed(&mut self, chunk: &[u8]) {
+        let chunk_start = self.total;
         self.total += chunk.len() as u64;
         if self.first_nul_line.is_none() {
             let before = chunk.iter().position(|&b| b == 0);
             let end = before.unwrap_or(chunk.len());
             self.newlines += chunk[..end].iter().filter(|&&b| b == b'\n').count();
-            if before.is_some() {
+            if let Some(position) = before {
                 self.first_nul_line = Some(1 + self.newlines);
+                self.first_nul_offset = Some(chunk_start + position as u64);
             }
         }
         for (index, segment) in chunk.split(|&b| b == 0).enumerate() {
@@ -862,20 +1400,39 @@ fn first_nul_line(bytes: &[u8]) -> Option<usize> {
 
 /// Names the executable format a file starts with, by its magic bytes:
 /// ELF, PE (the `MZ` header), Mach-O in all four byte orders, and fat Mach-O
-/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The fat header `CAFEBABE` is also the header of a Java class
-/// file; both are code that runs, so both count.
-fn executable_format(bytes: &[u8]) -> Option<&'static str> {
+/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The
+/// fat header `CAFEBABE` is also the header of a Java class file; both are
+/// code that runs, so both count.
+///
+/// An `MZ` header counts as PE unless it points at the `PE\0\0` signature
+/// (through `e_lfanew` at offset 0x3C) inside the given bytes and that
+/// signature is not there: data that only happens to start with `MZ` is not
+/// a program. When the bytes are too short to tell, it still counts.
+pub(crate) fn executable_format(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x7F, b'E', b'L', b'F', ..] => Some("ELF"),
-        [b'M', b'Z', ..] => Some("PE"),
+        [b'M', b'Z', ..] => pe_signature_not_missing(bytes).then_some("PE"),
         [0xFE, 0xED, 0xFA, 0xCE | 0xCF, ..] | [0xCE | 0xCF, 0xFA, 0xED, 0xFE, ..] => Some("Mach-O"),
         [0xCA, 0xFE, 0xBA, 0xBE | 0xBF, ..] => Some("Mach-O fat (or Java class)"),
         _ => None,
     }
 }
 
+/// False only when an `MZ` header's `e_lfanew` points inside `bytes` and the
+/// four bytes there are not `PE\0\0`.
+fn pe_signature_not_missing(bytes: &[u8]) -> bool {
+    let Some(&[a, b, c, d]) = bytes.get(0x3C..0x40) else {
+        return true;
+    };
+    let offset = u32::from_le_bytes([a, b, c, d]) as usize;
+    match offset.checked_add(4).and_then(|end| bytes.get(offset..end)) {
+        Some(signature) => signature == b"PE\0\0",
+        None => true,
+    }
+}
+
 /// Same heuristic as git and ripgrep: a NUL byte near the start means binary.
-fn looks_binary(bytes: &[u8]) -> bool {
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
 }
 
@@ -920,14 +1477,15 @@ mod tests {
     }
 
     /// A file-level rule that reports what the engine handed to its check.
-    fn probe(ctx: &FileCtx<'_>) -> Vec<Hit> {
+    fn probe(ctx: &Ctx<'_>) -> Vec<Hit> {
         vec![Hit {
             line: 1,
+            span: None,
             severity: ctx.base,
             reason: format!(
                 "path={} bytes={} issue={:?} helper={} truncated={}",
                 ctx.path,
-                ctx.bytes.len(),
+                ctx.bytes().len(),
                 ctx.issue,
                 ctx.repo.has_module("helper"),
                 ctx.truncated
@@ -935,7 +1493,7 @@ mod tests {
         }]
     }
 
-    fn file_rule(glob: &str, check: FileCheck) -> Rule {
+    fn file_rule(glob: &str, check: Check) -> Rule {
         let mut globs = GlobSetBuilder::new();
         globs.add(
             GlobBuilder::new(glob)
@@ -953,6 +1511,7 @@ mod tests {
             example: "x".to_string(),
             matcher: Matcher::File(check),
             files: Some(globs.build().unwrap()),
+            names_executables: false,
         }
     }
 
@@ -1062,7 +1621,10 @@ mod tests {
             SkipReason::Unreadable {
                 error: "denied".to_string(),
             },
-            SkipReason::Executable { format: "ELF" },
+            SkipReason::Executable {
+                format: "ELF",
+                reported: false,
+            },
         ] {
             let report = Report {
                 skipped: vec![skip(reason.clone())],
@@ -1085,6 +1647,35 @@ mod tests {
 
         assert!(report.is_complete());
         assert_eq!(report.inconclusive_count(), 0);
+    }
+
+    #[test]
+    fn an_mz_header_is_a_pe_only_with_its_signature() {
+        let mut pe = vec![0u8; 0x48];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C] = 0x40;
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        assert_eq!(executable_format(&pe), Some("PE"));
+        pe[0x40..0x44].copy_from_slice(b"text");
+        assert_eq!(
+            executable_format(&pe),
+            None,
+            "MZ data without a PE signature"
+        );
+        // When the bytes cannot tell, it still counts.
+        assert_eq!(
+            executable_format(b"MZ\x90\0\x03\0"),
+            Some("PE"),
+            "too short"
+        );
+        let mut far = vec![0u8; 0x48];
+        far[..2].copy_from_slice(b"MZ");
+        far[0x3C..0x40].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+        assert_eq!(
+            executable_format(&far),
+            Some("PE"),
+            "signature past the bytes"
+        );
     }
 
     #[test]
@@ -1145,7 +1736,13 @@ mod tests {
             reasons,
             [
                 ("data.gz".to_string(), SkipReason::Binary),
-                ("tool".to_string(), SkipReason::Executable { format: "ELF" }),
+                (
+                    "tool".to_string(),
+                    SkipReason::Executable {
+                        format: "ELF",
+                        reported: false,
+                    }
+                ),
             ]
         );
         assert!(
@@ -1351,11 +1948,48 @@ mod tests {
     }
 
     #[test]
+    fn jsonc_checks_see_the_repository_index_and_the_decoded_text() {
+        fn probe_jsonc(ctx: &Ctx<'_>) -> Vec<Hit> {
+            vec![Hit {
+                line: 1,
+                span: None,
+                severity: ctx.base,
+                reason: format!(
+                    "path={} helper={} truncated={} parsed={} text={:?}",
+                    ctx.path,
+                    ctx.repo.has_module("helper"),
+                    ctx.truncated,
+                    ctx.jsonc().is_ok(),
+                    ctx.text().trim_end(),
+                ),
+            }]
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "helper.py", b"");
+        // A jsonc check now gets the repository index like a file check does.
+        write(dir.path(), "a.json", b"{\"k\": 1}\n");
+        let mut rule = file_rule("**/*.json", probe_jsonc);
+        rule.matcher = Matcher::Jsonc(probe_jsonc);
+
+        let report = scan(dir.path(), &[rule], Limits::default());
+
+        assert_eq!(
+            explanations(&report),
+            [(
+                "a.json".to_string(),
+                r#"path=a.json helper=true truncated=false parsed=true text="{\"k\": 1}""#
+                    .to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn file_rule_explanations_are_cleaned_and_long_lists_are_capped() {
-        fn noisy(_: &FileCtx<'_>) -> Vec<Hit> {
+        fn noisy(_: &Ctx<'_>) -> Vec<Hit> {
             (1..=150)
                 .map(|line| Hit {
                     line,
+                    span: None,
                     severity: Severity::High,
                     reason: "bad \u{1b}[2J text".to_string(),
                 })
@@ -1523,6 +2157,7 @@ mod tests {
         let bidi: Vec<_> = report
             .findings
             .iter()
+            .filter(|f| f.rule_id == "deception.bidi-control")
             .map(|f| (to_slash(&f.file), f.line))
             .collect();
         assert_eq!(
@@ -1949,7 +2584,13 @@ mod tests {
 
         let report = scan(dir.path(), &rules, streaming());
 
-        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        // The streamed executable gets its head rules: a finding, and listed.
+        let found: Vec<_> = report
+            .findings
+            .iter()
+            .map(|f| (to_slash(&f.file), f.rule_id.as_str()))
+            .collect();
+        assert_eq!(found, [("tool.exe".to_string(), "repo.committed-binary")]);
         let mut reasons: Vec<_> = report
             .skipped
             .iter()
@@ -1961,12 +2602,15 @@ mod tests {
             [
                 (
                     "tool.exe".to_string(),
-                    SkipReason::Executable { format: "PE" }
+                    SkipReason::Executable {
+                        format: "PE",
+                        reported: true,
+                    }
                 ),
                 ("voice.mp3".to_string(), SkipReason::Binary),
             ]
         );
-        assert!(!report.is_complete());
+        assert!(report.is_complete());
     }
 
     #[test]
@@ -2004,7 +2648,10 @@ mod tests {
         assert_eq!(found.len(), 1, "the rule runs once");
         assert!(found[0].1.contains("issue=Some(TooLarge"), "{}", found[0].1);
         let kinds: Vec<_> = report.skipped.iter().map(|s| s.reason.clone()).collect();
-        assert!(kinds.contains(&SkipReason::Executable { format: "PE" }));
+        assert!(kinds.contains(&SkipReason::Executable {
+            format: "PE",
+            reported: false,
+        }));
         assert!(!report.is_complete());
     }
 
@@ -2141,8 +2788,20 @@ mod tests {
 
         let report = scan(dir.path(), &rules, Limits::default());
 
-        assert_eq!(report.inconclusive_count(), 1);
+        // Reported as an executable disguised as a script, not as a script.
+        assert_eq!(report.inconclusive_count(), 0);
         assert!(builtin_findings(&report, NUL_RULE).is_empty());
+        assert_eq!(
+            builtin_findings(&report, "repo.disguised-executable").len(),
+            1
+        );
+        assert_eq!(
+            report.skipped[0].reason,
+            SkipReason::Executable {
+                format: "ELF",
+                reported: true
+            }
+        );
     }
 
     #[test]
@@ -2161,5 +2820,407 @@ mod tests {
         assert_eq!(first_nul_line(b"a\nb\0c"), Some(2));
         assert_eq!(first_nul_line(b"a\r\nb\r\n\0"), Some(3));
         assert_eq!(first_nul_line(b"no nul"), None);
+    }
+
+    /// `(line, column, span, snippet)` of a finding.
+    type Located = (usize, Option<usize>, Option<Range<usize>>, Option<String>);
+
+    fn locations(report: &Report, rule_id: &str) -> Vec<Located> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule_id)
+            .map(|f| (f.line, f.column, f.span.clone(), f.snippet.clone()))
+            .collect()
+    }
+
+    fn scan_one_with(name: &str, contents: &[u8], limits: Limits) -> Report {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), name, contents);
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(RULES, "test.toml").unwrap());
+        scan(dir.path(), &rules, limits)
+    }
+
+    fn scan_one(name: &str, contents: &[u8]) -> Report {
+        scan_one_with(name, contents, Limits::default())
+    }
+
+    fn some(text: &str) -> Option<String> {
+        Some(text.to_string())
+    }
+
+    #[test]
+    fn line_findings_have_column_span_and_snippet_with_lf_and_crlf() {
+        for (contents, line_start) in [
+            (&b"ab\nx  TODO y\n"[..], 3),
+            (&b"ab\r\nx  TODO y\r\n"[..], 4),
+        ] {
+            let report = scan_one("a.txt", contents);
+            let span = line_start + 3..line_start + 7;
+            assert_eq!(
+                locations(&report, "test.everywhere"),
+                [(2, Some(4), Some(span.clone()), some("x  TODO y"))]
+            );
+            assert_eq!(&contents[span], b"TODO");
+        }
+    }
+
+    #[test]
+    fn columns_count_characters_and_skip_a_byte_order_mark() {
+        let contents = "\u{feff}TODO\r\n\u{e9}\u{1F600} TODO\r\nlast TODO".as_bytes();
+        let report = scan_one("a.txt", contents);
+        let found = locations(&report, "test.everywhere");
+        assert_eq!(
+            found,
+            [
+                (1, Some(1), Some(3..7), some("TODO")),
+                (2, Some(4), Some(16..20), some("\u{e9}\u{1F600} TODO")),
+                (3, Some(6), Some(27..31), some("last TODO")),
+            ]
+        );
+        for (_, _, span, _) in found {
+            assert_eq!(&contents[span.unwrap()], b"TODO");
+        }
+    }
+
+    #[test]
+    fn no_span_or_column_when_the_text_is_not_the_file_byte_for_byte() {
+        // A NUL in a script: the line rules read it with the NUL dropped, so
+        // their offsets are not the file's; the NUL's own offset is exact.
+        let report = scan_one("run.sh", b"a\n#\0x\nTODO\n");
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(3, None, None, some("TODO"))]
+        );
+        assert_eq!(
+            locations(&report, "deception.nul-byte-in-script"),
+            [(2, None, Some(3..4), None)]
+        );
+
+        // Invalid UTF-8 is replaced, which changes the byte length.
+        let report = scan_one("a.txt", b"\xFF TODO");
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(1, None, None, some("\u{FFFD} TODO"))]
+        );
+
+        // Binary-looking data is read as ASCII only.
+        let report = scan_one("blob.bin", b"\x1f\x8b\0\0 TODO");
+        let found = locations(&report, "test.everywhere");
+        assert_eq!((found[0].1, found[0].2.clone()), (None, None));
+
+        // UTF-16 is decoded: the column is in the decoded line, there is no span.
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in "x \u{202E} TODO".encode_utf16() {
+            utf16.extend(unit.to_le_bytes());
+        }
+        let report = scan_one("run.ps1", &utf16);
+        assert_eq!(
+            locations(&report, "deception.bidi-control"),
+            [(1, Some(3), None, some("x \\u{202E} TODO"))]
+        );
+        assert_eq!(locations(&report, "test.everywhere")[0].1, Some(5));
+    }
+
+    #[test]
+    fn a_streamed_file_has_exact_spans_only_when_it_is_its_own_text() {
+        let streamed = Limits {
+            max_buffered_size: 1,
+            ..Limits::default()
+        };
+        let contents = b"one\r\ntwo\r\nx TODO\r\n";
+        let report = scan_one_with("a.txt", contents, streamed);
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(3, Some(3), Some(12..16), some("x TODO"))]
+        );
+        assert_eq!(&contents[12..16], b"TODO");
+
+        // One invalid byte anywhere and no line has a span, as when read whole.
+        let report = scan_one_with("b.txt", b"\xFF\r\nx TODO\r\n", streamed);
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(2, None, None, some("x TODO"))]
+        );
+    }
+
+    #[test]
+    fn snippets_keep_the_match_in_view_on_long_lines() {
+        let line = format!("{}TODO{}", "a".repeat(500), "b".repeat(500));
+        let report = scan_one("a.txt", line.as_bytes());
+        let found = locations(&report, "test.everywhere");
+        assert_eq!(found[0].1, Some(501));
+        let expected = format!("...{}TODO{}...", "a".repeat(40), "b".repeat(76));
+        assert_eq!(found[0].3.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn hostile_snippets_are_escaped_capped_and_still_show_the_match() {
+        let mut line = String::from("\t\u{1b}[2J\u{9b}\u{2028}\u{E0041}");
+        line.push_str(&"\u{202E}".repeat(10_000));
+        line.push_str("TODO\tx \r\n");
+        let report = scan_one("a.txt", line.as_bytes());
+
+        let todo = locations(&report, "test.everywhere")[0].3.clone().unwrap();
+        assert_eq!(todo, format!("...{}TODO x", "\\u{202E}".repeat(5)));
+
+        let bidi = locations(&report, "deception.bidi-control")[0]
+            .3
+            .clone()
+            .unwrap();
+        let start = "\\u{001B}[2J\\u{009B}\\u{2028}\\u{E0041}";
+        assert!(bidi.starts_with(start), "{bidi}");
+        assert!(bidi.ends_with("..."), "{bidi}");
+        assert!(bidi.chars().count() <= MAX_SNIPPET_CHARS + 16, "{bidi}");
+        for snippet in [&todo, &bidi] {
+            assert!(
+                snippet
+                    .chars()
+                    .all(|c| c.is_ascii() && !c.is_ascii_control()),
+                "{snippet:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonc_findings_point_at_the_value_even_after_a_byte_order_mark() {
+        let text = "{\r\n  // c\r\n  \"tasks\": [{\"label\": \"x\",\r\n    \"runOptions\": {\"runOn\": \"folderOpen\"}}]\r\n}\r\n";
+        let mut spans = Vec::new();
+        for prefix in ["", "\u{feff}"] {
+            let contents = format!("{prefix}{text}");
+            let report = scan_one(".vscode/tasks.json", contents.as_bytes());
+            let found = locations(&report, "ide.vscode-folder-open-task");
+            assert_eq!(found.len(), 1);
+            let (line, column, span, snippet) = found[0].clone();
+            assert_eq!((line, column), (4, Some(29)));
+            assert_eq!(
+                snippet.as_deref(),
+                Some(r#""runOptions": {"runOn": "folderOpen"}}]"#)
+            );
+            let span = span.unwrap();
+            assert_eq!(&contents.as_bytes()[span.clone()], b"\"folderOpen\"");
+            spans.push(span.start);
+        }
+        assert_eq!(
+            spans[1],
+            spans[0] + 3,
+            "the byte order mark is part of the file"
+        );
+    }
+
+    #[test]
+    fn a_binary_looking_tasks_file_keeps_its_note_and_gets_no_span() {
+        let contents =
+            b"{/* \0\0\0\0\0\0\0\0\0\0\xFF */ \"tasks\": [{\"runOptions\": {\"runOn\": \"folderOpen\"}}]}";
+        let report = scan_one(".vscode/tasks.json", contents);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "ide.vscode-folder-open-task")
+            .unwrap();
+        assert_eq!((finding.column, &finding.span), (None, &None));
+        assert!(finding.snippet.is_some());
+        assert!(finding.explanation.ends_with(BINARY_LOOKING_NOTE));
+    }
+
+    #[test]
+    fn spans_from_a_check_are_validated_and_located_hits_are_capped() {
+        fn many(ctx: &Ctx<'_>) -> Vec<Hit> {
+            let hit = |line, span| Hit {
+                line,
+                span: Some(TextSpan(span)),
+                severity: ctx.base,
+                reason: "bad".to_string(),
+            };
+            // Reversed, past the end, inside a character, at the very end of
+            // the address space, and on another line than the one named.
+            let mut hits = vec![
+                hit(1, Range { start: 3, end: 1 }),
+                hit(1, 0..100_000),
+                hit(1, 300..301),
+                hit(1, usize::MAX..usize::MAX),
+                hit(2, 0..1),
+            ];
+            for index in 0..150 {
+                let mut good = hit(1, index..index + 1);
+                good.reason = "good".to_string();
+                hits.push(good);
+            }
+            hits
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = "x".repeat(300);
+        text.push('\u{e9}');
+        write(dir.path(), "a.json", text.as_bytes());
+        let mut rule = file_rule("**/*.json", many);
+        rule.matcher = Matcher::Jsonc(many);
+
+        let report = scan(dir.path(), &[rule], Limits::default());
+
+        assert_eq!(report.findings.len(), 155, "locating never drops a finding");
+        for finding in report.findings.iter().filter(|f| f.explanation == "bad") {
+            assert_eq!((finding.column, &finding.span), (None, &None));
+            assert_eq!(finding.snippet, None);
+        }
+        let located = report
+            .findings
+            .iter()
+            .filter(|f| f.column.is_some())
+            .count();
+        assert_eq!(located, MAX_LOCATED_HITS - 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_whose_bytes_are_not_its_own_gets_no_location() {
+        fn spanned(ctx: &Ctx<'_>) -> Vec<Hit> {
+            vec![Hit {
+                line: 1,
+                span: Some(TextSpan(0..6)),
+                severity: ctx.base,
+                reason: format!("bytes={}", ctx.bytes().len()),
+            }]
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "real.txt", b"import os\n");
+        std::os::unix::fs::symlink("real.txt", dir.path().join("evil.pth")).unwrap();
+        let rules = [file_rule("**/*.pth", spanned)];
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let finding = &report.findings[0];
+        assert_eq!(finding.explanation, "bytes=10", "the check saw the target");
+        assert_eq!(
+            (finding.column, &finding.span, &finding.snippet),
+            (None, &None, &None)
+        );
+    }
+
+    #[test]
+    fn location_helpers_never_panic_on_odd_input() {
+        assert_eq!(Location::in_text("", &(0..0), true, true).column, Some(1));
+        assert_eq!(Location::in_text("ab", &(2..2), true, true).column, Some(3));
+        assert_eq!(
+            Location::in_text("a\r\n", &(1..2), true, true).column,
+            Some(2)
+        );
+        let past = Location::in_line("ab", 9, false, true, Some(0..1));
+        assert_eq!((past.column, past.span), (Some(3), Some(0..1)));
+        assert_eq!(snippet("", 0), "");
+        assert_eq!(snippet("   ", 1), "");
+        assert_eq!(
+            snippet("\u{e9}", 1),
+            "",
+            "inside a character: nothing, no panic"
+        );
+        assert_eq!(snippet("\u{e9}x", 2), "\u{e9}x");
+        assert_eq!(nul_span(b"ab"), None);
+        assert_eq!(nul_span(b"a\0"), Some(1..2));
+    }
+
+    fn head_rule(check: Check) -> Rule {
+        let mut rule = file_rule("**", check);
+        rule.id = "test.head".to_string();
+        rule.matcher = Matcher::Head(check);
+        rule.files = None;
+        rule
+    }
+
+    #[test]
+    fn head_rules_see_every_entry_once_and_never_make_a_file_too_large() {
+        fn seen(ctx: &Ctx<'_>) -> Vec<Hit> {
+            vec![Hit {
+                line: 1,
+                span: None,
+                severity: ctx.base,
+                reason: format!("bytes={} issue={:?}", ctx.bytes().len(), ctx.issue),
+            }]
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "small.txt", b"0123456789");
+        write(dir.path(), "big.txt", &[b'x'; 2000]);
+        write(dir.path(), "big.pth", &[b'#'; 2000]);
+        write(dir.path(), "huge.txt", &[b'y'; 5000]);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("small.txt", dir.path().join("link")).unwrap();
+        let rules = [head_rule(seen), file_rule("**/*.pth", probe)];
+        let limits = Limits {
+            max_buffered_size: 1024,
+            max_file_size: 4096,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &rules, limits);
+
+        let head: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "test.head")
+            .map(|f| (to_slash(&f.file), f.explanation.clone()))
+            .collect();
+        let mut expected = vec![
+            ("big.pth".to_string(), "bytes=2000 issue=None".to_string()),
+            ("big.txt".to_string(), "bytes=2000 issue=None".to_string()),
+            (
+                "huge.txt".to_string(),
+                "bytes=5000 issue=Some(TooLarge { size: 5000 })".to_string(),
+            ),
+            ("small.txt".to_string(), "bytes=10 issue=None".to_string()),
+        ];
+        if cfg!(unix) {
+            expected.insert(
+                3,
+                (
+                    "link".to_string(),
+                    "bytes=10 issue=Some(Symlink { target: Some(\"small.txt\"), resolved: \
+                     Some(\"small.txt\") })"
+                        .to_string(),
+                ),
+            );
+        }
+        assert_eq!(head, expected);
+        // Only the files over the limit, and the streamed file that a file
+        // rule selects, are listed as too large; the head rule adds nothing.
+        let too_large: Vec<_> = report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, SkipReason::TooLarge { .. }))
+            .map(|s| to_slash(&s.path))
+            .collect();
+        assert_eq!(too_large, ["huge.txt", "big.pth"]);
+    }
+
+    #[test]
+    fn link_targets_are_resolved_as_text_the_way_either_system_reads_them() {
+        let inside = |link, target| resolve_link_text(link, target);
+        assert_eq!(inside("a/link", "b.txt").as_deref(), Some("a/b.txt"));
+        assert_eq!(inside("a/link", "../b.txt").as_deref(), Some("b.txt"));
+        assert_eq!(inside("a/link", "./c/../b").as_deref(), Some("a/b"));
+        // Inside both ways; the path returned is the one for this system.
+        let expected = if cfg!(windows) {
+            "b.txt"
+        } else {
+            "a/..\\b.txt"
+        };
+        assert_eq!(inside("a/link", "..\\b.txt").as_deref(), Some(expected));
+        assert_eq!(inside("link", ".").as_deref(), Some(""));
+        for outside in [
+            "../../x",
+            "/etc/passwd",
+            "\\Windows",
+            "C:\\Windows",
+            "c:relative",
+            "\\\\host.invalid\\share",
+            "\\\\?\\C:\\x",
+            "\\??\\C:\\x",
+            "..\\..\\x",
+        ] {
+            assert_eq!(inside("a/link", outside), None, "{outside}");
+        }
+        assert_eq!(inside("link", ".."), None);
+        // A Unix folder can be named `a\b\c`: read with `/` only, this climbs
+        // out three levels, so it is outside whatever the other reading says.
+        assert_eq!(inside("l2", "a\\b\\c/../../../etc/hostname"), None);
     }
 }

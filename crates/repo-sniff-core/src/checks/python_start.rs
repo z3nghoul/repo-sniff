@@ -17,13 +17,13 @@
 //!   dot, otherwise `site` never reads the file.
 
 use super::pylines::{is_python_space, python_lines};
-use super::{FileCtx, FileIssue, Hit};
+use super::{Ctx, FileIssue, Hit};
 use crate::finding::Severity;
 
 /// At most this many entry points are recorded; the rest are counted.
 const MAX_TRACKED_ENTRY_POINTS: usize = 500;
 
-pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
+pub fn check(ctx: &Ctx<'_>) -> Vec<Hit> {
     let name = ctx.path.rsplit('/').next().unwrap_or(ctx.path);
     let inert = inert_reason(name);
     let mut hits = Vec::new();
@@ -32,11 +32,12 @@ pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
         hits.push(issue_hit(issue, inert.is_some()));
     }
     // An oversized file was not read; a symlink may have brought its target.
-    if ctx.bytes.is_empty() {
+    if ctx.bytes().is_empty() {
         return hits;
     }
 
-    let bytes = ctx.bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(ctx.bytes);
+    let raw = ctx.bytes();
+    let bytes = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw);
     let Ok(text) = std::str::from_utf8(bytes) else {
         return hits; // Python 3.15 ignores a .start file that is not UTF-8
     };
@@ -58,6 +59,7 @@ pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
         hits.push(match inert {
             Some(why) => Hit {
                 line: number,
+                span: None,
                 severity: Severity::Low,
                 reason: format!(
                     "Python's site module ignores this file because {why}, but this line is an \
@@ -66,6 +68,7 @@ pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
             },
             None => Hit {
                 line: number,
+                span: None,
                 severity: ctx.base,
                 reason: format!(
                     "Python 3.15 and later calls the entry point `{entry}` every time the \
@@ -78,6 +81,7 @@ pub fn check(ctx: &FileCtx<'_>) -> Vec<Hit> {
     if total > entries.len() {
         hits.push(Hit {
             line: entries.last().map_or(1, |&(number, _)| number),
+            span: None,
             severity: ctx.base,
             reason: format!(
                 "{} more entry points in this file are not listed",
@@ -112,13 +116,14 @@ fn issue_hit(issue: &FileIssue, inert: bool) -> Hit {
     };
     Hit {
         line: 1,
+        span: None,
         severity,
         reason,
     }
 }
 
 /// Says whether the code the entry point names is in the repository.
-fn module_note(ctx: &FileCtx<'_>, entry: &str) -> String {
+fn module_note(ctx: &Ctx<'_>, entry: &str) -> String {
     let top = entry
         .split([':', '.'])
         .next()

@@ -1,0 +1,3 @@
+// SYNTHETIC TEST FIXTURE — not functional
+// stands in for an encoded JScript file
+var greeting = "hello";

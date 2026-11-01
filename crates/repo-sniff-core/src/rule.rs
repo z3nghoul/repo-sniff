@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::checks::{self, FileCheck, JsoncCheck};
+use crate::checks::{self, Check};
 use crate::finding::{Severity, Stage};
 
 /// Rule files shipped inside the binary, as `(file name, contents)`.
@@ -32,6 +32,7 @@ const BUILTIN_RULE_FILES: &[(&str, &str)] = &[
     ("deception.toml", include_str!("../rules/deception.toml")),
     ("ide.toml", include_str!("../rules/ide.toml")),
     ("deps.toml", include_str!("../rules/deps.toml")),
+    ("repo.toml", include_str!("../rules/repo.toml")),
 ];
 
 /// How a rule looks for its target. Every rule names its engine explicitly.
@@ -50,6 +51,12 @@ pub enum Engine {
     /// Reports a NUL byte inside a file that is meant to be read as a script
     /// (by extension or shebang). The scanner itself decides what a script is.
     NulByte,
+    /// Rust code that judges a file by its name and its first bytes (at most
+    /// `checks::HEAD_LEN`). Looked up by the rule's id like `File`; `files` is
+    /// optional. It is offered every entry of the repository: files read
+    /// whole, files read as a stream, files over the size limit (name only)
+    /// and symbolic links, so neither size nor a link is a way around it.
+    Head,
 }
 
 /// A rule as written in TOML, before validation.
@@ -68,6 +75,8 @@ struct RawRule {
     pattern: Option<String>,
     #[serde(default)]
     files: Vec<String>,
+    #[serde(default)]
+    names_executables: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,9 +90,10 @@ struct RuleFile {
 #[derive(Debug, Clone)]
 pub enum Matcher {
     LineRegex(Regex),
-    Jsonc(JsoncCheck),
-    File(FileCheck),
+    Jsonc(Check),
+    File(Check),
     NulByte,
+    Head(Check),
 }
 
 /// A validated rule, ready to run.
@@ -100,6 +110,11 @@ pub struct Rule {
     pub matcher: Matcher,
     /// Which files the rule applies to; `None` means every file.
     pub files: Option<GlobSet>,
+    /// Only for `engine = "head"`: the rule's findings on a native executable
+    /// name it as one. Such a finding stands for the executable in the
+    /// report, so the file no longer makes the scan inconclusive; a finding
+    /// of any other rule does not.
+    pub names_executables: bool,
 }
 
 impl Rule {
@@ -146,6 +161,8 @@ pub enum RuleError {
     Attack { id: String, value: String },
     #[error("rule `{id}` is defined more than once")]
     DuplicateId { id: String },
+    #[error("rule `{id}`: only an `engine = \"head\"` rule can set `names_executables`")]
+    NamesExecutablesNeedsHead { id: String },
 }
 
 /// Loads every rule shipped with repo-sniff.
@@ -209,6 +226,14 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
             }
             Matcher::NulByte
         }
+        Engine::Head => {
+            if raw.pattern.is_some() {
+                return Err(RuleError::UnexpectedPattern { id: raw.id });
+            }
+            let check = checks::head_check(&raw.id)
+                .ok_or_else(|| RuleError::UnknownCheck { id: raw.id.clone() })?;
+            Matcher::Head(check)
+        }
         Engine::File => {
             if raw.pattern.is_some() {
                 return Err(RuleError::UnexpectedPattern { id: raw.id });
@@ -244,6 +269,10 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
         })?)
     };
 
+    if raw.names_executables && !matches!(matcher, Matcher::Head(_)) {
+        return Err(RuleError::NamesExecutablesNeedsHead { id: raw.id });
+    }
+
     Ok(Rule {
         id: raw.id,
         family: raw.family,
@@ -254,6 +283,7 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
         example: raw.example,
         matcher,
         files,
+        names_executables: raw.names_executables,
     })
 }
 
