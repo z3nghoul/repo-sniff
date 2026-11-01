@@ -155,11 +155,15 @@ fn ssh_targets_are_a_runtime_error_that_explains_how_to_scan_a_local_clone() {
     for target in [
         "ssh://git@example.invalid/owner/repo.git",
         "git@example.invalid:owner/repo.git",
+        // Any user, not only `git`, and never repeated with its token (#32).
+        "deploy:FAKE_TOKEN@example.invalid:owner/repo.git",
     ] {
         let output = run(dir.path(), &["scan", target]);
 
         assert_eq!(code(&output), 2, "{target}");
         let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("FAKE_TOKEN"), "{stderr}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("FAKE_TOKEN"));
         assert!(stderr.contains("ssh targets are not supported"), "{stderr}");
         assert!(stderr.contains("repo-sniff scan some-folder"), "{stderr}");
         assert!(
@@ -196,6 +200,59 @@ fn credentials_in_the_target_never_reach_stdout_or_stderr() {
             stderr.contains("git clone of https://***@example.invalid/owner/repo"),
             "{stderr}"
         );
+    }
+}
+
+/// Targets that curl would read differently from the redaction, or that are
+/// URLs with credentials but do not look like one. None of them may reach
+/// git (no "Cloning" notice) or be printed. The proxy variables are removed so
+/// that nothing could be sent anywhere if the check failed.
+#[test]
+fn ambiguous_and_scheme_less_credentials_never_reach_stdout_or_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for target in [
+        // A user name or password with an unescaped `#`, `?` or `/` (#31).
+        "https://user:PART1#PART2@example.invalid/owner/repo",
+        "https://FAKE_TOKEN#x@example.invalid/r",
+        "https://FAKE_TOKEN?x@example.invalid/r",
+        "https://FAKE_TOKEN/x@example.invalid/r",
+        "https://user:FAKE TOKEN@example.invalid/r",
+        "https://user:FAKE'TOKEN@example.invalid/r",
+        "https://user:FAKE\"TOKEN@example.invalid/r",
+        "https://user:FAKE`TOKEN@example.invalid/r",
+        "https://user:FAKE<TOKEN@example.invalid/r",
+        "FAKE_TOKEN@example.invalid/o/r",
+        "user:FAKE_TOKEN@example.invalid/o/r",
+        "user:FA/KE_TOKEN@example.invalid/o/r",
+        "//user:FA/KE_TOKEN@example.invalid/r",
+        "https:/user:FA/KE_TOKEN@example.invalid/r",
+        "https://user:FAKE@TOKEN@example.invalid/r",
+        "HTTPS://FAKE_TOKEN#x@example.invalid/r",
+        "deploy:FAKE_TOKEN@:o/r",
+        "https:/user:FAKE_TOKEN@example.invalid/r",
+        "https:\\\\user:FAKE_TOKEN@example.invalid\\r",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_repo-sniff"))
+            .current_dir(dir.path())
+            .args(["scan", target])
+            .env_remove("HTTPS_PROXY")
+            .env_remove("https_proxy")
+            .env_remove("HTTP_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("ALL_PROXY")
+            .env_remove("all_proxy")
+            .output()
+            .expect("failed to run repo-sniff");
+
+        assert_eq!(code(&output), 2, "{target}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for secret in ["FAKE", "FA/", "TOKEN", "PART1", "PART2", "user:"] {
+            assert!(!stdout.contains(secret), "{target}: {stdout}");
+            assert!(!stderr.contains(secret), "{target}: {stderr}");
+        }
+        assert!(!stderr.contains("Cloning"), "{target}: {stderr}");
     }
 }
 
