@@ -319,7 +319,9 @@ fn names_a_known_cpu(head: &[u8]) -> bool {
     let table_end = 8 + 20 * u64::from(count);
     head.get(8..)
         .unwrap_or_default()
-        .chunks_exact(20)
+        .as_chunks::<20>()
+        .0
+        .iter()
         .take(count as usize)
         .any(|entry| {
             let (Some(cpu), Some(offset), Some(align)) =
