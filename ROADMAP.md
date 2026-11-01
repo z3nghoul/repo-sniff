@@ -146,7 +146,7 @@ Each in its own branch and pull request, fixtures approved first:
 
 - [ ] Demo GIF or screenshot of the report
 - [ ] Examples and "how to add your own rule"
-- [ ] Publish benchmark results in the README
+- [x] Publish benchmark results in the README
 - [ ] Honest list of blind spots
 - [ ] "Security guarantees" section that states exactly what the scanner does to protect the user, matching the code
 - [ ] Comparison with similar tools (for example scanrepo): file coverage, Python startup files, build systems, Trojan Source, JSONC parsing, offline by default
