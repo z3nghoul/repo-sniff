@@ -1,7 +1,7 @@
 # Benchmark on honest repositories
 
 Date: 2026-11-01. Scanner: `repo-sniff 0.1.0`, release build of the branch
-with the repository contents family (commit `b25608c`, stacked on the
+with the repository contents family (commit `0383fc2`, stacked on the
 architecture refactor). Each repository was scanned from its default branch
 with `repo-sniff scan <url>` (default `--fail-on high`) and a 600 second limit
 per repository including the clone. No repository timed out or hit the file
@@ -26,7 +26,7 @@ findings that name each file.
 | pypa/pip | ec43c48b2f2d | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 2 |
 | expressjs/express | 1c6f1b0fe400 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 1 git metadata | 1 |
 | microsoft/vscode | 1306698e328e | findings | 1 | 0 | 8 | 0 | 50 | 0 | 330 binary, 7 executable, 1 git metadata | 16 |
-| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 2 | 5 | 0 | 16 binary, 1 git metadata | 5 |
+| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 3 | 5 | 0 | 16 binary, 1 git metadata | 5 |
 | python/cpython | 410fdda081ba | findings | 1 | 0 | 2 | 1 | 28 | 0 | 146 binary, 1 git metadata | 9 |
 | microsoft/terminal | 703ef7f969d9 | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 5 |
 
@@ -45,7 +45,7 @@ inconclusive.
 | microsoft/terminal | 13 files under `dep/WinAppDriver/`, `dep/nuget/nuget.exe` | `repo.committed-binary` | HIGH (14) | True detection, benign | A vendored UI test driver and NuGet |
 | microsoft/vscode | `extensions/copilot/.vscode/tasks.json:94` | `ide.vscode-folder-open-task` | HIGH | True detection, benign | As before: a dev watch task that runs on folder open. Issue 43 |
 | python/cpython | `Lib/test/archivetestdata/exe_with_zip:26`, `exe_with_z64:25` | `deception.nul-byte-in-script` | HIGH (2) | False in intent | As before: a shell script followed by a zip archive. Issue 42 |
-| git/git | `git-gui/lib/win32_shortcut.js:4`, `:5` | `repo.wsh-javascript` | MEDIUM (2) | True detection, benign | A real Windows Script Host script that creates shortcuts for git-gui |
+| git/git | `git-gui/lib/win32_shortcut.js:4`, `:5`, `:27` | `repo.wsh-javascript` | MEDIUM (3) | True detection, benign | A real Windows Script Host script that creates shortcuts for git-gui |
 | python/cpython | `Lib/test/empty.vbs` | `repo.windows-script` | MEDIUM | True detection, benign | An empty VBScript used by the test suite |
 
 There are no CRITICAL findings. A first run of this branch reported
