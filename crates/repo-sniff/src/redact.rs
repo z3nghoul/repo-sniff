@@ -6,6 +6,8 @@
 //! "Cloning" notice, the report label, error messages and the text git prints
 //! about a failed clone (git repeats the URL it was given).
 
+use std::borrow::Cow;
+
 /// Replaces the user and password part of every `scheme://user:pass@host`
 /// found in `text` with `***`.
 ///
@@ -17,15 +19,60 @@
 /// price is that an `@` inside a path or query also hides what comes before
 /// it, which only shortens the message.
 pub fn redact_credentials(text: &str) -> String {
+    redact_scp_like(&redact_urls(text))
+}
+
+/// Characters that end a word: whitespace and the quotes and brackets that
+/// messages put around a URL.
+fn ends_word(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '`')
+}
+
+/// Hides the user information of scp-like addresses (`user:TOKEN@host:path`)
+/// in words without `://`: everything before the last `@` that is followed by
+/// a host and a `:`. The plain `git` user is not a secret and is kept. An
+/// e-mail address followed by a colon is hidden too, which only shortens the
+/// message.
+fn redact_scp_like(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let start = rest.find(|c: char| !ends_word(c)).unwrap_or(rest.len());
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find(ends_word).unwrap_or(rest.len());
+        let (word, after) = rest.split_at(end);
+        out.push_str(&hide_scp_user(word));
+        rest = after;
+    }
+    out
+}
+
+fn hide_scp_user(word: &str) -> Cow<'_, str> {
+    if word.contains("://") {
+        return Cow::Borrowed(word);
+    }
+    let user_end = word.match_indices('@').rev().find_map(|(at, _)| {
+        let host_end = word[at + 1..].find([':', '/', '\\', '@'])?;
+        (host_end > 0 && word[at + 1 + host_end..].starts_with(':')).then_some(at)
+    });
+    match user_end {
+        Some(at) if at > 0 && &word[..at] != "git" && &word[..at] != "***" => {
+            Cow::Owned(format!("***{}", &word[at..]))
+        }
+        _ => Cow::Borrowed(word),
+    }
+}
+
+/// The `scheme://user:pass@host` half of `redact_credentials`.
+fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(position) = rest.find("://") {
         let (head, tail) = rest.split_at(position + 3);
         out.push_str(head);
 
-        let word_end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '`'))
-            .unwrap_or(tail.len());
+        let word_end = tail.find(ends_word).unwrap_or(tail.len());
         let (word, after) = tail.split_at(word_end);
 
         match word.rfind('@') {
@@ -134,8 +181,34 @@ mod tests {
     }
 
     #[test]
+    fn scp_like_user_information_is_hidden_except_the_git_user() {
+        assert_eq!(
+            redact_credentials("cannot access deploy:FAKE_TOKEN@example.invalid:o/r.git"),
+            "cannot access ***@example.invalid:o/r.git"
+        );
+        assert_eq!(
+            redact_credentials("'u:p@ss@example.invalid:o/r'"),
+            "'***@example.invalid:o/r'"
+        );
+        assert_eq!(
+            redact_credentials("u:a/b@example.invalid:o/r"),
+            "***@example.invalid:o/r"
+        );
+        for kept in [
+            "git@example.invalid:o/r.git",
+            "mail me at a@example.invalid today",
+            "see src/main.rs:12",
+            "@example.invalid:x",
+        ] {
+            assert_eq!(redact_credentials(kept), kept);
+        }
+    }
+
+    #[test]
     fn redacting_twice_changes_nothing() {
-        let once = redact_credentials("see https://TOKEN@host/x and https://host2/y");
+        let once = redact_credentials(
+            "see https://TOKEN@host/x and https://host2/y and u:T@h:p and 'git@h:p'",
+        );
         assert_eq!(redact_credentials(&once), once);
     }
 

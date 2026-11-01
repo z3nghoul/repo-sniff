@@ -36,7 +36,8 @@ What it does to protect you:
   prompts. For a private repository, clone it yourself and scan the folder.
 - **Secrets.** A token pasted into a URL (`https://TOKEN@host/...`) is hidden
   in the notice, the report and error messages, also when a password contains
-  `/`, `?` or `#`. scp-like targets are a known gap.
+  `/`, `?` or `#`, and so is the user of an scp-like address
+  (`deploy:TOKEN@host:path`), which is refused as an ssh target.
 - **Reading.** Symlinks are never followed. File names and text taken from the
   repository are cleaned before they are printed, so a hostile repository
   cannot paint over the report. The work per file is bounded.
