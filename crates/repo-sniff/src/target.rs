@@ -37,10 +37,10 @@ impl Target {
 }
 
 /// Whether `raw` is an scp-like ssh address, `user@host:path`, with any user
-/// (`deploy:TOKEN@host:owner/repo` included), which git would fetch over
-/// ssh: the part
-/// before the first `/` or `\` holds an `@`, and the text after its last `@`
-/// is a non-empty host followed by `:`. Such an argument is not a path, and
+/// (`deploy:TOKEN@host:owner/repo` included), which git would fetch over ssh:
+/// the part before the first `/` or `\` holds an `@`, and the text after its
+/// last `@` is a host followed by `:`. The host may be empty when the user part
+/// holds a `:` (`deploy:TOKEN@:x`), which is a password, not a folder name. Such an argument is not a path, and
 /// taking it for one would print it, user information and all, in a "cannot
 /// access" error. A local folder with a name like that can still be scanned
 /// as `./user@host:path`.
@@ -54,7 +54,10 @@ pub fn is_scp_like(raw: &str) -> bool {
     };
     let user = &prefix[..at];
     let after = &prefix[at + 1..];
-    !user.is_empty() && after.find(':').is_some_and(|colon| colon > 0)
+    !user.is_empty()
+        && after
+            .find(':')
+            .is_some_and(|colon| colon > 0 || user.contains(':'))
 }
 
 #[cfg(test)]
@@ -84,6 +87,7 @@ mod tests {
             "deploy@example.invalid:o/r.git",
             "u:p@ss@example.invalid:o/r",
             "git@example.invalid:o/r@v2",
+            "deploy:FAKE_TOKEN@:o/r",
         ] {
             assert_eq!(Target::parse(raw), Target::Remote(raw.to_string()), "{raw}");
         }
@@ -100,6 +104,10 @@ mod tests {
             "user@:x",
             "user@host",
             "notes@2026",
+            "me@corp",
+            "C:/Users/first@corp/repo",
+            "\\\\server\\share\\me@x:y",
+            "./alpine@sha256:abc",
         ] {
             assert_eq!(
                 Target::parse(raw),
