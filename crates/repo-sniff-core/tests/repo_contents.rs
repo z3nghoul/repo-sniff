@@ -101,6 +101,8 @@ fn fixture_repository() -> tempfile::TempDir {
     write(root, "positive/lib/universal", &fat_mach_o());
     write(root, "positive/lib/weird.xyz", &pe());
     write(root, "positive/lib/payload.dat", &elf());
+    // A dotted .NET assembly name, not a double extension.
+    write(root, "positive/lib/Newtonsoft.Json.dll", &pe());
     write(root, "positive/bytecode/Main.class", &java_class());
     write(root, "positive/bytecode/mod.pyc", &pyc());
     write(root, "positive/bytecode/cache.dat", &pyc());
@@ -214,6 +216,7 @@ fn every_fixture_gets_exactly_its_expected_findings() {
         row("positive/lib/universal", "committed-binary", High),
         row("positive/lib/weird.xyz", "committed-binary", High),
         row("positive/lib/payload.dat", "committed-binary", High),
+        row("positive/lib/Newtonsoft.Json.dll", "committed-binary", High),
         row("positive/bytecode/Main.class", "committed-binary", Medium),
         row("positive/bytecode/mod.pyc", "committed-binary", Medium),
         row("positive/bytecode/cache.dat", "committed-binary", Medium),
@@ -312,9 +315,9 @@ fn reported_executables_are_still_listed_and_the_scan_is_complete() {
             _ => None,
         })
         .collect();
-    // Seven committed, seven disguised, the screen saver, and the two files
+    // Eight committed, seven disguised, the screen saver, and the two files
     // that start with CAFEBABE (the scanner lists every one as executable).
-    assert_eq!(executables.len(), 17, "{:?}", report.skipped);
+    assert_eq!(executables.len(), 18, "{:?}", report.skipped);
     assert!(executables.iter().all(|&reported| reported));
 }
 
