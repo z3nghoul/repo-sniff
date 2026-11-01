@@ -28,6 +28,15 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     "rb", "pl", "pm", "php", "ps1", "psm1", "psd1", "bat", "cmd", "vbs", "wsf", "lua",
 ];
 
+/// Script extensions whose host reads a file with a UTF-16 byte order mark as
+/// UTF-16: Windows PowerShell (`.ps1`, `.psm1`, `.psd1`), Windows Script Host
+/// (`.vbs`, `.js`, `.wsf`) and Perl (`.pl`, `.pm`). Only these are decoded. The
+/// others (`cmd.exe`, the Unix shells, PHP, Python, Ruby, Lua, Node) read the
+/// bytes and ignore or choke on the mark, so a `.bat` that starts with
+/// `FF FE` runs as ANSI text while an editor shows it as UTF-16 garbage, a
+/// known way to hide a batch payload. Such a file is read as bytes, as before.
+const UTF16_SCRIPT_EXTENSIONS: &[&str] = &["ps1", "psm1", "psd1", "vbs", "js", "wsf", "pl", "pm"];
+
 /// A file with NUL bytes that is not a script is read by the line rules only
 /// if at most one byte in this many is NUL. Text with a stray NUL has a
 /// handful of them; padding in a data format, or ASCII text in UTF-16 without a
@@ -797,14 +806,21 @@ fn scan_streamed(
     if whole_file_rule {
         out.skipped.push(too_large);
     }
-    if has_utf16_bom(&head) && has_script_extension(slash_path) {
+    if is_utf16_script(slash_path, &head) {
         // Decoded as it is read, as for a file read whole (`Decode::Utf16Bom`).
         // Not a script for the NUL rule, and the text is never the file byte
         // for byte, so no spans; columns are exact.
         let mut lines = LineScanner::new(&applicable);
         if !lines.is_empty() {
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(err) => {
+                    out.skipped.push(unreadable(err));
+                    return out;
+                }
+            };
             let mut decoder = Utf16Lines::new(limits.max_line_size);
-            let fed = stream_utf16(&path, &mut decoder, |number, text| {
+            let fed = stream_utf16(file, &mut decoder, |number, text| {
                 lines.feed(relative, number, text, None, true);
             });
             match fed {
@@ -937,15 +953,14 @@ fn scan_streamed(
     out
 }
 
-/// Reads a UTF-16 file with a byte order mark through `decoder`, handing each
+/// Reads UTF-16 with a byte order mark through `decoder`, handing each
 /// line to `feed` as it is completed. Returns the line that was too long, if
 /// one stopped the reading.
 fn stream_utf16(
-    path: &Path,
+    mut file: impl Read,
     decoder: &mut Utf16Lines,
     mut feed: impl FnMut(usize, &str),
 ) -> io::Result<Option<usize>> {
-    let mut file = File::open(path)?;
     let mut bom = [0; 2];
     file.read_exact(&mut bom)?;
     let little_endian = bom == [0xFF, 0xFE];
@@ -1035,6 +1050,10 @@ impl Utf16Lines {
     }
 
     fn char(&mut self, c: char, feed: &mut impl FnMut(usize, &str)) -> Option<usize> {
+        if c == '\0' {
+            // Dropped, as in `decode_utf16_bom`.
+            return None;
+        }
         if c == '\n' {
             if self.line.ends_with('\r') {
                 self.line.pop();
@@ -1045,7 +1064,10 @@ impl Utf16Lines {
             return None;
         }
         self.line.push(c);
-        (self.line.len() > self.max_line).then_some(self.number + 1)
+        // A `\r` that may still turn out to end the line does not count, as
+        // on the byte path, which allows the limit plus `\r\n`.
+        let length = self.line.len() - usize::from(self.line.ends_with('\r'));
+        (length > self.max_line).then_some(self.number + 1)
     }
 
     /// Ends the text: a pending high surrogate is U+FFFD, and a last line
@@ -1336,10 +1358,10 @@ fn classify(slash_path: &str, bytes: &[u8]) -> Class {
             decode: Decode::AsciiOnly,
         };
     }
-    if has_utf16_bom(bytes) && has_script_extension(slash_path) {
-        // Windows PowerShell and WSH read a script with a UTF-16 byte order
-        // mark as UTF-16, whatever its first bytes hold: text made only of
-        // characters such as U+0101 has no NUL byte at all.
+    if is_utf16_script(slash_path, bytes) {
+        // Windows PowerShell, WSH and Perl read a script with a UTF-16 byte
+        // order mark as UTF-16, whatever its first bytes hold: text made only
+        // of characters such as U+0101 has no NUL byte at all.
         utf16 = true;
     } else if looks_binary(bytes) && !script && known_binary_magic(bytes) {
         // A script with a NUL byte is still a script, and the NUL is reported
@@ -1381,23 +1403,33 @@ pub(crate) fn decode(decode: Decode, bytes: &[u8]) -> Cow<'_, str> {
 }
 
 /// Whether the file is meant to be read as a script: it has a script
-/// extension or starts with a shebang. A file with a UTF-16 byte order mark is
-/// not one here, because UTF-16 text is full of NUL bytes by design (Windows
-/// PowerShell writes it by default); it is decoded instead.
+/// extension or starts with a shebang. A script that is decoded from UTF-16
+/// (`is_utf16_script`) is not one here, because UTF-16 text is full of NUL
+/// bytes by design (Windows PowerShell writes it by default).
 fn is_script(slash_path: &str, bytes: &[u8]) -> bool {
-    if has_utf16_bom(bytes) {
+    if is_utf16_script(slash_path, bytes) {
         return false;
     }
     has_script_extension(slash_path) || bytes.starts_with(b"#!")
 }
 
+/// A file with a UTF-16 byte order mark whose host decodes it as UTF-16
+/// (`UTF16_SCRIPT_EXTENSIONS`).
+fn is_utf16_script(slash_path: &str, bytes: &[u8]) -> bool {
+    has_utf16_bom(bytes) && extension_in(slash_path, UTF16_SCRIPT_EXTENSIONS)
+}
+
 fn has_script_extension(slash_path: &str) -> bool {
+    extension_in(slash_path, SCRIPT_EXTENSIONS)
+}
+
+fn extension_in(slash_path: &str, extensions: &[&str]) -> bool {
     slash_path
         .rsplit('/')
         .next()
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, extension)| extension.to_ascii_lowercase())
-        .is_some_and(|ext| SCRIPT_EXTENSIONS.contains(&ext.as_str()))
+        .is_some_and(|ext| extensions.contains(&ext.as_str()))
 }
 
 fn has_utf16_bom(bytes: &[u8]) -> bool {
@@ -1405,7 +1437,10 @@ fn has_utf16_bom(bytes: &[u8]) -> bool {
 }
 
 /// Decodes UTF-16 after its byte order mark; unpaired surrogates and a odd
-/// trailing byte become U+FFFD.
+/// trailing byte become U+FFFD, and U+0000 is dropped, as NUL bytes are on the
+/// other paths. That also keeps a UTF-32 LE file (`FF FE 00 00`), which
+/// PowerShell reads, from hiding its ASCII behind a U+0000 after every
+/// character: decoded as UTF-16 it reads as its own text.
 fn decode_utf16_bom(bytes: &[u8]) -> String {
     let little_endian = bytes.starts_with(&[0xFF, 0xFE]);
     let units = bytes[2..].chunks(2).map(|pair| match *pair {
@@ -1415,6 +1450,7 @@ fn decode_utf16_bom(bytes: &[u8]) -> String {
     });
     char::decode_utf16(units)
         .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .filter(|&c| c != '\0')
         .collect()
 }
 
@@ -2981,7 +3017,7 @@ mod tests {
             ("be.vbs", utf16("' \u{1F600} \u{202E}\nTODO\n\n", false)),
             ("odd.ps1", odd),
             ("lone-high.ps1", lone_high),
-            ("trailing-high.bat", trailing_high),
+            ("trailing-high.ps1", trailing_high),
             ("empty.ps1", vec![0xFF, 0xFE]),
         ];
         for (name, contents) in &files {
@@ -2997,6 +3033,187 @@ mod tests {
         assert_eq!(whole.findings, streamed.findings);
         assert_eq!(whole.skipped, streamed.skipped);
         assert_eq!(whole.files_scanned, streamed.files_scanned);
+    }
+
+    /// `cmd.exe`, the shells and PHP ignore a UTF-16 byte order mark and run
+    /// the bytes; decoding such a file as UTF-16 would hide the payload in
+    /// garbage (a known batch obfuscation, `FF FE 26 63 6C 73 0D 0A`).
+    #[test]
+    fn a_byte_order_mark_on_a_script_whose_host_reads_bytes_is_not_decoded() {
+        let with_mark = |text: &str| {
+            let mut bytes = vec![0xFF, 0xFE];
+            bytes.extend_from_slice(text.as_bytes());
+            bytes
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "run.bat",
+            &with_mark("&cls\r\nrem \u{202E} evil\r\n"),
+        );
+        write(
+            dir.path(),
+            "install.sh",
+            &with_mark("\nX=1 # \u{202E} evil\n"),
+        );
+        write(
+            dir.path(),
+            "index.php",
+            &with_mark("<?php // \u{202E} ?>\n"),
+        );
+        // Read as bytes, so the NUL rule still applies.
+        write(dir.path(), "nul.cmd", &with_mark("echo a\r\nrem \0\r\n"));
+        // Honest text in such a file: no bidi character appears by chance.
+        write(dir.path(), "notes.sh", &with_mark("a. b. c. f g h i. \n"));
+        let rules = builtin_rules().unwrap();
+
+        for limits in [Limits::default(), streaming()] {
+            let report = scan(dir.path(), &rules, limits);
+
+            let bidi: Vec<_> = report
+                .findings
+                .iter()
+                .filter(|f| f.rule_id == "deception.bidi-control")
+                .map(|f| (to_slash(&f.file), f.line))
+                .collect();
+            assert_eq!(
+                bidi,
+                [
+                    ("index.php".to_string(), 1),
+                    ("install.sh".to_string(), 2),
+                    ("run.bat".to_string(), 2),
+                ],
+                "{limits:?}"
+            );
+            assert_eq!(
+                builtin_findings(&report, NUL_RULE),
+                [("nul.cmd".to_string(), 2)],
+                "{limits:?}"
+            );
+        }
+    }
+
+    /// PowerShell reads UTF-32 LE (`FF FE 00 00`). Decoded as UTF-16 it has a
+    /// U+0000 after every character, which is dropped, so its text is read.
+    #[test]
+    fn a_utf32_script_is_not_hidden_behind_u0000() {
+        let mut bytes = vec![0xFF, 0xFE, 0x00, 0x00];
+        for c in "# a\n# \u{202E}evil\nTODO\n".chars() {
+            bytes.extend((c as u32).to_le_bytes());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "wide.ps1", &bytes);
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(RULES, "test.toml").unwrap());
+
+        let whole = scan(dir.path(), &rules, Limits::default());
+        let streamed = scan(dir.path(), &rules, streaming());
+
+        let found: Vec<_> = whole
+            .findings
+            .iter()
+            .filter(|f| f.rule_id != "repo.windows-script")
+            .map(|f| (f.rule_id.as_str(), f.line))
+            .collect();
+        assert_eq!(
+            found,
+            [("deception.bidi-control", 2), ("test.everywhere", 3)]
+        );
+        assert_eq!(whole.findings, streamed.findings);
+    }
+
+    /// The streamed decoder against the whole-file one on random code units,
+    /// read a few bytes at a time, so surrogate pairs, odd bytes and `\r\n`
+    /// are cut by read boundaries.
+    #[test]
+    fn the_streamed_utf16_decoder_matches_the_whole_file_on_any_read_boundaries() {
+        struct Trickle<'a> {
+            bytes: &'a [u8],
+            step: usize,
+            calls: usize,
+        }
+        impl Read for Trickle<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.calls += 1;
+                let n = (1 + (self.calls * 7 + self.step) % 5)
+                    .min(buf.len())
+                    .min(self.bytes.len());
+                buf[..n].copy_from_slice(&self.bytes[..n]);
+                self.bytes = &self.bytes[n..];
+                Ok(n)
+            }
+        }
+        // A small linear congruential generator: deterministic, no crate.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 33) as u32
+        };
+        let alphabet: [u16; 10] = [
+            0x41, 0x0A, 0x0D, 0x00, 0xD800, 0xDC00, 0xDBFF, 0x202E, 0xFFFD, 0x0101,
+        ];
+        for case in 0..2000 {
+            let little_endian = case % 2 == 0;
+            let mut bytes = if little_endian {
+                vec![0xFF, 0xFE]
+            } else {
+                vec![0xFE, 0xFF]
+            };
+            for _ in 0..(next() % 40) {
+                let unit = alphabet[(next() % 10) as usize];
+                bytes.extend(if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            if next() % 3 == 0 {
+                bytes.push(0x41);
+            }
+            let expected: Vec<String> = decode_utf16_bom(&bytes)
+                .lines()
+                .map(str::to_string)
+                .collect();
+
+            let mut got = Vec::new();
+            let mut decoder = Utf16Lines::new(usize::MAX / 2);
+            let reader = Trickle {
+                bytes: &bytes,
+                step: case,
+                calls: 0,
+            };
+            let result = stream_utf16(reader, &mut decoder, |number, text| {
+                assert_eq!(number, got.len() + 1);
+                got.push(text.to_string());
+            });
+            assert_eq!(result.unwrap(), None);
+            assert_eq!(got, expected, "case {case}: {bytes:02X?}");
+        }
+    }
+
+    #[test]
+    fn a_streamed_utf16_crlf_line_of_exactly_the_limit_is_not_too_long() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "edge.ps1",
+            &utf16(&format!("{}\r\n# \u{202E}\r\n", "a".repeat(64)), true),
+        );
+        let limits = Limits {
+            max_buffered_size: 1,
+            max_line_size: 64,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &builtin_rules().unwrap(), limits);
+
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(
+            builtin_findings(&report, "deception.bidi-control"),
+            [("edge.ps1".to_string(), 2)]
+        );
     }
 
     #[test]
