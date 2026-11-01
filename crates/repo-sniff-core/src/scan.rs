@@ -530,13 +530,21 @@ fn read_at(path: &Path, offset: u64) -> Option<[u8; 4]> {
     Some(bytes)
 }
 
-/// Resolves a symbolic link's target as text, the way either Unix or Windows
-/// could read it, whatever system the scan runs on: `/` and `\` both separate
-/// components, and a target that starts with a separator, a drive letter
-/// (`C:`) or a UNC or device prefix (`\\host`, `\\?\`, `\??\`) is absolute.
-/// Returns the repository path (with `/`) the link at `link` points at, or
-/// `None` when the target is absolute or climbs above the root.
+/// Resolves a symbolic link's target as text, whatever system the scan runs
+/// on, and returns the repository path (with `/`) it points at only when it
+/// stays inside the repository both the way Unix reads it (only `/`
+/// separates) and the way Windows reads it (`/` and `\` separate; a drive
+/// letter such as `C:`, or a UNC or device prefix such as `\\host`,
+/// `\\?\` or `\??\`, is absolute). `None` when either reading is absolute
+/// or climbs above the root. Of the two inside paths, the one for the system
+/// the scan runs on is returned.
 fn resolve_link_text(link: &str, target: &str) -> Option<String> {
+    let unix = resolve_link_with(link, target, &['/'])?;
+    let windows = resolve_link_with(link, target, &['/', '\\'])?;
+    Some(if cfg!(windows) { windows } else { unix })
+}
+
+fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<String> {
     let bytes = target.as_bytes();
     let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     if target.starts_with(['/', '\\']) || drive {
@@ -544,7 +552,7 @@ fn resolve_link_text(link: &str, target: &str) -> Option<String> {
     }
     let mut parts: Vec<&str> = link.split('/').collect();
     parts.pop();
-    for part in target.split(['/', '\\']) {
+    for part in target.split(separators) {
         match part {
             "" | "." => {}
             ".." => {
@@ -3144,7 +3152,13 @@ mod tests {
         assert_eq!(inside("a/link", "b.txt").as_deref(), Some("a/b.txt"));
         assert_eq!(inside("a/link", "../b.txt").as_deref(), Some("b.txt"));
         assert_eq!(inside("a/link", "./c/../b").as_deref(), Some("a/b"));
-        assert_eq!(inside("a/link", "..\\b.txt").as_deref(), Some("b.txt"));
+        // Inside both ways; the path returned is the one for this system.
+        let expected = if cfg!(windows) {
+            "b.txt"
+        } else {
+            "a/..\\b.txt"
+        };
+        assert_eq!(inside("a/link", "..\\b.txt").as_deref(), Some(expected));
         assert_eq!(inside("link", ".").as_deref(), Some(""));
         for outside in [
             "../../x",
@@ -3160,5 +3174,8 @@ mod tests {
             assert_eq!(inside("a/link", outside), None, "{outside}");
         }
         assert_eq!(inside("link", ".."), None);
+        // A Unix folder can be named `a\b\c`: read with `/` only, this climbs
+        // out three levels, so it is outside whatever the other reading says.
+        assert_eq!(inside("l2", "a\\b\\c/../../../etc/hostname"), None);
     }
 }

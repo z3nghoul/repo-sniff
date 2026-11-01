@@ -203,6 +203,17 @@ fn fixture_repository() -> tempfile::TempDir {
         link("C:\\Windows\\System32", "positive/links/drive");
         link("\\\\host.invalid\\share", "positive/links/unc");
         link("/usr/bin/python3", "positive/links/python");
+        link("/usr/../etc/hostname", "positive/links/sneaky");
+        link(
+            "/System/Volumes/Data/Users/someone/.ssh/id_rsa",
+            "positive/links/firmlink",
+        );
+        // A folder whose name has backslashes, which Unix allows.
+        fs::create_dir_all(root.join("positive/links/a\\b\\c")).unwrap();
+        link(
+            "a\\b\\c/../../../../etc/hostname",
+            "positive/links/backslashes",
+        );
         link("../bin/tool", "positive/links/logo.png");
         // Windows opens a link by its own name, so these are droppers and a
         // script even though their targets are not named like one.
@@ -330,6 +341,9 @@ fn every_fixture_gets_exactly_its_expected_findings() {
             row("positive/links/drive", "symlink-outside", High),
             row("positive/links/unc", "symlink-outside", High),
             row("positive/links/python", "symlink-outside", Medium),
+            row("positive/links/sneaky", "symlink-outside", High),
+            row("positive/links/firmlink", "symlink-outside", High),
+            row("positive/links/backslashes", "symlink-outside", High),
             // The link hides the ELF it points at; the target is reported as
             // a committed binary on its own.
             row("positive/links/logo.png", "disguised-executable", Critical),
