@@ -549,8 +549,9 @@ const SYSTEM_PROGRAM_DIRS: &[&str] = &[
     "/Applications/",
 ];
 
-/// Rule `repo.symlink-outside`. A link to the null device is not reported:
-/// masked services and similar files point there on purpose.
+/// Rule `repo.symlink-outside`. A link to `/dev/null` is not reported: masked
+/// services and similar files point there on purpose. (A link to Windows'
+/// `NUL` is relative, so it resolves inside and is not reported either.)
 pub fn symlink_outside(ctx: &Ctx<'_>) -> Vec<Hit> {
     let Some(FileIssue::Symlink {
         target: Some(target),
@@ -559,12 +560,21 @@ pub fn symlink_outside(ctx: &Ctx<'_>) -> Vec<Hit> {
     else {
         return Vec::new();
     };
-    if target == "/dev/null" || target.eq_ignore_ascii_case("nul") {
+    if target == "/dev/null" {
         return Vec::new();
     }
-    let system = SYSTEM_PROGRAM_DIRS
-        .iter()
-        .any(|dir| target.starts_with(dir));
+    // Only a plain path gets the lower level: `/usr/../etc/hostname` is not
+    // in /usr, and /System/Volumes/Data on macOS leads to user data.
+    let plain = !target.contains("/../")
+        && !target.ends_with("/..")
+        && !target.contains("/./")
+        && !target.contains("//")
+        && !target.contains('\\')
+        && !target.starts_with("/System/Volumes/");
+    let system = plain
+        && SYSTEM_PROGRAM_DIRS
+            .iter()
+            .any(|dir| target.starts_with(dir));
     let severity = if system {
         Severity::Medium.min(ctx.base)
     } else {
