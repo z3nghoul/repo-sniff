@@ -2479,4 +2479,301 @@ mod tests {
         assert_eq!(first_nul_line(b"a\r\nb\r\n\0"), Some(3));
         assert_eq!(first_nul_line(b"no nul"), None);
     }
+
+    /// `(line, column, span, snippet)` of a finding.
+    type Located = (usize, Option<usize>, Option<Range<usize>>, Option<String>);
+
+    fn locations(report: &Report, rule_id: &str) -> Vec<Located> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule_id)
+            .map(|f| (f.line, f.column, f.span.clone(), f.snippet.clone()))
+            .collect()
+    }
+
+    fn scan_one_with(name: &str, contents: &[u8], limits: Limits) -> Report {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), name, contents);
+        let mut rules = builtin_rules().unwrap();
+        rules.extend(parse_rules(RULES, "test.toml").unwrap());
+        scan(dir.path(), &rules, limits)
+    }
+
+    fn scan_one(name: &str, contents: &[u8]) -> Report {
+        scan_one_with(name, contents, Limits::default())
+    }
+
+    fn some(text: &str) -> Option<String> {
+        Some(text.to_string())
+    }
+
+    #[test]
+    fn line_findings_have_column_span_and_snippet_with_lf_and_crlf() {
+        for (contents, line_start) in [
+            (&b"ab\nx  TODO y\n"[..], 3),
+            (&b"ab\r\nx  TODO y\r\n"[..], 4),
+        ] {
+            let report = scan_one("a.txt", contents);
+            let span = line_start + 3..line_start + 7;
+            assert_eq!(
+                locations(&report, "test.everywhere"),
+                [(2, Some(4), Some(span.clone()), some("x  TODO y"))]
+            );
+            assert_eq!(&contents[span], b"TODO");
+        }
+    }
+
+    #[test]
+    fn columns_count_characters_and_skip_a_byte_order_mark() {
+        let contents = "\u{feff}TODO\r\n\u{e9}\u{1F600} TODO\r\nlast TODO".as_bytes();
+        let report = scan_one("a.txt", contents);
+        let found = locations(&report, "test.everywhere");
+        assert_eq!(
+            found,
+            [
+                (1, Some(1), Some(3..7), some("TODO")),
+                (2, Some(4), Some(16..20), some("\u{e9}\u{1F600} TODO")),
+                (3, Some(6), Some(27..31), some("last TODO")),
+            ]
+        );
+        for (_, _, span, _) in found {
+            assert_eq!(&contents[span.unwrap()], b"TODO");
+        }
+    }
+
+    #[test]
+    fn no_span_or_column_when_the_text_is_not_the_file_byte_for_byte() {
+        // A NUL in a script: the line rules read it with the NUL dropped, so
+        // their offsets are not the file's; the NUL's own offset is exact.
+        let report = scan_one("run.sh", b"a\n#\0x\nTODO\n");
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(3, None, None, some("TODO"))]
+        );
+        assert_eq!(
+            locations(&report, "deception.nul-byte-in-script"),
+            [(2, None, Some(3..4), None)]
+        );
+
+        // Invalid UTF-8 is replaced, which changes the byte length.
+        let report = scan_one("a.txt", b"\xFF TODO");
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(1, None, None, some("\u{FFFD} TODO"))]
+        );
+
+        // Binary-looking data is read as ASCII only.
+        let report = scan_one("blob.bin", b"\x1f\x8b\0\0 TODO");
+        let found = locations(&report, "test.everywhere");
+        assert_eq!((found[0].1, found[0].2.clone()), (None, None));
+
+        // UTF-16 is decoded: the column is in the decoded line, there is no span.
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in "x \u{202E} TODO".encode_utf16() {
+            utf16.extend(unit.to_le_bytes());
+        }
+        let report = scan_one("run.ps1", &utf16);
+        assert_eq!(
+            locations(&report, "deception.bidi-control"),
+            [(1, Some(3), None, some("x \\u{202E} TODO"))]
+        );
+        assert_eq!(locations(&report, "test.everywhere")[0].1, Some(5));
+    }
+
+    #[test]
+    fn a_streamed_file_has_exact_spans_only_when_it_is_its_own_text() {
+        let streamed = Limits {
+            max_buffered_size: 1,
+            ..Limits::default()
+        };
+        let contents = b"one\r\ntwo\r\nx TODO\r\n";
+        let report = scan_one_with("a.txt", contents, streamed);
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(3, Some(3), Some(12..16), some("x TODO"))]
+        );
+        assert_eq!(&contents[12..16], b"TODO");
+
+        // One invalid byte anywhere and no line has a span, as when read whole.
+        let report = scan_one_with("b.txt", b"\xFF\r\nx TODO\r\n", streamed);
+        assert_eq!(
+            locations(&report, "test.everywhere"),
+            [(2, None, None, some("x TODO"))]
+        );
+    }
+
+    #[test]
+    fn snippets_keep_the_match_in_view_on_long_lines() {
+        let line = format!("{}TODO{}", "a".repeat(500), "b".repeat(500));
+        let report = scan_one("a.txt", line.as_bytes());
+        let found = locations(&report, "test.everywhere");
+        assert_eq!(found[0].1, Some(501));
+        let expected = format!("...{}TODO{}...", "a".repeat(40), "b".repeat(76));
+        assert_eq!(found[0].3.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn hostile_snippets_are_escaped_capped_and_still_show_the_match() {
+        let mut line = String::from("\t\u{1b}[2J\u{9b}\u{2028}\u{E0041}");
+        line.push_str(&"\u{202E}".repeat(10_000));
+        line.push_str("TODO\tx \r\n");
+        let report = scan_one("a.txt", line.as_bytes());
+
+        let todo = locations(&report, "test.everywhere")[0].3.clone().unwrap();
+        assert_eq!(todo, format!("...{}TODO x", "\\u{202E}".repeat(5)));
+
+        let bidi = locations(&report, "deception.bidi-control")[0]
+            .3
+            .clone()
+            .unwrap();
+        let start = "\\u{001B}[2J\\u{009B}\\u{2028}\\u{E0041}";
+        assert!(bidi.starts_with(start), "{bidi}");
+        assert!(bidi.ends_with("..."), "{bidi}");
+        assert!(bidi.chars().count() <= MAX_SNIPPET_CHARS + 16, "{bidi}");
+        for snippet in [&todo, &bidi] {
+            assert!(
+                snippet
+                    .chars()
+                    .all(|c| c.is_ascii() && !c.is_ascii_control()),
+                "{snippet:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonc_findings_point_at_the_value_even_after_a_byte_order_mark() {
+        let text = "{\r\n  // c\r\n  \"tasks\": [{\"label\": \"x\",\r\n    \"runOptions\": {\"runOn\": \"folderOpen\"}}]\r\n}\r\n";
+        let mut spans = Vec::new();
+        for prefix in ["", "\u{feff}"] {
+            let contents = format!("{prefix}{text}");
+            let report = scan_one(".vscode/tasks.json", contents.as_bytes());
+            let found = locations(&report, "ide.vscode-folder-open-task");
+            assert_eq!(found.len(), 1);
+            let (line, column, span, snippet) = found[0].clone();
+            assert_eq!((line, column), (4, Some(29)));
+            assert_eq!(
+                snippet.as_deref(),
+                Some(r#""runOptions": {"runOn": "folderOpen"}}]"#)
+            );
+            let span = span.unwrap();
+            assert_eq!(&contents.as_bytes()[span.clone()], b"\"folderOpen\"");
+            spans.push(span.start);
+        }
+        assert_eq!(
+            spans[1],
+            spans[0] + 3,
+            "the byte order mark is part of the file"
+        );
+    }
+
+    #[test]
+    fn a_binary_looking_tasks_file_keeps_its_note_and_gets_no_span() {
+        let contents =
+            b"{/* \0\0\0\0\0\0\0\0\0\0\xFF */ \"tasks\": [{\"runOptions\": {\"runOn\": \"folderOpen\"}}]}";
+        let report = scan_one(".vscode/tasks.json", contents);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "ide.vscode-folder-open-task")
+            .unwrap();
+        assert_eq!((finding.column, &finding.span), (None, &None));
+        assert!(finding.snippet.is_some());
+        assert!(finding.explanation.ends_with(BINARY_LOOKING_NOTE));
+    }
+
+    #[test]
+    fn spans_from_a_check_are_validated_and_located_hits_are_capped() {
+        fn many(ctx: &Ctx<'_>) -> Vec<Hit> {
+            let hit = |line, span| Hit {
+                line,
+                span: Some(TextSpan(span)),
+                severity: ctx.base,
+                reason: "bad".to_string(),
+            };
+            // Reversed, past the end, inside a character, at the very end of
+            // the address space, and on another line than the one named.
+            let mut hits = vec![
+                hit(1, Range { start: 3, end: 1 }),
+                hit(1, 0..100_000),
+                hit(1, 300..301),
+                hit(1, usize::MAX..usize::MAX),
+                hit(2, 0..1),
+            ];
+            for index in 0..150 {
+                let mut good = hit(1, index..index + 1);
+                good.reason = "good".to_string();
+                hits.push(good);
+            }
+            hits
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = "x".repeat(300);
+        text.push('\u{e9}');
+        write(dir.path(), "a.json", text.as_bytes());
+        let mut rule = file_rule("**/*.json", many);
+        rule.matcher = Matcher::Jsonc(many);
+
+        let report = scan(dir.path(), &[rule], Limits::default());
+
+        assert_eq!(report.findings.len(), 155, "locating never drops a finding");
+        for finding in report.findings.iter().filter(|f| f.explanation == "bad") {
+            assert_eq!((finding.column, &finding.span), (None, &None));
+            assert_eq!(finding.snippet, None);
+        }
+        let located = report
+            .findings
+            .iter()
+            .filter(|f| f.column.is_some())
+            .count();
+        assert_eq!(located, MAX_LOCATED_HITS - 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_whose_bytes_are_not_its_own_gets_no_location() {
+        fn spanned(ctx: &Ctx<'_>) -> Vec<Hit> {
+            vec![Hit {
+                line: 1,
+                span: Some(TextSpan(0..6)),
+                severity: ctx.base,
+                reason: format!("bytes={}", ctx.bytes().len()),
+            }]
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "real.txt", b"import os\n");
+        std::os::unix::fs::symlink("real.txt", dir.path().join("evil.pth")).unwrap();
+        let rules = [file_rule("**/*.pth", spanned)];
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        let finding = &report.findings[0];
+        assert_eq!(finding.explanation, "bytes=10", "the check saw the target");
+        assert_eq!(
+            (finding.column, &finding.span, &finding.snippet),
+            (None, &None, &None)
+        );
+    }
+
+    #[test]
+    fn location_helpers_never_panic_on_odd_input() {
+        assert_eq!(Location::in_text("", &(0..0), true, true).column, Some(1));
+        assert_eq!(Location::in_text("ab", &(2..2), true, true).column, Some(3));
+        assert_eq!(
+            Location::in_text("a\r\n", &(1..2), true, true).column,
+            Some(2)
+        );
+        let past = Location::in_line("ab", 9, false, true, Some(0..1));
+        assert_eq!((past.column, past.span), (Some(3), Some(0..1)));
+        assert_eq!(snippet("", 0), "");
+        assert_eq!(snippet("   ", 1), "");
+        assert_eq!(
+            snippet("\u{e9}", 1),
+            "",
+            "inside a character: nothing, no panic"
+        );
+        assert_eq!(snippet("\u{e9}x", 2), "\u{e9}x");
+        assert_eq!(nul_span(b"ab"), None);
+        assert_eq!(nul_span(b"a\0"), Some(1..2));
+    }
 }
