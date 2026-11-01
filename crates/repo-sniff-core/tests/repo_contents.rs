@@ -124,8 +124,35 @@ fn fixture_repository() -> tempfile::TempDir {
     write(root, "positive/disguised/invoice.pdf.exe", &pe());
     write(root, "positive/disguised/photo\u{202E}gpj.exe", &pe());
     write(root, "positive/disguised/fake.class", &fat_mach_o());
+    write(root, "positive/disguised/invoice.pdf          .exe", &pe());
     write(root, "positive/dropper/invoice.lnk", &lnk());
     write(root, "positive/dropper/screensaver.scr", &pe());
+    write(
+        root,
+        "positive/lure/invoice.pdf.bat",
+        b"REM SYNTHETIC TEST FIXTURE - not functional\r\necho hello\r\n",
+    );
+    write(
+        root,
+        "positive/lure/photo\u{202E}gpj.vbs",
+        b"' SYNTHETIC TEST FIXTURE - not functional\nWScript.Echo \"hello\"\n",
+    );
+    write(
+        root,
+        "positive/lure/invoice.pdf.hta",
+        b"<!-- SYNTHETIC TEST FIXTURE - not functional --><html></html>\n",
+    );
+    write(
+        root,
+        "positive/linked/assets/page.txt",
+        b"SYNTHETIC TEST FIXTURE - not functional\n",
+    );
+    write(root, "positive/linked/assets/icon.dat", &lnk());
+    write(
+        root,
+        "positive/linked/assets/notes.txt",
+        b"SYNTHETIC TEST FIXTURE - not functional\n",
+    );
 
     write(
         root,
@@ -177,6 +204,11 @@ fn fixture_repository() -> tempfile::TempDir {
         link("\\\\host.invalid\\share", "positive/links/unc");
         link("/usr/bin/python3", "positive/links/python");
         link("../bin/tool", "positive/links/logo.png");
+        // Windows opens a link by its own name, so these are droppers and a
+        // script even though their targets are not named like one.
+        link("assets/page.txt", "positive/linked/invoice.hta");
+        link("assets/icon.dat", "positive/linked/report.lnk");
+        link("assets/notes.txt", "positive/linked/run.vbe");
         link("../text/mz.txt", "negative/links/inside");
         link("missing.txt", "negative/links/dangling");
         link("/dev/null", "negative/links/null");
@@ -262,6 +294,18 @@ fn every_fixture_gets_exactly_its_expected_findings() {
             Critical,
         ),
         row("positive/disguised/fake.class", "committed-binary", High),
+        row(
+            "positive/disguised/invoice.pdf          .exe",
+            "disguised-executable",
+            Critical,
+        ),
+        row("positive/lure/invoice.pdf.bat", "windows-script", Critical),
+        row(
+            "positive/lure/photo\u{202E}gpj.vbs",
+            "windows-script",
+            Critical,
+        ),
+        row("positive/lure/invoice.pdf.hta", "windows-dropper", Critical),
         row("positive/dropper/invoice.lnk", "windows-dropper", High),
         row("positive/dropper/screensaver.scr", "windows-dropper", High),
         row("positive/dropper/update.hta", "windows-dropper", High),
@@ -289,6 +333,9 @@ fn every_fixture_gets_exactly_its_expected_findings() {
             // The link hides the ELF it points at; the target is reported as
             // a committed binary on its own.
             row("positive/links/logo.png", "disguised-executable", Critical),
+            row("positive/linked/invoice.hta", "windows-dropper", High),
+            row("positive/linked/report.lnk", "windows-dropper", High),
+            row("positive/linked/run.vbe", "windows-script", High),
         ]);
     }
     let found = rows(&report);
@@ -315,9 +362,9 @@ fn reported_executables_are_still_listed_and_the_scan_is_complete() {
             _ => None,
         })
         .collect();
-    // Eight committed, seven disguised, the screen saver, and the two files
+    // Eight committed, eight disguised, the screen saver, and the two files
     // that start with CAFEBABE (the scanner lists every one as executable).
-    assert_eq!(executables.len(), 18, "{:?}", report.skipped);
+    assert_eq!(executables.len(), 19, "{:?}", report.skipped);
     assert!(executables.iter().all(|&reported| reported));
 }
 
