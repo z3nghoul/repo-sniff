@@ -510,10 +510,13 @@ pub fn windows_dropper(ctx: &Ctx<'_>) -> Vec<Hit> {
         return Vec::new();
     };
     let head = ctx.bytes();
+    // A link whose target the scanner could not read (a chain, a link to a
+    // folder) is judged by its name, as a file too large to read is.
+    let by_name = name_only(ctx) || (is_symlink(ctx) && head.is_empty());
     let runs = match extension {
         "hta" => true,
-        "lnk" => name_only(ctx) || head.starts_with(&LNK_HEADER),
-        "scr" => name_only(ctx) || native_screen_saver(&name, code(head, &name, ctx.executable())),
+        "lnk" => by_name || head.starts_with(&LNK_HEADER),
+        "scr" => by_name || native_screen_saver(&name, code(head, &name, ctx.executable())),
         _ => false,
     };
     if !runs {
