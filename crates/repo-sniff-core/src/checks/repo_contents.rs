@@ -22,7 +22,6 @@
 
 use super::{Ctx, FileIssue, Hit};
 use crate::finding::Severity;
-use crate::scan::{executable_format, looks_binary};
 
 /// Extensions that promise a file is not native code: images, documents,
 /// media, fonts, archives, text, data and configuration formats, and source
@@ -236,14 +235,12 @@ enum Code {
     Bytecode(&'static str),
 }
 
-/// Recognizes code from a file's first bytes and its normalized name. Native
-/// code needs binary content, as the scanner's own classification does, so a
-/// text file that happens to start with `MZ` is not one.
-fn code(head: &[u8], name: &str) -> Option<Code> {
+/// Recognizes code from a file's first bytes, its normalized name and the
+/// native format the scanner found (`Ctx::executable`), so that a check and
+/// the scanner's "executable" listing never disagree.
+fn code(head: &[u8], name: &str, executable: Option<&'static str>) -> Option<Code> {
     let extension = extension(name);
-    if looks_binary(head)
-        && let Some(format) = executable_format(head)
-    {
+    if let Some(format) = executable {
         if head.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]) {
             return Some(if extension == Some("class") && java_class(head) {
                 Code::Bytecode("Java class")
@@ -376,7 +373,7 @@ fn hit(severity: Severity, reason: String) -> Vec<Hit> {
 /// name and the head of its in-repository target.
 pub fn disguised_executable(ctx: &Ctx<'_>) -> Vec<Hit> {
     let name = normalized_name(ctx.path);
-    let Some(Code::Native(format)) = code(ctx.bytes(), &name) else {
+    let Some(Code::Native(format)) = code(ctx.bytes(), &name, ctx.executable()) else {
         return Vec::new();
     };
     let Some(why) = disguise(&name) else {
@@ -416,7 +413,7 @@ pub fn committed_binary(ctx: &Ctx<'_>) -> Vec<Hit> {
             Vec::new()
         };
     }
-    let code = code(ctx.bytes(), &name);
+    let code = code(ctx.bytes(), &name, ctx.executable());
     match code {
         Some(Code::Native(_)) if disguise(&name).is_some() || native_screen_saver(&name, code) => {
             Vec::new() // reported as disguised, or as a dropper
@@ -454,7 +451,7 @@ pub fn windows_dropper(ctx: &Ctx<'_>) -> Vec<Hit> {
     let runs = match extension {
         "hta" => true,
         "lnk" => name_only(ctx) || head.starts_with(&LNK_HEADER),
-        "scr" => name_only(ctx) || native_screen_saver(&name, code(head, &name)),
+        "scr" => name_only(ctx) || native_screen_saver(&name, code(head, &name, ctx.executable())),
         _ => false,
     };
     if !runs {
@@ -546,6 +543,12 @@ pub fn symlink_outside(ctx: &Ctx<'_>) -> Vec<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::native_format;
+
+    /// `code` with the format the scanner finds for a file of these bytes.
+    fn code_of(head: &[u8], name: &str) -> Option<Code> {
+        code(head, name, native_format(head, None))
+    }
 
     #[test]
     fn names_are_taken_the_way_windows_sees_them() {
@@ -591,22 +594,31 @@ mod tests {
         let no_pool = [0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52, 0, 0, 10, 0];
         let fat64 = [0xCA, 0xFE, 0xBA, 0xBF, 0, 0, 0, 52, 0, 20, 10, 0];
         assert_eq!(
-            code(&class, "main.class"),
+            code_of(&class, "main.class"),
             Some(Code::Bytecode("Java class"))
         );
-        assert_eq!(code(&class, "main.bin"), Some(Code::Native("Mach-O fat")));
-        assert_eq!(code(&fat, "main.class"), Some(Code::Native("Mach-O fat")));
         assert_eq!(
-            code(&padded_fat, "main.class"),
+            code_of(&class, "main.bin"),
             Some(Code::Native("Mach-O fat"))
         );
         assert_eq!(
-            code(&no_pool, "main.class"),
+            code_of(&fat, "main.class"),
             Some(Code::Native("Mach-O fat"))
         );
-        assert_eq!(code(&fat64, "main.class"), Some(Code::Native("Mach-O fat")));
         assert_eq!(
-            code(&[0xCA, 0xFE, 0xBA, 0xBE], "x.class"),
+            code_of(&padded_fat, "main.class"),
+            Some(Code::Native("Mach-O fat"))
+        );
+        assert_eq!(
+            code_of(&no_pool, "main.class"),
+            Some(Code::Native("Mach-O fat"))
+        );
+        assert_eq!(
+            code_of(&fat64, "main.class"),
+            Some(Code::Native("Mach-O fat"))
+        );
+        assert_eq!(
+            code_of(&[0xCA, 0xFE, 0xBA, 0xBE], "x.class"),
             None,
             "no NUL, not binary"
         );
@@ -617,24 +629,24 @@ mod tests {
         tricky.extend_from_slice(&[0x01, 0, 0, 0x07]);
         tricky.resize(8 + 40, 0);
         assert_eq!(
-            code(&tricky, "main.class"),
+            code_of(&tricky, "main.class"),
             Some(Code::Native("Mach-O fat"))
         );
     }
 
     #[test]
     fn native_code_needs_binary_content_and_a_pe_signature() {
-        assert_eq!(code(b"MZ is a postal code", "a"), None);
-        assert_eq!(code(b"\x7fELF but text", "a"), None);
-        assert_eq!(code(b"MZ\x90\0\x03\0", "a"), Some(Code::Native("PE")));
+        assert_eq!(code_of(b"MZ is a postal code", "a"), None);
+        assert_eq!(code_of(b"\x7fELF but text", "a"), None);
+        assert_eq!(code_of(b"MZ\x90\0\x03\0", "a"), Some(Code::Native("PE")));
         let mut pe = vec![0u8; 0x48];
         pe[..2].copy_from_slice(b"MZ");
         pe[0x3C] = 0x40;
         pe[0x40..0x44].copy_from_slice(b"PE\0\0");
-        assert_eq!(code(&pe, "a"), Some(Code::Native("PE")));
+        assert_eq!(code_of(&pe, "a"), Some(Code::Native("PE")));
         pe[0x40..0x44].copy_from_slice(b"text");
         assert_eq!(
-            code(&pe, "mz.txt"),
+            code_of(&pe, "mz.txt"),
             None,
             "MZ with a NUL but no PE signature"
         );
@@ -672,7 +684,7 @@ mod tests {
         for header in headers {
             for len in 0..=header.len() {
                 for name in ["a.class", "a.pyc", "a.png", "a.scr", "a"] {
-                    let _ = code(&header[..len], name);
+                    let _ = code_of(&header[..len], name);
                 }
             }
         }

@@ -469,3 +469,73 @@ fn many_links_to_a_large_file_read_only_its_head() {
         started.elapsed()
     );
 }
+
+/// A PE needs no NUL byte in its first 8 KiB: every DOS header field but `MZ`
+/// and `e_lfanew` can be anything, and with all four bytes of `e_lfanew`
+/// non-zero its header lies past 16 MiB, where the loader still finds it.
+fn pe_without_a_nul_up_front() -> (Vec<u8>, u64) {
+    let offset: u64 = 0x0101_0104;
+    let mut head = b"MZ".to_vec();
+    head.resize(0x3C, b'A');
+    head.extend_from_slice(&(offset as u32).to_le_bytes());
+    head.extend_from_slice(MARKER);
+    head.resize(16 * 1024, b'A');
+    (head, offset)
+}
+
+fn write_far_pe(path: &Path) {
+    use std::io::{Seek, SeekFrom, Write};
+    let (head, offset) = pe_without_a_nul_up_front();
+    let mut file = fs::File::create(path).unwrap();
+    file.write_all(&head).unwrap();
+    // The space up to the PE header is left as a hole (zeros), so the test
+    // does not write 16 MiB.
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(b"PE\0\0").unwrap();
+    file.write_all(MARKER).unwrap();
+}
+
+#[test]
+fn a_pe_with_no_nul_in_its_first_8_kib_is_still_an_executable() {
+    let dir = tempfile::tempdir().unwrap();
+    write_far_pe(&dir.path().join("setup.exe"));
+    write_far_pe(&dir.path().join("logo.png"));
+
+    let report = scan(dir.path(), &builtin_rules().unwrap(), Limits::default());
+
+    let found = rows(&report);
+    assert!(found.contains(&row("setup.exe", "committed-binary", Severity::High)));
+    assert!(found.contains(&row("logo.png", "disguised-executable", Severity::Critical)));
+    assert!(report.is_complete(), "{:?}", report.skipped);
+    let executables = report
+        .skipped
+        .iter()
+        .filter(|s| matches!(s.reason, SkipReason::Executable { reported: true, .. }))
+        .count();
+    assert_eq!(executables, 2);
+}
+
+#[test]
+fn an_mz_file_whose_signature_is_missing_is_data_for_the_scanner_and_the_rules() {
+    // e_lfanew points at 0x3000, past the first 8 KiB, and there is no PE
+    // signature there: both the scanner and the head rules call it data.
+    let mut bytes = b"MZ".to_vec();
+    bytes.resize(0x3C, 0);
+    bytes.extend_from_slice(&0x3000u32.to_le_bytes());
+    bytes.extend_from_slice(MARKER);
+    bytes.resize(0x3100, 0x11);
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "x.png", &bytes);
+
+    let report = scan(dir.path(), &builtin_rules().unwrap(), Limits::default());
+
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(
+        !report
+            .skipped
+            .iter()
+            .any(|s| matches!(s.reason, SkipReason::Executable { .. })),
+        "{:?}",
+        report.skipped
+    );
+}
