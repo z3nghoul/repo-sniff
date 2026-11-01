@@ -17,7 +17,7 @@ pub mod python_start;
 pub mod vscode_autorun;
 
 use std::borrow::Cow;
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::{BTreeSet, HashSet};
 
 use crate::finding::Severity;
@@ -60,6 +60,8 @@ pub(crate) struct Views<'a> {
     decode: Decode,
     text: OnceCell<Cow<'a, str>>,
     jsonc: OnceCell<Result<Node, ParseError>>,
+    /// The last `line_of` answer, `(offset, line)`, to count on from.
+    line_cursor: Cell<(usize, usize)>,
 }
 
 impl<'a> Views<'a> {
@@ -69,6 +71,7 @@ impl<'a> Views<'a> {
             decode,
             text: OnceCell::new(),
             jsonc: OnceCell::new(),
+            line_cursor: Cell::new((0, 1)),
         }
     }
 
@@ -80,6 +83,25 @@ impl<'a> Views<'a> {
     pub(crate) fn text(&self) -> &str {
         self.text
             .get_or_init(|| crate::scan::decode(self.decode, self.bytes))
+    }
+
+    /// The 1-based line of a byte offset in `text`, counting `\n`, so LF and
+    /// CRLF files agree; an offset past the end counts as the end. It counts on
+    /// from the previous answer, so offsets asked in document order, as a
+    /// parser hands them out, cost one pass over the text in total instead of
+    /// one pass each.
+    pub(crate) fn line_of(&self, offset: usize) -> usize {
+        let text = self.text().as_bytes();
+        let offset = offset.min(text.len());
+        let newlines = |range: &[u8]| range.iter().filter(|&&b| b == b'\n').count();
+        let (from, line) = self.line_cursor.get();
+        let line = if offset >= from {
+            line + newlines(&text[from..offset])
+        } else {
+            line - newlines(&text[offset..from])
+        };
+        self.line_cursor.set((offset, line));
+        line
     }
 
     /// `text` parsed as JSONC.
@@ -136,6 +158,13 @@ impl<'a> Ctx<'a> {
     /// that `bytes` holds; for an executable it is its ASCII only.
     pub fn text(&self) -> &'a str {
         self.views.text()
+    }
+
+    /// The 1-based line of a byte offset in `text` (see `Views::line_of`).
+    /// Use it instead of counting lines from the start for every hit, which is
+    /// quadratic on a file with many hits.
+    pub fn line_of(&self, offset: usize) -> usize {
+        self.views.line_of(offset)
     }
 
     /// The file parsed as JSONC, or the parse error.
@@ -293,6 +322,20 @@ mod tests {
         assert!(std::ptr::eq(first.jsonc(), second.jsonc()));
         assert!(std::ptr::eq(first.text(), second.text()));
         assert_eq!(second.bytes(), bytes);
+    }
+
+    #[test]
+    fn line_of_agrees_with_counting_from_the_start_in_any_order() {
+        let text = "a\nbb\r\n\nccc\r\nd";
+        let views = Views::new(text.as_bytes(), Decode::Utf8WithoutNuls);
+        let offsets = [0, 5, 2, 3, 15, 999, 7, 1, 8, 4, 0, 14, 6, 13];
+        for offset in offsets {
+            assert_eq!(
+                views.line_of(offset),
+                jsonc::line_of(text, offset),
+                "offset {offset}"
+            );
+        }
     }
 
     #[test]
