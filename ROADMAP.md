@@ -88,7 +88,7 @@ needing a new engine variant each.
   - [ ] Still open: a language per file and `languages = [...]` next to `files`; UTF-16 decoding for every text file, not only scripts (Trojan Source in a UTF-16 `.rs` file is read as ASCII only today, so the bidi rule misses it); UTF-16 decoded whatever the first 8 KiB holds (a UTF-16 `.ps1` whose first 8 KiB has no NUL byte, for example only characters such as U+0101, is not decoded today) and for streamed files; UTF-16 without a byte order mark
 - [ ] One phase for every check: offer `jsonc` checks (and the later structured formats) oversized, streamed and symlinked files the way `file` checks are offered them, so that, for example, a `.vscode/tasks.json` that is a symlink to another file in the repository is judged instead of only listed
 - [x] `Finding` gains column, byte span and a short snippet (more fields come with the milestones that need them; the `.pth` and `.start` checks do not give spans yet)
-- [ ] Generic fixture harness: a fixture folder plus `expected.toml`, so a new rule needs no new test code (separate small pull request)
+- [x] Generic fixture harness: a fixture folder plus `expected.toml` (beside it, as `<family>.expected.toml`), so a new rule needs no new test code (separate small pull request)
 
 ### Rule families
 
