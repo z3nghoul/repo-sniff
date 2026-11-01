@@ -85,7 +85,7 @@ needing a new engine variant each.
 - [ ] One check signature `fn(&Ctx) -> Vec<Hit>` with lazily cached views (`ctx.bytes()`, `ctx.text()`, `ctx.jsonc()`, later `yaml`, `toml`, `xml`, AST) and the repository index available to every check
 - [ ] File classification before rules: BOM and UTF-16 decoding, shebang, magic bytes, language; rules may select by `languages = [...]` next to `files` (UTF-16 `.ps1` and Trojan Source in UTF-16 reach line rules)
 - [ ] `Finding` gains column, byte span and a short snippet (more fields come with the milestones that need them)
-- [ ] Generic fixture harness: a fixture folder plus `expected.toml`, so a new rule needs no new test code (separate small pull request)
+- [x] Generic fixture harness: a fixture folder plus `expected.toml` (beside it, as `<family>.expected.toml`), so a new rule needs no new test code (separate small pull request)
 
 ### Rule families
 
