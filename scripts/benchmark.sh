@@ -61,4 +61,8 @@ for repo in "${REPOS[@]}"; do
     "${skipped:--}" "$secs" >>"$OUT/results.tsv"
 done
 
-column -t -s "$(printf '\t')" "$OUT/results.tsv"
+# The summary as a table of fixed widths (no `column`, which is not everywhere).
+while IFS="$(printf '\t')" read -r repo head result code critical high medium low info skipped secs; do
+  printf '%-22s %-13s %-13s %-5s %-9s %-5s %-7s %-4s %-5s %-52s %s\n' \
+    "$repo" "$head" "$result" "$code" "$critical" "$high" "$medium" "$low" "$info" "$skipped" "$secs"
+done <"$OUT/results.tsv"
