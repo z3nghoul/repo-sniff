@@ -417,7 +417,9 @@ fn no_name_lets_a_native_executable_through() {
         "a.pth",
         ".npmrc",
         "a.pdf.exe",
-        "A.PNG",
+        // In a folder of its own: on a case-insensitive file system it would
+        // be the same file as a.png.
+        "upper/A.PNG",
     ];
     let headers: [(&str, Vec<u8>); 7] = [
         ("ELF", elf()),
@@ -450,7 +452,7 @@ fn no_name_lets_a_native_executable_through() {
         assert!(report.is_complete(), "{format}: {:?}", report.skipped);
         for name in names {
             let named = report.findings.iter().any(|f| {
-                f.file.to_string_lossy() == name
+                f.file.to_string_lossy().replace('\\', "/") == name
                     && naming.contains(&f.rule_id.as_str())
                     && f.severity >= Severity::High
             });
