@@ -22,7 +22,7 @@ const EXIT_FINDINGS: u8 = 1;
 const EXIT_ERROR: u8 = 2;
 /// Exit status when nothing reached `--fail-on` but the scan was inconclusive
 /// (the walk was cut short, a file was not read, or an executable was not
-/// analyzed): not a pass.
+/// reported by any rule): not a pass.
 const EXIT_INCONCLUSIVE: u8 = 3;
 
 /// Statically scan a repository for signs of malicious or suspicious code.
@@ -31,8 +31,8 @@ const EXIT_INCONCLUSIVE: u8 = 3;
 /// --fail-on threshold, 1 when something does, 2 when the scan could not
 /// run, 3 when nothing reaches the threshold but the scan was inconclusive
 /// (the file limit was reached, a file was too large or unreadable, or an
-/// executable binary was not analyzed), so that a clean-looking result is
-/// never a pass. Other binary files, such as images and archives, are listed
+/// executable binary was not reported by any rule), so that a clean-looking
+/// result is never a pass. Other binary files, such as images and archives, are listed
 /// but do not change the status.
 #[derive(Parser)]
 #[command(version, about)]

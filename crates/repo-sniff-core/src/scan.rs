@@ -2035,6 +2035,7 @@ mod tests {
         let bidi: Vec<_> = report
             .findings
             .iter()
+            .filter(|f| f.rule_id == "deception.bidi-control")
             .map(|f| (to_slash(&f.file), f.line))
             .collect();
         assert_eq!(
@@ -2461,7 +2462,13 @@ mod tests {
 
         let report = scan(dir.path(), &rules, streaming());
 
-        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        // The streamed executable gets its head rules: a finding, and listed.
+        let found: Vec<_> = report
+            .findings
+            .iter()
+            .map(|f| (to_slash(&f.file), f.rule_id.as_str()))
+            .collect();
+        assert_eq!(found, [("tool.exe".to_string(), "repo.committed-binary")]);
         let mut reasons: Vec<_> = report
             .skipped
             .iter()
@@ -2475,13 +2482,13 @@ mod tests {
                     "tool.exe".to_string(),
                     SkipReason::Executable {
                         format: "PE",
-                        reported: false,
+                        reported: true,
                     }
                 ),
                 ("voice.mp3".to_string(), SkipReason::Binary),
             ]
         );
-        assert!(!report.is_complete());
+        assert!(report.is_complete());
     }
 
     #[test]
@@ -2659,8 +2666,20 @@ mod tests {
 
         let report = scan(dir.path(), &rules, Limits::default());
 
-        assert_eq!(report.inconclusive_count(), 1);
+        // Reported as an executable disguised as a script, not as a script.
+        assert_eq!(report.inconclusive_count(), 0);
         assert!(builtin_findings(&report, NUL_RULE).is_empty());
+        assert_eq!(
+            builtin_findings(&report, "repo.disguised-executable").len(),
+            1
+        );
+        assert_eq!(
+            report.skipped[0].reason,
+            SkipReason::Executable {
+                format: "ELF",
+                reported: true
+            }
+        );
     }
 
     #[test]

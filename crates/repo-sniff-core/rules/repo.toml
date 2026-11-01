@@ -1,0 +1,88 @@
+# Stage: repo. Files whose presence in the repository is a risk by itself.
+# The head checks see a file's name and its first 8 KiB, and every entry of
+# the repository: files read whole or as a stream, files over the size limit
+# (by name) and symbolic links.
+
+[[rule]]
+id          = "repo.disguised-executable"
+engine      = "head"
+family      = "repository-contents"
+stage       = "repo"
+severity    = "critical"
+# Masquerading: a file type disguise (T1036.008), a double extension
+# (T1036.007) or a right-to-left override in the name (T1036.002); one ID per
+# rule, so the parent technique.
+attack      = ["T1036"]
+description = "A native executable (ELF, PE, Mach-O) whose name promises something else: an image, a document, data, a script, a double extension such as invoice.pdf.exe, or bidi and invisible characters. Executables do not end up under such names by accident"
+example     = 'assets/logo.png is a PE executable'
+# Its finding stands for the executable in the report, so the file does not
+# make the scan inconclusive.
+names_executables = true
+
+[[rule]]
+id          = "repo.committed-binary"
+engine      = "head"
+family      = "repository-contents"
+stage       = "repo"
+# Native executables and libraries. The check lowers it to medium for bytecode
+# a runtime loads (.pyc, Java classes and archives, WebAssembly).
+severity    = "high"
+attack      = []
+description = "A compiled executable or library is committed to the repository. It runs code that nobody can review in the repository and that the scanner does not analyze, so where it comes from has to be checked"
+example     = 'tools/helper.exe is a PE executable'
+names_executables = true
+
+[[rule]]
+id          = "repo.windows-dropper"
+engine      = "head"
+family      = "repository-contents"
+stage       = "repo"
+severity    = "high"
+attack      = ["T1204.002"]
+description = "A Windows shortcut (.lnk with a shortcut header), screen saver (.scr that is a PE) or HTML application (.hta). Windows runs it on a double click, which makes it a common way to deliver malware"
+example     = 'docs/invoice.lnk'
+# A .scr that is a PE is reported here instead of by repo.committed-binary.
+names_executables = true
+
+[[rule]]
+id          = "repo.windows-script"
+engine      = "head"
+family      = "repository-contents"
+stage       = "repo"
+# Command and PowerShell scripts (.bat, .cmd, .ps1, .psm1) are common build
+# glue in honest repositories and stay low; the check raises Windows Script
+# Host files (.vbs, .wsf, .wsh) to medium and Script Encoder output (.vbe,
+# .jse), which only hides a script, to high.
+severity    = "low"
+attack      = ["T1059"]
+description = "A Windows script file. It runs when opened or called on Windows, so it is part of what the repository can do on a developer's machine"
+example     = 'scripts/setup.vbs'
+
+[[rule]]
+id          = "repo.wsh-javascript"
+engine      = "line-regex"
+family      = "repository-contents"
+stage       = "repo"
+severity    = "medium"
+attack      = ["T1059.007"]
+description = "A JavaScript file uses Windows Script Host objects (WScript, or ActiveXObject for the shell, the file system or binary streams). Run by double click on Windows, such a file has full access to the machine"
+example     = 'run.js:3 calls WScript.CreateObject("WScript.Shell")'
+# Old browser code uses ActiveXObject("Microsoft.XMLHTTP") for requests; that
+# form is not matched.
+# WScript and its alias WSH, with a member or bracket access (JScript is case
+# sensitive); ActiveXObject or GetObject with a ProgID for the shell, files,
+# binary streams, server-side HTTP, WMI or the task scheduler (COM ProgIDs
+# ignore case). Old browser code uses ActiveXObject("Microsoft.XMLHTTP") or
+# "Msxml2.XMLHTTP" for requests; those are not matched.
+pattern     = '''\b(?:WScript|WSH)\s*(?:\.\s*(?:CreateObject|GetObject|Shell|Run|Echo|Arguments|ScriptFullName|ScriptName|Sleep|StdOut|StdIn|StdErr|Quit)\b|\[)|\b(?:ActiveXObject|GetObject)\s*\(\s*["'](?i:WScript\.Shell|Scripting\.FileSystemObject|Shell\.Application|ADODB\.Stream|MSXML2\.ServerXMLHTTP|WinHttp\.WinHttpRequest|WbemScripting\.SWbemLocator|Schedule\.Service|winmgmts:)'''
+files       = ["**/*.js"]
+
+[[rule]]
+id          = "repo.symlink-outside"
+engine      = "head"
+family      = "repository-contents"
+stage       = "repo"
+severity    = "high"
+attack      = []
+description = "A symbolic link points outside the repository (an absolute path, or one that climbs above the root). A build, an editor or an archive tool that follows it reads or writes files elsewhere on the machine"
+example     = 'config/secrets -> /home/user/.ssh'

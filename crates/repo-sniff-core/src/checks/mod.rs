@@ -14,6 +14,7 @@
 mod pylines;
 pub mod python_pth;
 pub mod python_start;
+pub mod repo_contents;
 pub mod vscode_autorun;
 
 use std::borrow::Cow;
@@ -297,7 +298,16 @@ pub fn file_check(rule_id: &str) -> Option<Check> {
 }
 
 /// Every head check, keyed by the id of the rule it implements.
-const HEAD_CHECKS: &[(&str, Check)] = &[];
+const HEAD_CHECKS: &[(&str, Check)] = &[
+    ("repo.committed-binary", repo_contents::committed_binary),
+    (
+        "repo.disguised-executable",
+        repo_contents::disguised_executable,
+    ),
+    ("repo.symlink-outside", repo_contents::symlink_outside),
+    ("repo.windows-dropper", repo_contents::windows_dropper),
+    ("repo.windows-script", repo_contents::windows_script),
+];
 
 /// Finds the head check registered for a rule id.
 pub fn head_check(rule_id: &str) -> Option<Check> {
