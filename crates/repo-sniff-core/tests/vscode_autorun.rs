@@ -160,3 +160,30 @@ fn a_tasks_file_the_jsonc_rule_cannot_read_whole_is_listed_not_judged() {
     assert_eq!(report.files_scanned, 0);
     assert_eq!(reasons(&report), [SkipReason::Executable { format: "ELF" }]);
 }
+
+#[test]
+fn many_auto_run_tasks_are_all_listed_in_linear_time() {
+    // Counting lines from the start of the file for every task made this
+    // quadratic: 20 000 tasks took minutes. Each task is on its own line, and
+    // every task must still be listed (the jsonc rule has no cap).
+    let count = 20_000;
+    let mut text = String::from("{\"tasks\": [\n");
+    for index in 0..count {
+        let comma = if index + 1 < count { "," } else { "" };
+        text.push_str(&format!(
+            "{{\"label\": \"t{index}\", \"runOptions\": {{\"runOn\": \"folderOpen\"}}}}{comma}\n"
+        ));
+    }
+    text.push_str("]}\n");
+
+    let started = std::time::Instant::now();
+    let report = scan_tasks(text.as_bytes(), Limits::default());
+    let elapsed = started.elapsed();
+
+    let lines: Vec<usize> = report.findings.iter().map(|f| f.line).collect();
+    assert_eq!(lines, (2..2 + count).collect::<Vec<_>>());
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "took {elapsed:?}"
+    );
+}
