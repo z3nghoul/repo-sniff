@@ -223,7 +223,13 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         // like a binary here.
         let checked = env.run_file_checks(relative, &slash_path, &views, None);
         report.findings.extend(checked.findings);
-        let headed = env.run_head_checks(relative, &slash_path, head_of(&bytes), None);
+        let headed = env.run_head_checks(
+            relative,
+            &slash_path,
+            head_of(&bytes),
+            None,
+            class.executable,
+        );
         report.findings.extend(headed.findings);
 
         // An executable is always listed, since nothing analyzes its code. It
@@ -278,10 +284,17 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             SkipReason::TooLarge { size } => {
                 let issue = FileIssue::TooLarge { size: *size };
                 if walk_too_large.contains(&entry.path) {
-                    // Only the first bytes are read, for the head rules.
-                    let head = read_head(&root.join(&entry.path)).unwrap_or_default();
-                    let headed =
-                        env.run_head_checks(&entry.path, &slash_path, &head, Some(issue.clone()));
+                    // Only the first bytes are read, for the head rules (and
+                    // a PE signature, see `native_format`).
+                    let path = root.join(&entry.path);
+                    let (head, executable) = read_head(&path).unwrap_or_default();
+                    let headed = env.run_head_checks(
+                        &entry.path,
+                        &slash_path,
+                        &head,
+                        Some(issue.clone()),
+                        executable,
+                    );
                     report.findings.extend(headed.findings);
                 }
                 env.run_file_checks(
@@ -301,7 +314,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                 // Head rules get at most the first bytes of a regular file the
                 // link points at inside the repository; there may be any number
                 // of links, so nothing more is read for them.
-                let head = resolved
+                let (head, executable) = resolved
                     .as_ref()
                     .filter(|path| regular_files.contains(*path))
                     .and_then(|path| read_head(&root.join(path)))
@@ -310,8 +323,13 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     target: target_text,
                     resolved,
                 };
-                let headed =
-                    env.run_head_checks(&entry.path, &slash_path, &head, Some(issue.clone()));
+                let headed = env.run_head_checks(
+                    &entry.path,
+                    &slash_path,
+                    &head,
+                    Some(issue.clone()),
+                    executable,
+                );
                 report.findings.extend(headed.findings);
                 // File rules get the whole target, as before, and only when one
                 // selects the link.
@@ -378,8 +396,9 @@ impl Env<'_> {
         slash_path: &str,
         head: &[u8],
         issue: Option<FileIssue>,
+        executable: Option<&'static str>,
     ) -> Checked {
-        let views = Views::new(head, classify(slash_path, head).decode);
+        let views = Views::new(head, classify(slash_path, head).decode).with_executable(executable);
         self.run_checks(self.head_rules, relative, slash_path, &views, issue)
     }
 
@@ -451,13 +470,64 @@ fn symlink_target_bytes(
     fs::read(root.join(resolved)).unwrap_or_default()
 }
 
-/// The first `HEAD_LEN` bytes of a file, read without reading the rest.
-fn read_head(path: &Path) -> Option<Vec<u8>> {
+/// The first `HEAD_LEN` bytes of a file, read without reading the rest, and
+/// its native executable format (see `native_format`).
+fn read_head(path: &Path) -> Option<(Vec<u8>, Option<&'static str>)> {
+    let file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
     let mut head = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(HEAD_LEN as u64).read_to_end(&mut head))
-        .ok()?;
-    Some(head)
+    file.take(HEAD_LEN as u64).read_to_end(&mut head).ok()?;
+    let executable = native_format(&head, Some((path, size)));
+    Some((head, executable))
+}
+
+/// The Windows loader accepts a PE header up to this far into the file.
+const MAX_PE_OFFSET: u64 = 256 * 1024 * 1024;
+
+/// The native executable format of a file, from its first bytes. For an `MZ`
+/// header, the `PE\0\0` signature where `e_lfanew` (offset 0x3C) points
+/// decides, whatever else the bytes hold: a PE needs no NUL byte in its
+/// first 8 KiB, since every DOS header field but those two can be anything,
+/// and its header can lie up to 256 MiB into the file. When the signature is
+/// past `head`, `file` (the path and the size) lets one 4-byte read check
+/// it. When it cannot be checked at all, binary content starting with `MZ`
+/// still counts, as before. Other formats need binary content (a NUL byte
+/// in the first 8 KiB, which their headers always have).
+pub(crate) fn native_format(head: &[u8], file: Option<(&Path, u64)>) -> Option<&'static str> {
+    if !head.starts_with(b"MZ") {
+        return if looks_binary(head) {
+            executable_format(head)
+        } else {
+            None
+        };
+    }
+    if let Some(&[a, b, c, d]) = head.get(0x3C..0x40) {
+        let offset = u64::from(u32::from_le_bytes([a, b, c, d]));
+        let in_head = usize::try_from(offset)
+            .ok()
+            .and_then(|start| head.get(start..start.checked_add(4)?));
+        if let Some(signature) = in_head {
+            return (signature == b"PE\0\0").then_some("PE");
+        }
+        if let Some((path, size)) = file
+            && offset < MAX_PE_OFFSET
+            && offset + 4 <= size
+            && let Some(signature) = read_at(path, offset)
+        {
+            return (signature == *b"PE\0\0").then_some("PE");
+        }
+    }
+    looks_binary(head).then_some("PE")
+}
+
+/// Four bytes of a file at `offset`, or `None` if they cannot be read.
+fn read_at(path: &Path, offset: u64) -> Option<[u8; 4]> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = [0; 4];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 /// Resolves a symbolic link's target as text, the way either Unix or Windows
@@ -637,7 +707,8 @@ fn scan_streamed(
     }
     // Head rules need only the name and the first bytes, so a large file is
     // no way around them, and they never make it count as too large.
-    let headed = env.run_head_checks(relative, slash_path, head_of(&head), None);
+    let executable = native_format(&head, Some((&path, size)));
+    let headed = env.run_head_checks(relative, slash_path, head_of(&head), None, executable);
     let named_executable = headed.named_executable;
     out.findings.extend(headed.findings);
     let applicable: Vec<&Rule> = rules
@@ -654,9 +725,7 @@ fn scan_streamed(
     };
     // A rule that selects the file by name gets to see it as too large (that
     // happens after the walk), executable or not, as for a file over the limit.
-    if looks_binary(&head)
-        && let Some(format) = executable_format(&head)
-    {
+    if let Some(format) = executable {
         if whole_file_rule {
             out.skipped.push(too_large);
         }
@@ -1060,15 +1129,15 @@ fn classify(slash_path: &str, bytes: &[u8]) -> Class {
     let mut utf16 = false;
     let mut binary_looking = false;
 
+    if let Some(format) = native_format(bytes, None) {
+        return Class {
+            executable: Some(format),
+            nul_line,
+            binary_looking: false,
+            decode: Decode::AsciiOnly,
+        };
+    }
     if looks_binary(bytes) {
-        if let Some(format) = executable_format(bytes) {
-            return Class {
-                executable: Some(format),
-                nul_line,
-                binary_looking: false,
-                decode: Decode::AsciiOnly,
-            };
-        }
         // A script with a NUL byte is still a script, and the NUL is reported
         // by its own rule (`nul_line`).
         if !script {

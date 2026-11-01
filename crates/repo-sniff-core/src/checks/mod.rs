@@ -72,6 +72,8 @@ pub(crate) enum Decode {
 pub(crate) struct Views<'a> {
     bytes: &'a [u8],
     decode: Decode,
+    /// The native executable format the scanner found, if any.
+    executable: Option<&'static str>,
     text: OnceCell<Cow<'a, str>>,
     jsonc: OnceCell<Result<Node, ParseError>>,
     /// The last `line_of` answer, `(offset, line)`, to count on from.
@@ -83,6 +85,7 @@ impl<'a> Views<'a> {
         Views {
             bytes,
             decode,
+            executable: None,
             text: OnceCell::new(),
             jsonc: OnceCell::new(),
             line_cursor: Cell::new((0, 1)),
@@ -91,6 +94,12 @@ impl<'a> Views<'a> {
 
     pub(crate) fn bytes(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Records the native executable format the scanner found for the file.
+    pub(crate) fn with_executable(mut self, executable: Option<&'static str>) -> Self {
+        self.executable = executable;
+        self
     }
 
     /// The file as the line rules read it.
@@ -193,6 +202,16 @@ impl<'a> Ctx<'a> {
     /// that `bytes` holds; for an executable it is its ASCII only.
     pub fn text(&self) -> &'a str {
         self.views.text()
+    }
+
+    /// The native executable format the scanner found for the file (`ELF`,
+    /// `PE`, `Mach-O`, ...), or `None`. A check that asks this and the
+    /// scanner's own "executable" listing always agree. It is found from the
+    /// first bytes, and for a PE from the `PE\0\0` signature where `e_lfanew`
+    /// points, read from the file even past the bytes a head check sees. Set
+    /// for head checks; `None` for other engines.
+    pub fn executable(&self) -> Option<&'static str> {
+        self.views.executable
     }
 
     /// The 1-based line of a byte offset in `text` (see `Views::line_of`).
