@@ -283,3 +283,94 @@ fn a_tasks_file_that_is_a_symlink_to_a_file_in_the_repository_is_judged() {
     );
     assert!(!report.is_complete());
 }
+
+/// The target of a symlinked tasks file is found the way NTFS and APFS find
+/// it (another case, `\` as a separator); a target the check cannot read
+/// (another link, outside, missing) leaves the scan inconclusive (#63, review).
+#[cfg(unix)]
+#[test]
+fn a_symlinked_tasks_file_is_judged_through_case_and_backslash_or_not_called_clean() {
+    use std::os::unix::fs::symlink;
+
+    let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let scan_with = |links: &[(&str, &str)]| {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), autorun).unwrap();
+        for (link, target) in links {
+            let path = dir.path().join(link);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            symlink(target, path).unwrap();
+        }
+        scan(dir.path(), &builtin_rules().unwrap(), Limits::default())
+    };
+    let autoruns = |report: &Report| {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == RULE_ID)
+            .count()
+    };
+
+    for target in ["../NOTES.TXT", "..\\notes.txt", "./x/../../notes.txt"] {
+        let report = scan_with(&[(".vscode/tasks.json", target)]);
+        assert_eq!(autoruns(&report), 1, "{target}: {:?}", report.findings);
+    }
+
+    for links in [
+        &[(".vscode/tasks.json", "../a"), ("a", "notes.txt")][..],
+        &[(".vscode/tasks.json", "../../outside.json")][..],
+        &[(".vscode/tasks.json", "../missing.json")][..],
+    ] {
+        let report = scan_with(links);
+        assert_eq!(autoruns(&report), 0, "{links:?}");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.path == Path::new(".vscode/tasks.json")
+                    && matches!(s.reason, SkipReason::Unreadable { .. })),
+            "{links:?}: {:?}",
+            report.skipped
+        );
+        assert!(!report.is_complete(), "{links:?}");
+    }
+}
+
+/// Many links to one large target cannot make the scan read it again and
+/// again without end: past the budget the links are listed as too large.
+#[cfg(unix)]
+#[test]
+fn reading_through_many_links_is_bounded() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    // 4 MiB of JSON whitespace around a folderOpen task.
+    let mut big = " ".repeat(4 * 1024 * 1024);
+    big.push_str(
+        r#"{"tasks": {"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}}"#,
+    );
+    fs::write(dir.path().join("big.txt"), big).unwrap();
+    for n in 0..40 {
+        symlink(
+            "big.txt",
+            dir.path().join(format!("w{n:02}.code-workspace")),
+        )
+        .unwrap();
+    }
+
+    let report = scan(dir.path(), &builtin_rules().unwrap(), Limits::default());
+
+    let judged = report
+        .findings
+        .iter()
+        .filter(|f| f.explanation.contains("symbolic link"))
+        .count();
+    let too_large = report
+        .skipped
+        .iter()
+        .filter(|s| matches!(s.reason, SkipReason::TooLarge { .. }))
+        .count();
+    assert!(judged > 0 && judged < 40, "{judged}");
+    assert_eq!(judged + too_large, 40);
+    assert!(!report.is_complete());
+}
