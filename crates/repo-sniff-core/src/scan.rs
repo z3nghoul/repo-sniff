@@ -2131,7 +2131,8 @@ mod tests {
 
     /// A recorded link must not hide a regular file whose name differs only in
     /// bytes that are not UTF-8: names are compared exactly, never lossily.
-    #[cfg(unix)]
+    /// Not on macOS, where the file system refuses names that are not UTF-8.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_recorded_link_does_not_hide_a_file_whose_name_differs_in_invalid_utf8() {
         use std::ffi::OsStr;
