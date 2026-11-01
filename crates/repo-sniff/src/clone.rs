@@ -86,6 +86,7 @@ pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<TempDir> {
 /// URL and a sensible ref pass.
 pub fn validate(url: &str, git_ref: Option<&str>) -> Result<()> {
     ensure_https_only(url)?;
+    ensure_unambiguous(url)?;
     if let Some(git_ref) = git_ref {
         validate_ref(git_ref)?;
     }
@@ -241,6 +242,41 @@ fn validate_ref(git_ref: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuses an https URL that git and curl would not read the way the
+/// redaction does. Neither message repeats the URL.
+///
+/// - Whitespace, control characters, quotes, angle brackets and backticks:
+///   curl rejects whitespace anyway, and the others would end the URL early in
+///   any message that quotes it, leaving part of a password outside.
+/// - An `@` after the first `/`, `?`, `#` or `\` that follows `://`: the user
+///   information then holds one of those characters unescaped, and curl takes
+///   the text before it for the host. That text, part of a token, would be
+///   printed in curl's error ("Could not resolve host: ...") and sent to the
+///   DNS resolver or the proxy. Such a URL is refused before anything is
+///   printed or started.
+fn ensure_unambiguous(url: &str) -> Result<()> {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '\'' | '"' | '<' | '>' | '`'))
+    {
+        bail!(
+            "the URL contains whitespace, a control character, a quote, an angle bracket or a \
+             backtick; percent-encode it (for example a space as %20)"
+        );
+    }
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority_end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    if rest[authority_end..].contains('@') {
+        bail!(
+            "the URL has an `@` after a `/`, `?`, `#` or `\\`, so git would read part of what \
+             looks like a user name or password as the host and send it over the network. \
+             Percent-encode those characters in the user name and password (`/` as %2F, `?` as \
+             %3F, `#` as %23, `\\` as %5C, `@` as %40)"
+        );
+    }
+    Ok(())
+}
+
 /// Accepts only `https://` URLs.
 ///
 /// Plain-text transports are refused because anyone on the network could alter
@@ -262,10 +298,16 @@ fn ensure_https_only(url: &str) -> Result<()> {
         );
     }
     if lower.starts_with("ssh://") || lower.starts_with("git@") || is_scp_like(url) {
+        let local_hint = if is_scp_like(url) && !lower.starts_with("git@") {
+            "\nIf this is a local folder whose name only looks like `user@host:path`, \
+             scan it as ./<name>."
+        } else {
+            ""
+        };
         bail!(
             "ssh targets are not supported: repo-sniff fetches over https only. To scan a \
              private or ssh-only repository, clone it yourself and scan the folder:\n  \
-             git clone <url> some-folder\n  repo-sniff scan some-folder"
+             git clone <url> some-folder\n  repo-sniff scan some-folder{local_hint}"
         );
     }
     bail!("unsupported URL: only https:// repositories can be cloned; scan a local folder instead")
@@ -347,6 +389,49 @@ mod tests {
                 "{url}: {message}"
             );
         }
+    }
+
+    #[test]
+    fn urls_that_curl_would_read_differently_are_refused_without_repeating_them() {
+        for url in [
+            "https://FAKE_TOKEN#x@example.invalid/r",
+            "https://FAKE_TOKEN?x@example.invalid/r",
+            "https://FAKE_TOKEN/x@example.invalid/r",
+            "https://FAKE_TOKEN\\x@example.invalid/r",
+            "https://u:FAKE#TOKEN@example.invalid/r",
+            "https://example.invalid/o/r@FAKE_TOKEN",
+            "https://user:FAKE TOKEN@example.invalid/r",
+            "https://user:FAKE'TOKEN@example.invalid/r",
+            "https://user:FAKE\"TOKEN@example.invalid/r",
+            "https://user:FAKE`TOKEN@example.invalid/r",
+            "https://user:FAKE<TOKEN@example.invalid/r",
+            "https://user:FAKE\u{7}TOKEN@example.invalid/r",
+        ] {
+            let message = validate(url, None).unwrap_err().to_string();
+            assert!(!message.contains("FAKE"), "{url}: {message}");
+            assert!(!message.contains("TOKEN"), "{url}: {message}");
+        }
+        for url in [
+            "https://example.invalid/owner/repo",
+            "https://FAKE_TOKEN@example.invalid/owner/repo.git",
+            "https://user:FAKE%23TOKEN%40x@example.invalid/r",
+            "https://example.invalid:8443/r?ref=main#top",
+        ] {
+            validate(url, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_scp_like_name_gets_a_hint_for_a_local_folder() {
+        let message = ensure_https_only("alpine@sha256:abc")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("./<name>"), "{message}");
+        assert!(!message.contains("alpine"), "{message}");
+        let message = ensure_https_only("git@example.invalid:o/r")
+            .unwrap_err()
+            .to_string();
+        assert!(!message.contains("./<name>"), "{message}");
     }
 
     #[test]
