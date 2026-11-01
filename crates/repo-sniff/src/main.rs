@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use repo_sniff_core::{Limits, Report, builtin_rules};
 
 use crate::fail_on::FailOn;
-use crate::redact::redact_credentials;
+use crate::redact::{redact_credentials, redact_path};
 use crate::target::Target;
 
 /// Exit status when the scan found something at or above `--fail-on`.
@@ -100,11 +100,16 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
                      check out the branch or tag yourself before scanning a local directory"
                 );
             }
-            let root = path
-                .canonicalize()
-                .with_context(|| format!("cannot access {}", path.display()))?;
+            // A URL with credentials that did not look like one (no scheme,
+            // a typo in it) ends up here, so the path is shown redacted.
+            let root = path.canonicalize().with_context(|| {
+                format!("cannot access {}", redact_path(&path.to_string_lossy()))
+            })?;
             if !root.is_dir() {
-                bail!("{} is not a directory", root.display());
+                bail!(
+                    "{} is not a directory",
+                    redact_path(&root.to_string_lossy())
+                );
             }
             scan_dir(&root, &HashSet::new(), raw_target, fail_on)
         }
