@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::ops::Range;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::checks::{Check, Ctx, Decode, FileIssue, HEAD_LEN, Hit, RepoIndex, TextSpan, Views};
 use crate::finding::{Finding, Severity};
@@ -71,6 +71,17 @@ const MAX_LOCATED_HITS: usize = 100;
 /// Added to findings from a file that has NUL bytes and does not read as text.
 const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
 
+/// JSONC and file rules read the targets of the links they select in full,
+/// and one file may be the target of any number of links. Once this many
+/// bytes have been read through links in one scan, every further link such a
+/// rule selects is listed as too large instead (inconclusive).
+const MAX_THROUGH_LINK_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Added to findings of a JSONC check on a symbolic link: the check read the
+/// file the link points at, under the link's name, as the tool that opens the
+/// link would.
+const THROUGH_LINK_NOTE: &str = " (read through a symbolic link to a file in the repository)";
+
 /// Everything one scan produced. Front ends decide how to show it.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -126,7 +137,21 @@ impl Report {
 /// All rules always run; hiding findings by severity, stage or family is
 /// left to the front end, so filters can change without rescanning.
 pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
-    let walked = walk::walk(root, limits);
+    scan_with_links(root, rules, limits, &HashSet::new())
+}
+
+/// Like `scan`, for a checkout whose symbolic links were written as plain
+/// files (see `walk::walk_with_links`): each path in `links` is treated as a
+/// link to the target its file holds, so the link rules and the checks that
+/// read through links see it as they would see a real one, and its file is
+/// also scanned as content, as a system without symlinks reads it.
+pub fn scan_with_links(
+    root: &Path,
+    rules: &[Rule],
+    limits: Limits,
+    links: &HashSet<PathBuf>,
+) -> Report {
+    let walked = walk::walk_with_links(root, limits, links);
 
     // Where files are allowed to be looked up: everything the walk saw,
     // including files it did not hand over because of the size limit or
@@ -148,13 +173,64 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     }),
             ),
     );
-    let regular_files: HashSet<String> = walked.files.iter().map(|path| to_slash(path)).collect();
+    // A recorded link is handed over as content too, but it is not a regular
+    // file that another link can point at.
+    let link_paths: HashSet<&PathBuf> = walked
+        .skipped
+        .iter()
+        .filter(|entry| matches!(entry.reason, SkipReason::Symlink { .. }))
+        .map(|entry| &entry.path)
+        .collect();
+    let regular_files: HashSet<String> = walked
+        .files
+        .iter()
+        .filter(|path| !link_paths.contains(path))
+        .map(|path| to_slash(path))
+        .collect();
+    // Links recorded by the caller whose files are scanned as content too.
+    let recorded_links: HashSet<PathBuf> = walked
+        .files
+        .iter()
+        .filter(|path| link_paths.contains(path))
+        .cloned()
+        .collect();
     // The same paths by their lowercase form, for link targets spelled in
     // another case (NTFS and APFS ignore case by default).
     let lowercase_files: HashMap<String, String> = regular_files
         .iter()
         .map(|path| (path.to_lowercase(), path.clone()))
         .collect();
+    // For reading a link's whole target: each `/` path of a regular file with
+    // its exact path, or `None` when the text does not name one file for
+    // certain (a name that is not UTF-8, or two names with the same text), and
+    // every path by its lowercase form.
+    let mut exact_files: HashMap<String, Option<PathBuf>> = HashMap::new();
+    for path in walked
+        .files
+        .iter()
+        .filter(|path| !link_paths.contains(path))
+    {
+        let exact = path.to_str().is_some().then(|| path.clone());
+        exact_files
+            .entry(to_slash(path))
+            .and_modify(|known| *known = None)
+            .or_insert(exact);
+    }
+    let mut lowercase_exact: HashMap<String, Vec<String>> = HashMap::new();
+    for key in exact_files.keys() {
+        lowercase_exact
+            .entry(key.to_lowercase())
+            .or_default()
+            .push(key.clone());
+    }
+    // Every link by its lowercase `/` path: a reading of a target that names
+    // a link is not a regular file, and must not be skipped over in favour of
+    // another reading that names one.
+    let link_keys: HashSet<String> = link_paths
+        .iter()
+        .map(|path| to_slash(path).to_lowercase())
+        .collect();
+    let link_key_lengths: HashSet<usize> = link_keys.iter().map(String::len).collect();
     let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
@@ -166,6 +242,13 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         .iter()
         .filter_map(|rule| match rule.matcher {
             Matcher::Head(check) => Some((rule, check)),
+            _ => None,
+        })
+        .collect();
+    let jsonc_rules: Vec<(&Rule, Check)> = rules
+        .iter()
+        .filter_map(|rule| match rule.matcher {
+            Matcher::Jsonc(check) => Some((rule, check)),
             _ => None,
         })
         .collect();
@@ -192,6 +275,11 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
 
     let has_file_rule = |slash_path: &str| {
         file_rules
+            .iter()
+            .any(|(rule, _)| rule.applies_to(slash_path))
+    };
+    let has_jsonc_rule = |slash_path: &str| {
+        jsonc_rules
             .iter()
             .any(|(rule, _)| rule.applies_to(slash_path))
     };
@@ -297,6 +385,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
     // Entries the walk did not hand over still matter to a rule that asks for
     // that file by name: an oversized file or a symlink is not a way around it.
     let walk_skips: Vec<Skipped> = skipped.clone();
+    let mut through_link_bytes: u64 = 0;
     for entry in &walk_skips {
         let slash_path = to_slash(&entry.path);
         let checked = match &entry.reason {
@@ -342,7 +431,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     .and_then(|path| read_head(&root.join(path)))
                     .unwrap_or_default();
                 let issue = FileIssue::Symlink {
-                    target: target_text,
+                    target: target_text.clone(),
                     resolved,
                 };
                 let headed = env.run_head_checks(
@@ -354,15 +443,92 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                     size,
                 );
                 report.findings.extend(headed.findings);
-                // File rules get the whole target, as before, and only when one
-                // selects the link.
-                let bytes = if has_file_rule(&slash_path) {
-                    symlink_target_bytes(root, &entry.path, target.as_deref(), &regular_files)
-                } else {
-                    Vec::new()
-                };
+                // File and JSONC rules get the whole target, and only when one
+                // selects the link: VS Code follows a `.vscode/tasks.json`
+                // that is a link and runs its tasks. The target is found the
+                // way the head rules find it (both separators, any case), so
+                // `..\\NOTES.TXT` is no way around it.
+                let mut jsonc = has_jsonc_rule(&slash_path);
+                let file_rule = has_file_rule(&slash_path);
+                let mut bytes = Vec::new();
+                if jsonc || file_rule {
+                    let target_file = match target.as_deref() {
+                        Some(target) => link_target_to_read(
+                            &slash_path,
+                            target,
+                            &exact_files,
+                            &lowercase_exact,
+                            &link_keys,
+                            &link_key_lengths,
+                        ),
+                        None => Ok(None),
+                    };
+                    let mut not_read = |error: &str| {
+                        skipped.push(Skipped {
+                            path: entry.path.clone(),
+                            reason: SkipReason::Unreadable {
+                                error: error.to_string(),
+                            },
+                        });
+                    };
+                    match target_file {
+                        Err(why) => {
+                            not_read(&format!("link target not read: {why}"));
+                            jsonc = false;
+                        }
+                        Ok(Some(path)) => {
+                            let path = root.join(path);
+                            let size = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+                            if (jsonc && size > limits.max_buffered_size)
+                                || through_link_bytes + size > MAX_THROUGH_LINK_BYTES
+                            {
+                                // As for a file that size, or once the budget
+                                // for reading through links is spent.
+                                skipped.push(Skipped {
+                                    path: entry.path.clone(),
+                                    reason: SkipReason::TooLarge { size },
+                                });
+                                jsonc = false;
+                            } else {
+                                match fs::read(&path) {
+                                    Ok(read) => {
+                                        through_link_bytes += read.len() as u64;
+                                        bytes = read;
+                                    }
+                                    Err(err) => {
+                                        not_read(&format!("link target not read: {err}"));
+                                        jsonc = false;
+                                    }
+                                }
+                            }
+                        }
+                        // A rule that would judge the file behind the link
+                        // could not: the target is outside, another link
+                        // (#69), a folder or missing. Not a clean result.
+                        Ok(None) if jsonc => {
+                            not_read(
+                                "link target not read: it is not a regular file in the repository",
+                            );
+                            jsonc = false;
+                        }
+                        Ok(None) => {}
+                    }
+                }
                 // Read the way the target would be read under the link's name.
                 let views = Views::new(&bytes, classify(&slash_path, &bytes).decode);
+                if jsonc {
+                    let mut through = env.run_checks(
+                        &jsonc_rules,
+                        &entry.path,
+                        &slash_path,
+                        &views,
+                        Some(issue.clone()),
+                    );
+                    for finding in &mut through.findings {
+                        finding.explanation.push_str(THROUGH_LINK_NOTE);
+                    }
+                    report.findings.extend(through.findings);
+                }
                 env.run_file_checks(&entry.path, &slash_path, &views, Some(issue))
             }
             _ => continue,
@@ -374,6 +540,28 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
     report
         .findings
         .sort_by(|a, b| (&a.file, a.line, &a.rule_id).cmp(&(&b.file, b.line, &b.rule_id)));
+    // A recorded link is offered to the rules that judge names twice, as a
+    // file and as a link; the same finding is listed once.
+    if !recorded_links.is_empty() {
+        // Findings are sorted by file, line and rule only, so an equal one may
+        // sit anywhere in its group: compare within the group.
+        let mut kept: Vec<Finding> = Vec::with_capacity(report.findings.len());
+        for finding in std::mem::take(&mut report.findings) {
+            let duplicate = recorded_links.contains(&finding.file)
+                && kept
+                    .iter()
+                    .rev()
+                    .take_while(|k| {
+                        (&k.file, k.line, &k.rule_id)
+                            == (&finding.file, finding.line, &finding.rule_id)
+                    })
+                    .any(|k| *k == finding);
+            if !duplicate {
+                kept.push(finding);
+            }
+        }
+        report.findings = kept;
+    }
     report
 }
 
@@ -478,24 +666,6 @@ impl Env<'_> {
     }
 }
 
-/// The content of the file a symlink points at, if that is a regular file
-/// inside the repository; empty otherwise. The target is resolved as text, so
-/// nothing outside the scanned directory is ever opened.
-fn symlink_target_bytes(
-    root: &Path,
-    link: &Path,
-    target: Option<&Path>,
-    regular_files: &HashSet<String>,
-) -> Vec<u8> {
-    let Some(resolved) = target.and_then(|target| resolve_inside(link, target)) else {
-        return Vec::new();
-    };
-    if !regular_files.contains(&to_slash(&resolved)) {
-        return Vec::new();
-    }
-    fs::read(root.join(resolved)).unwrap_or_default()
-}
-
 /// The first `HEAD_LEN` bytes of a file, read without reading the rest, its
 /// native executable format (see `native_format`) and its size.
 type Head = (Vec<u8>, Option<&'static str>, Option<u64>);
@@ -594,6 +764,101 @@ fn link_target_file(
         })
 }
 
+/// The regular file whose whole content JSONC and file rules read for a link:
+/// every reading of the target (Unix and Windows separators, exact case and
+/// any case) must name the same file, and that file must be named for
+/// certain. Otherwise which file the tool that follows the link opens depends
+/// on the system or on bytes the text cannot show, so the target is reported
+/// as not read (`Err`) rather than guessed: a guess can be the harmless twin.
+/// A reading that names another link is `Err` too (links to links are not
+/// followed). `Ok(None)` when no reading names a regular file.
+fn link_target_to_read(
+    link: &str,
+    target: &Path,
+    exact_files: &HashMap<String, Option<PathBuf>>,
+    lowercase_exact: &HashMap<String, Vec<String>>,
+    link_keys: &HashSet<String>,
+    link_key_lengths: &HashSet<usize>,
+) -> Result<Option<PathBuf>, &'static str> {
+    let Some(target) = target.to_str() else {
+        return Err("its target is not valid UTF-8");
+    };
+    let mut named: Vec<&String> = Vec::new();
+    for separators in [&['/'][..], &['/', '\\'][..]] {
+        let Some(path) = resolve_link_with(link, target, separators) else {
+            continue;
+        };
+        if link_keys.contains(&path.to_lowercase())
+            || crosses_link(link, target, separators, link_keys, link_key_lengths)
+        {
+            return Err("a reading of its target goes through another symbolic link");
+        }
+        if let Some((key, _)) = exact_files.get_key_value(&path) {
+            named.push(key);
+        }
+        named.extend(
+            lowercase_exact
+                .get(&path.to_lowercase())
+                .into_iter()
+                .flatten(),
+        );
+    }
+    named.sort();
+    named.dedup();
+    match named[..] {
+        [] => Ok(None),
+        [one] => exact_files[one]
+            .clone()
+            .map(Some)
+            .ok_or("its target's name does not name one file for certain"),
+        _ => Err("its target names different files on different systems"),
+    }
+}
+
+/// Whether walking the target passes through a link, including a directory
+/// link that a later `..` takes back off the text path: the system resolves
+/// `dl/../x` inside the directory `dl` points at, not next to `dl`.
+fn crosses_link(
+    link: &str,
+    target: &str,
+    separators: &[char],
+    link_keys: &HashSet<String>,
+    link_key_lengths: &HashSet<usize>,
+) -> bool {
+    // The lowercase path so far and its length before each part, so a prefix
+    // costs one push and a `..` one truncate: linear in the target.
+    let mut parts: Vec<&str> = link.split('/').collect();
+    parts.pop();
+    let mut prefix = parts.join("/").to_lowercase();
+    let mut lengths: Vec<usize> = Vec::new();
+    for part in target.split(separators) {
+        match part {
+            "" | "." => {}
+            ".." => match lengths.pop() {
+                Some(length) => prefix.truncate(length),
+                None => match prefix.rfind('/') {
+                    Some(at) => prefix.truncate(at),
+                    None if prefix.is_empty() => return false,
+                    None => prefix.clear(),
+                },
+            },
+            _ => {
+                lengths.push(prefix.len());
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(&part.to_lowercase());
+                // Hashing a prefix costs its length, so only a prefix as long
+                // as some link's path is looked up.
+                if link_key_lengths.contains(&prefix.len()) && link_keys.contains(prefix.as_str()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<String> {
     let bytes = target.as_bytes();
     let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
@@ -612,23 +877,6 @@ fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<St
         }
     }
     Some(parts.join("/"))
-}
-
-/// Resolves `target` relative to the directory of `link`, purely lexically.
-/// Returns `None` for absolute targets and for targets that leave the root.
-fn resolve_inside(link: &Path, target: &Path) -> Option<PathBuf> {
-    let mut resolved: Vec<_> = link.parent()?.components().collect();
-    for component in target.components() {
-        match component {
-            Component::Normal(_) => resolved.push(component),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                resolved.pop()?;
-            }
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(resolved.into_iter().collect())
 }
 
 /// Runs the line-regex rules over lines fed one at a time, keeping at most
@@ -1623,6 +1871,222 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `crosses_link` as it was in ca78a99: the whole prefix is joined and
+    /// lowercased again for every part. Quadratic, but obviously right.
+    fn crosses_link_reference(
+        link: &str,
+        target: &str,
+        separators: &[char],
+        link_keys: &HashSet<String>,
+    ) -> bool {
+        let mut parts: Vec<&str> = link.split('/').collect();
+        parts.pop();
+        for part in target.split(separators) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    if parts.pop().is_none() {
+                        return false;
+                    }
+                }
+                _ => {
+                    parts.push(part);
+                    if link_keys.contains(&parts.join("/").to_lowercase()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// A fixed-seed generator (xorshift64*), so a failure repeats.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn crosses_link_agrees_with_the_quadratic_reference() {
+        // Names whose lowercase differs in bytes from the original (the
+        // dotted capital I, capital sharp s, Cyrillic, final sigma) next to
+        // plain ones, with the dot parts, empty parts and backslashes.
+        const NAMES: [&str; 12] = [
+            "a", "A", "dl", "DL", "x\\y", "\u{130}", "\u{1E9E}", "\u{41A}", "\u{43A}", "\u{3A3}",
+            "\u{3C2}", "a\u{3A3}",
+        ];
+        const DOTS: [&str; 4] = [".", "..", "..", ""];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let (mut crossed, mut not_crossed, mut max_segments) = (0, 0, 0);
+        for case in 0..30_000 {
+            let depth = 1 + rng.below(4);
+            let mut link: Vec<&str> = (0..depth).map(|_| NAMES[rng.below(NAMES.len())]).collect();
+            link.push("tasks.json");
+            let link = link.join("/");
+
+            // Links of different path lengths, built from the same names so
+            // that prefixes of the targets hit them.
+            let parent: Vec<&str> = link.split('/').collect();
+            let keys: HashSet<String> = (0..1 + rng.below(4))
+                .map(|_| {
+                    // Half of the links sit under a prefix of the link's own
+                    // directory, which is where `..` takes a target back to.
+                    let mut path: Vec<&str> = if rng.below(2) == 0 {
+                        parent[..rng.below(parent.len())].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    path.extend((0..1 + rng.below(2)).map(|_| NAMES[rng.below(NAMES.len())]));
+                    path.join("/").to_lowercase()
+                })
+                .collect();
+            let lengths: HashSet<usize> = keys.iter().map(String::len).collect();
+
+            let segments = if case % 50 == 0 {
+                1 + rng.below(64)
+            } else {
+                1 + rng.below(8)
+            };
+            max_segments = max_segments.max(segments);
+            let parts: Vec<&str> = (0..segments)
+                .map(|_| {
+                    if rng.below(3) == 0 {
+                        DOTS[rng.below(DOTS.len())]
+                    } else {
+                        NAMES[rng.below(NAMES.len())]
+                    }
+                })
+                .collect();
+            let target = parts.join(if rng.below(4) == 0 { "\\" } else { "/" });
+
+            for separators in [&['/'][..], &['/', '\\'][..]] {
+                let want = crosses_link_reference(&link, &target, separators, &keys);
+                let got = crosses_link(&link, &target, separators, &keys, &lengths);
+                assert_eq!(
+                    got, want,
+                    "link {link:?} target {target:?} separators {separators:?} keys {keys:?}"
+                );
+                if want {
+                    crossed += 1;
+                } else {
+                    not_crossed += 1;
+                }
+            }
+        }
+        // The generator must reach both answers, and long targets.
+        assert!(
+            crossed > 1000 && not_crossed > 1000,
+            "{crossed} {not_crossed}"
+        );
+        assert!(max_segments >= 60, "{max_segments}");
+    }
+
+    /// `crosses_link` must agree with walking the target one part at a time
+    /// (the system resolves `..` inside a directory link), and must stay
+    /// linear: the target is long, and there can be a hundred thousand links.
+    #[test]
+    fn crosses_link_is_linear_and_follows_dot_dot_through_a_link() {
+        let keys: HashSet<String> = ["a/dl".to_string()].into();
+        let lengths: HashSet<usize> = keys.iter().map(String::len).collect();
+        let sep: &[char] = &['/'];
+        assert!(crosses_link(
+            "a/tasks.json",
+            "dl/../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(crosses_link(
+            "a/tasks.json",
+            "DL/x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(crosses_link(
+            "a/tasks.json",
+            "./dl//../x",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "dl2/../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "../b/x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "../../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(!crosses_link(
+            "a/tasks.json",
+            "../../../x.json",
+            sep,
+            &keys,
+            &lengths
+        ));
+        assert!(crosses_link(
+            "x/tasks.json",
+            "../a/dl/y",
+            sep,
+            &keys,
+            &lengths
+        ));
+
+        // Speed is judged by how the time grows, not by its value, which
+        // depends on the runner: a target four times as long takes about four
+        // times as long when linear and about sixteen times when quadratic.
+        // The fastest of several runs is taken to drop scheduler noise.
+        let time = |segments: usize| {
+            let target = "a/".repeat(segments);
+            (0..5)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    for _ in 0..20 {
+                        assert!(!crosses_link(
+                            "w/x.code-workspace",
+                            &target,
+                            sep,
+                            &keys,
+                            &lengths
+                        ));
+                    }
+                    started.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let (short, long) = (time(2_000), time(8_000));
+        let ratio = long.as_secs_f64() / short.as_secs_f64();
+        assert!(
+            ratio < 8.0,
+            "4x the target took {ratio:.1}x: {short:?} {long:?}"
+        );
+    }
+
     use std::path::PathBuf;
 
     use globset::{GlobBuilder, GlobSetBuilder};
@@ -2083,23 +2547,73 @@ mod tests {
         );
     }
 
+    /// A recorded link must not hide a regular file whose name differs only in
+    /// bytes that are not UTF-8: names are compared exactly, never lossily.
+    /// Not on macOS, where the file system refuses names that are not UTF-8.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn symlink_targets_are_resolved_without_touching_anything_outside() {
-        let link = Path::new("a/b/link.pth");
-        assert_eq!(
-            resolve_inside(link, Path::new("../c.txt")),
-            Some(PathBuf::from("a/c.txt"))
+    fn a_recorded_link_does_not_hide_a_file_whose_name_differs_in_invalid_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = PathBuf::from(OsStr::from_bytes(b"x\xfe.code-workspace"));
+        let file = PathBuf::from(OsStr::from_bytes(b"x\xff.code-workspace"));
+        fs::write(dir.path().join(&link), "notes.txt").unwrap();
+        fs::write(
+            dir.path().join(&file),
+            r#"{"tasks": {"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}}"#,
+        )
+        .unwrap();
+        let links = HashSet::from([link.clone()]);
+
+        let report = scan_with_links(
+            dir.path(),
+            &builtin_rules().unwrap(),
+            Limits::default(),
+            &links,
         );
-        assert_eq!(
-            resolve_inside(link, Path::new("./d/e.txt")),
-            Some(PathBuf::from("a/b/d/e.txt"))
+
+        let autorun: Vec<&PathBuf> = report
+            .findings
+            .iter()
+            .filter(|f| f.explanation.contains("runs automatically"))
+            .map(|f| &f.file)
+            .collect();
+        assert_eq!(autorun, [&file]);
+        let listed_links: Vec<&PathBuf> = report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, SkipReason::Symlink { .. }))
+            .map(|s| &s.path)
+            .collect();
+        assert_eq!(listed_links, [&link]);
+    }
+
+    #[test]
+    fn a_recorded_link_gets_a_name_finding_once() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "x.bat", b"@echo off\n");
+        write(dir.path(), "tools/run.bat", b"../x.bat");
+        let links = HashSet::from([PathBuf::from("tools/run.bat")]);
+
+        let report = scan_with_links(
+            dir.path(),
+            &builtin_rules().unwrap(),
+            Limits::default(),
+            &links,
         );
-        assert_eq!(resolve_inside(link, Path::new("../../../x")), None);
-        assert_eq!(resolve_inside(link, Path::new("/etc/passwd")), None);
-        assert_eq!(
-            resolve_inside(Path::new("top.pth"), Path::new("../x")),
-            None
-        );
+
+        let on_link: Vec<(String, String)> = report
+            .findings
+            .iter()
+            .filter(|f| f.file == Path::new("tools/run.bat"))
+            .map(|f| (f.rule_id.clone(), f.explanation.clone()))
+            .collect();
+        let mut unique = on_link.clone();
+        unique.dedup();
+        assert_eq!(on_link, unique);
+        assert!(!on_link.is_empty());
     }
 
     #[test]

@@ -97,6 +97,29 @@ Workflow for a new family:
 Fixtures live in `crates/repo-sniff-core/tests/fixtures/<family>/` with
 `positive/` and `negative/` subdirectories.
 
+What the rules must report on them goes in
+`crates/repo-sniff-core/tests/fixtures/<family>.expected.toml`, beside the
+folder (inside it, the file would be scanned like a fixture). The harness in
+`tests/fixture_expectations.rs` scans the folder as one repository with the
+built-in rules and fails on any finding that is not listed, on any listed one
+that is missing, on a positive fixture without a finding and on a negative
+fixture with one, so a new family needs that file and no test code of its own.
+The format is described at the top of the harness:
+
+```toml
+files_scanned = 7                        # optional
+
+[[finding]]
+file     = "positive/commenting_out.c"   # relative to the folder, with /
+line     = 3
+rule     = "deception.bidi-control"
+severity = "critical"
+explanation_contains = "Trojan Source"   # optional
+```
+
+The Python startup families scan each case on its own and keep their
+`expectations.tsv` inside the folder with their own tests.
+
 - **Every rule has both** positive fixtures (must match) and negative
   fixtures (look similar but must not match, e.g. a mention in a comment, an
   escaped form, a legitimate use).
@@ -146,10 +169,10 @@ them (full list in
   file is reported;
 - archives are flagged, never unpacked;
 - remote repositories are cloned over https only, by a git that runs with an
-  empty environment and an empty configuration (so no filter, credential
-  helper or fsmonitor from any configuration runs), with hooks and templates
-  off, symlinks written as plain files, submodules not fetched and no
-  interactive prompts;
+  empty environment, an empty configuration and an empty home directory (so
+  no filter, credential helper or fsmonitor from any configuration runs),
+  with hooks and templates off, symlinks written as plain files, submodules
+  not fetched and no interactive prompts;
 - credentials in a URL are hidden in everything that is printed;
 - an inconclusive scan (file limit reached, a file not read, an executable
   binary that no rule reported) is never reported as clean;

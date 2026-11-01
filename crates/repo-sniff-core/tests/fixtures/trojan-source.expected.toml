@@ -1,0 +1,24 @@
+# What the built-in rules report when trojan-source/ is scanned as one
+# repository. Read by tests/fixture_expectations.rs; a finding not listed here
+# fails the test, so every file under negative/ must stay unreported.
+
+files_scanned = 7
+
+[[finding]]
+file = "positive/commenting_out.c"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+explanation_contains = "Trojan Source"
+
+[[finding]]
+file = "positive/early_return.py"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/stretched_string.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"

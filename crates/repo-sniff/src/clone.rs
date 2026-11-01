@@ -9,9 +9,10 @@
 //! short list of variables it needs, with its configuration files replaced
 //! by an empty one, and with the risky settings overridden on the command line.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -19,6 +20,7 @@ use repo_sniff_core::display_safe;
 use tempfile::TempDir;
 
 use crate::redact::redact_credentials;
+use crate::target::is_scp_like;
 
 /// URL schemes that send the repository over the network unencrypted.
 const PLAIN_TEXT_SCHEMES: &[&str] = &["http://", "git://"];
@@ -32,15 +34,12 @@ const ALLOWED_PROTOCOLS: &str = "https";
 const MAX_GIT_ERROR_CHARS: usize = 500;
 
 /// The only variables copied from our environment into git's. They are what
-/// git needs to find itself, a home directory, a temporary directory, to open
-/// sockets on Windows, to reach the network through a proxy, and to verify
-/// certificates. Everything else (`GIT_*`, `SSH_*`, tokens, ...) is dropped.
+/// git needs to find itself, a temporary directory, to open sockets on
+/// Windows, to reach the network through a proxy, and to verify certificates.
+/// Everything else (`GIT_*`, `SSH_*`, tokens, ...) is dropped. The home
+/// directory is not passed on: git gets an empty one (see `git_environment`).
 const PASS_THROUGH: &[&str] = &[
     "PATH",
-    "HOME",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
     "TMPDIR",
     "TMP",
     "TEMP",
@@ -62,10 +61,31 @@ const PASS_THROUGH: &[&str] = &[
     "CURL_CA_BUNDLE",
 ];
 
+/// The mode git records for a symbolic link in its index.
+const SYMLINK_MODE: &str = "120000";
+
+/// A finished clone: the files, which are deleted when this is dropped, and
+/// the paths the repository records as symbolic links.
+#[derive(Debug)]
+pub struct Checkout {
+    dir: TempDir,
+    /// Relative paths built from git's bytes, as git lists them. The clone
+    /// writes every link as a plain file holding its target
+    /// (`core.symlinks=false`), so without this list the scan would not know
+    /// they are links.
+    pub symlinks: HashSet<PathBuf>,
+}
+
+impl Checkout {
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
 /// Shallow-clones `url` into a fresh temporary directory, at `git_ref` (a
 /// branch or tag) or at the repository's default branch.
 ///
-/// The returned `TempDir` deletes the checkout when it is dropped, so the
+/// The returned `Checkout` deletes the files when it is dropped, so the
 /// caller just has to keep it alive for as long as the scan runs.
 ///
 /// What this does to keep the clone from running anything:
@@ -77,7 +97,11 @@ const PASS_THROUGH: &[&str] = &[
 /// - hooks and templates are disabled, symlinks are written as plain files,
 ///   submodules are not fetched, objects are checked for corruption;
 /// - there are no interactive prompts.
-pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<TempDir> {
+///
+/// Afterwards the symbolic links are read from the clone's own index with
+/// `git ls-files`, run the same isolated way. The index was written by this
+/// clone, not taken from the remote, so it can be trusted.
+pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<Checkout> {
     validate(url, git_ref)?;
     clone_unchecked(url, git_ref, ALLOWED_PROTOCOLS, |name| {
         std::env::var_os(name)
@@ -88,6 +112,7 @@ pub fn shallow_clone(url: &str, git_ref: Option<&str>) -> Result<TempDir> {
 /// URL and a sensible ref pass.
 pub fn validate(url: &str, git_ref: Option<&str>) -> Result<()> {
     ensure_https_only(url)?;
+    ensure_unambiguous(url)?;
     if let Some(git_ref) = git_ref {
         validate_ref(git_ref)?;
     }
@@ -102,26 +127,29 @@ fn clone_unchecked(
     git_ref: Option<&str>,
     protocols: &str,
     env: impl Fn(&str) -> Option<OsString>,
-) -> Result<TempDir> {
+) -> Result<Checkout> {
     let dir = tempfile::Builder::new()
         .prefix("repo-sniff-")
         .tempdir()
         .context("failed to create a temporary directory")?;
 
     // Holds what git is pointed at instead of the real configuration: an
-    // empty directory for hooks and an empty configuration file.
+    // empty directory for hooks, an empty configuration file and an empty
+    // home directory.
     let sandbox = tempfile::Builder::new()
         .prefix("repo-sniff-git-")
         .tempdir()
         .context("failed to create a temporary directory")?;
     let hooks_dir = sandbox.path().join("hooks");
+    let home = sandbox.path().join("home");
     let global_config = sandbox.path().join("gitconfig");
     fs::create_dir(&hooks_dir).context("failed to prepare the git sandbox")?;
+    fs::create_dir(&home).context("failed to prepare the git sandbox")?;
     fs::write(&global_config, "").context("failed to prepare the git sandbox")?;
 
     let output = Command::new("git")
         .env_clear()
-        .envs(git_environment(env, &global_config, protocols))
+        .envs(git_environment(&env, &global_config, &home, protocols))
         .args(clone_args(url, git_ref, dir.path(), &hooks_dir))
         .output()
         .context("failed to run `git`; is it installed and on PATH?")?;
@@ -130,7 +158,56 @@ fn clone_unchecked(
         return Err(clone_failure(url, &String::from_utf8_lossy(&output.stderr)));
     }
 
-    Ok(dir)
+    let listed = Command::new("git")
+        .env_clear()
+        .envs(git_environment(&env, &global_config, &home, protocols))
+        .current_dir(dir.path())
+        .args(["-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"])
+        .output()
+        .context("failed to run `git ls-files` in the clone")?;
+    if !listed.status.success() {
+        bail!(
+            "could not list the symbolic links of the clone: {}",
+            display_safe(
+                String::from_utf8_lossy(&listed.stderr).trim(),
+                MAX_GIT_ERROR_CHARS
+            )
+        );
+    }
+    let symlinks = symlinks_in_index_listing(&listed.stdout);
+
+    Ok(Checkout { dir, symlinks })
+}
+
+/// The paths of the symbolic links in `git ls-files --stage -z` output, whose
+/// entries are `<mode> <object> <stage>\t<path>` ended by NUL. Git paths are
+/// bytes and are kept exactly: on Unix as the same bytes, elsewhere only when
+/// they are UTF-8 (as Git for Windows writes them). A path that cannot be
+/// represented is left out, so that link is scanned as a plain file only.
+fn symlinks_in_index_listing(listing: &[u8]) -> HashSet<PathBuf> {
+    let prefix = format!("{SYMLINK_MODE} ");
+    listing
+        .split(|&b| b == 0)
+        .filter_map(|entry| {
+            let tab = entry.iter().position(|&b| b == b'\t')?;
+            let (info, path) = (&entry[..tab], &entry[tab + 1..]);
+            if !info.starts_with(prefix.as_bytes()) || path.is_empty() {
+                return None;
+            }
+            path_from_git(path)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn path_from_git(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(not(unix))]
+fn path_from_git(bytes: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
 /// The error for a failed clone. Both the URL and git's text are cleaned:
@@ -145,9 +222,17 @@ fn clone_failure(url: &str, stderr: &str) -> anyhow::Error {
 
 /// The environment git runs in: the allowed variables from `source`, plus the
 /// settings that isolate it from the machine's configuration.
+///
+/// The home directory is the empty `home`, not the user's. `GIT_CONFIG_GLOBAL`
+/// alone is not enough: git before 2.32 ignores it and reads `~/.gitconfig`
+/// (filters, `include.path`, `http.sslVerify`), and every version reads
+/// `~/.config/git/attributes` and lets curl read `~/.netrc` from the home
+/// directory. On Windows git takes its home from `HOME`, then `HOMEDRIVE` and
+/// `HOMEPATH`, then `USERPROFILE`; the middle two are not passed on.
 fn git_environment(
-    source: impl Fn(&str) -> Option<OsString>,
+    source: &impl Fn(&str) -> Option<OsString>,
     global_config: &Path,
+    home: &Path,
     protocols: &str,
 ) -> Vec<(OsString, OsString)> {
     let mut vars: Vec<(OsString, OsString)> = PASS_THROUGH
@@ -155,7 +240,9 @@ fn git_environment(
         .filter_map(|&name| source(name).map(|value| (name.into(), value)))
         .collect();
 
-    let fixed: [(&str, OsString); 6] = [
+    let fixed: [(&str, OsString); 9] = [
+        ("HOME", home.into()),
+        ("USERPROFILE", home.into()),
         // Skip the system-wide configuration file.
         ("GIT_CONFIG_NOSYSTEM", "1".into()),
         // Read this (empty) file instead of ~/.gitconfig and the XDG file.
@@ -165,6 +252,10 @@ fn git_environment(
         ("GIT_TERMINAL_PROMPT", "0".into()),
         ("GCM_INTERACTIVE", "never".into()),
         ("GIT_LFS_SKIP_SMUDGE", "1".into()),
+        // Skip `$(prefix)/etc/gitattributes`, which `GIT_CONFIG_NOSYSTEM` does
+        // not cover and which the user can write on Homebrew and on per-user
+        // Git for Windows installs.
+        ("GIT_ATTR_NOSYSTEM", "1".into()),
     ];
     vars.extend(fixed.into_iter().map(|(name, value)| (name.into(), value)));
     vars
@@ -230,6 +321,45 @@ fn validate_ref(git_ref: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuses an https URL that git and curl would not read the way the
+/// redaction does. Neither message repeats the URL.
+///
+/// - Whitespace, control characters, quotes, angle brackets and backticks:
+///   curl rejects whitespace anyway, and the others would end the URL early in
+///   any message that quotes it, leaving part of a password outside.
+/// - An `@` after the first `/`, `?`, `#` or `\` that follows `://` (or two
+///   `@` before it): the user information then holds one of those characters
+///   unescaped, and curl takes
+///   the text before it for the host. That text, part of a token, would be
+///   printed in curl's error ("Could not resolve host: ...") and sent to the
+///   DNS resolver or the proxy. Such a URL is refused before anything is
+///   printed or started.
+fn ensure_unambiguous(url: &str) -> Result<()> {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '\'' | '"' | '<' | '>' | '`'))
+    {
+        bail!(
+            "the URL contains whitespace, a control character, a quote, an angle bracket or a \
+             backtick; percent-encode it (for example a space as %20)"
+        );
+    }
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority_end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    // Two `@` before the host mean an unescaped `@` in the user name or
+    // password: curl rejects that today, but nothing should depend on it.
+    if rest[authority_end..].contains('@') || rest[..authority_end].matches('@').count() > 1 {
+        bail!(
+            "the URL has an `@` after a `/`, `?`, `#` or `\\`, so git would read part of what \
+             looks like a user name or password as the host and send it over the network. \
+             Percent-encode those characters in the user name and password (`/` as %2F, `?` as \
+             %3F, `#` as %23, `\\` as %5C, `@` as %40); an `@` in the path or query must \
+             be written as %40 too"
+        );
+    }
+    Ok(())
+}
+
 /// Accepts only `https://` URLs.
 ///
 /// Plain-text transports are refused because anyone on the network could alter
@@ -250,11 +380,17 @@ fn ensure_https_only(url: &str) -> Result<()> {
              alter the code being scanned. Use an https:// URL instead"
         );
     }
-    if lower.starts_with("ssh://") || lower.starts_with("git@") {
+    if lower.starts_with("ssh://") || lower.starts_with("git@") || is_scp_like(url) {
+        let local_hint = if is_scp_like(url) && !lower.starts_with("git@") {
+            "\nIf this is a local folder whose name only looks like an ssh address, scan \
+             it as ./<name>."
+        } else {
+            ""
+        };
         bail!(
             "ssh targets are not supported: repo-sniff fetches over https only. To scan a \
              private or ssh-only repository, clone it yourself and scan the folder:\n  \
-             git clone <url> some-folder\n  repo-sniff scan some-folder"
+             git clone <url> some-folder\n  repo-sniff scan some-folder{local_hint}"
         );
     }
     bail!("unsupported URL: only https:// repositories can be cloned; scan a local folder instead")
@@ -288,15 +424,20 @@ mod tests {
     }
 
     fn environment(vars: &[(&str, &str)]) -> HashMap<String, String> {
-        git_environment(env_of(vars), Path::new("/empty-config"), "https")
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.to_string_lossy().into_owned(),
-                )
-            })
-            .collect()
+        git_environment(
+            &env_of(vars),
+            Path::new("/empty-config"),
+            Path::new("/empty-home"),
+            "https",
+        )
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
     }
 
     #[test]
@@ -317,8 +458,10 @@ mod tests {
             "ssh://git@github.com/owner/repo.git",
             "git@github.com:owner/repo.git",
             "SSH://git@github.com/owner/repo.git",
+            "deploy:FAKE_TOKEN@example.invalid:o/r.git",
         ] {
             let message = ensure_https_only(url).unwrap_err().to_string();
+            assert!(!message.contains("FAKE_TOKEN"), "{url}: {message}");
             assert!(
                 message.contains("ssh targets are not supported"),
                 "{url}: {message}"
@@ -329,6 +472,57 @@ mod tests {
                 "{url}: {message}"
             );
         }
+    }
+
+    #[test]
+    fn urls_that_curl_would_read_differently_are_refused_without_repeating_them() {
+        for url in [
+            "https://FAKE_TOKEN#x@example.invalid/r",
+            "https://FAKE_TOKEN?x@example.invalid/r",
+            "https://FAKE_TOKEN/x@example.invalid/r",
+            "https://FAKE_TOKEN\\x@example.invalid/r",
+            "https://u:FAKE#TOKEN@example.invalid/r",
+            "https://example.invalid/o/r@FAKE_TOKEN",
+            "https://user:FAKE TOKEN@example.invalid/r",
+            "https://user:FAKE'TOKEN@example.invalid/r",
+            "https://user:FAKE\"TOKEN@example.invalid/r",
+            "https://user:FAKE`TOKEN@example.invalid/r",
+            "https://user:FAKE<TOKEN@example.invalid/r",
+            "https://user:FAKE\u{7}TOKEN@example.invalid/r",
+            "HTTPS://FAKE_TOKEN#x@example.invalid/r",
+            "https:///FAKE#x@example.invalid/r",
+            "https://user:FAKE@TOKEN@example.invalid/r",
+        ] {
+            let message = validate(url, None).unwrap_err().to_string();
+            assert!(!message.contains("FAKE"), "{url}: {message}");
+            assert!(!message.contains("TOKEN"), "{url}: {message}");
+        }
+        for url in [
+            "https://example.invalid/owner/repo",
+            "https://FAKE_TOKEN@example.invalid/owner/repo.git",
+            "https://user:FAKE%23TOKEN%40x@example.invalid/r",
+            "https://example.invalid:8443/r?ref=main#top",
+        ] {
+            validate(url, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_scp_like_name_gets_a_hint_for_a_local_folder() {
+        let message = ensure_https_only("alpine@sha256:abc")
+            .unwrap_err()
+            .to_string();
+        // As main prints it: the hint must survive the redaction.
+        let message = crate::redact::redact_credentials(&message);
+        assert!(
+            message.contains("an ssh address, scan it as ./<name>"),
+            "{message}"
+        );
+        assert!(!message.contains("alpine"), "{message}");
+        let message = ensure_https_only("git@example.invalid:o/r")
+            .unwrap_err()
+            .to_string();
+        assert!(!message.contains("./<name>"), "{message}");
     }
 
     #[test]
@@ -438,7 +632,7 @@ mod tests {
             ("LD_PRELOAD", "/tmp/evil.so"),
         ]);
 
-        for kept in ["PATH", "HOME", "HTTPS_PROXY", "SSL_CERT_FILE", "SYSTEMROOT"] {
+        for kept in ["PATH", "HTTPS_PROXY", "SSL_CERT_FILE", "SYSTEMROOT"] {
             assert!(env.contains_key(kept), "{kept} should be passed on");
         }
         for dropped in [
@@ -456,6 +650,22 @@ mod tests {
     }
 
     #[test]
+    fn git_gets_an_empty_home_directory_instead_of_the_users() {
+        let env = environment(&[
+            ("HOME", "/home/user"),
+            ("USERPROFILE", "C:\\Users\\user"),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", "\\Users\\user"),
+            ("XDG_CONFIG_HOME", "/home/user/.config"),
+        ]);
+        assert_eq!(env["HOME"], "/empty-home");
+        assert_eq!(env["USERPROFILE"], "/empty-home");
+        for dropped in ["HOMEDRIVE", "HOMEPATH", "XDG_CONFIG_HOME"] {
+            assert!(!env.contains_key(dropped), "{dropped} must not reach git");
+        }
+    }
+
+    #[test]
     fn isolation_variables_are_always_set() {
         let env = environment(&[]);
         assert_eq!(env["GIT_CONFIG_NOSYSTEM"], "1");
@@ -463,6 +673,7 @@ mod tests {
         assert_eq!(env["GIT_ALLOW_PROTOCOL"], "https");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
         assert_eq!(env["GCM_INTERACTIVE"], "never");
+        assert_eq!(env["GIT_ATTR_NOSYSTEM"], "1");
     }
 
     #[test]
@@ -475,6 +686,8 @@ mod tests {
         assert_eq!(env["GIT_CONFIG_GLOBAL"], "/empty-config");
         assert_eq!(env["GIT_CONFIG_NOSYSTEM"], "1");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
+        let env = environment(&[("HOME", "/home/user")]);
+        assert_eq!(env["HOME"], "/empty-home");
     }
 
     #[test]
@@ -676,6 +889,95 @@ mod tests {
         );
     }
 
+    /// Git before 2.32 does not know `GIT_CONFIG_GLOBAL` and reads
+    /// `$HOME/.gitconfig`. Shown here by asking a current git for its global
+    /// configuration with that variable left out, in the environment the clone
+    /// gets: the user's filter is not visible, because `HOME` is the sandbox.
+    #[test]
+    fn without_git_config_global_the_users_gitconfig_is_still_not_read() {
+        let home = home_with_filter();
+        let home_path = home.path().to_string_lossy().into_owned();
+        let source = move |name: &str| match name {
+            "HOME" | "USERPROFILE" => Some(OsString::from(&home_path)),
+            other => std::env::var_os(other),
+        };
+        let global_config = |env: Vec<(OsString, OsString)>| {
+            let output = Command::new("git")
+                .env_clear()
+                .envs(
+                    env.into_iter()
+                        .filter(|(name, _)| name != "GIT_CONFIG_GLOBAL"),
+                )
+                .args(["config", "--global", "--list"])
+                .output()
+                .expect("git is required for these tests");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+
+        // Control: with the user's home, git reads the filter from it.
+        let leaky = git_environment(&source, Path::new("/unused"), home.path(), "file");
+        assert!(
+            global_config(leaky).contains("filter.evil.smudge"),
+            "setup is broken: git should read the home directory's .gitconfig"
+        );
+
+        // A marker in the sandbox home shows that git did read a .gitconfig,
+        // only not the user's: the assertion cannot pass because git failed.
+        let sandbox = tempfile::tempdir().unwrap();
+        fs::write(
+            sandbox.path().join(".gitconfig"),
+            "[marker]\n\tseen = yes\n",
+        )
+        .unwrap();
+        let env = git_environment(&source, Path::new("/unused"), sandbox.path(), "file");
+        let listed = global_config(env);
+        assert!(listed.contains("marker.seen=yes"), "{listed}");
+        assert!(!listed.contains("filter.evil"), "{listed}");
+    }
+
+    /// `~/.config/git/attributes` is read by every git version whatever
+    /// `GIT_CONFIG_GLOBAL` says. An `eol=crlf` there would change the checked
+    /// out bytes; with the sandbox as home it does not apply.
+    #[test]
+    fn attributes_in_the_users_home_do_not_apply() {
+        let source = source_repository();
+        let home = tempfile::tempdir().unwrap();
+        let attributes = home.path().join(".config").join("git");
+        fs::create_dir_all(&attributes).unwrap();
+        fs::write(attributes.join("attributes"), "file.txt text eol=crlf\n").unwrap();
+
+        // Control: plain git with this home writes CRLF.
+        let control = tempfile::tempdir().unwrap();
+        let empty = control.path().join("empty-config");
+        fs::write(&empty, "").unwrap();
+        let mut command = Command::new("git");
+        command
+            .env("HOME", home.path())
+            .env_remove("XDG_CONFIG_HOME")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &empty)
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .args(["clone", "-q", &file_url(source.path())])
+            .arg(control.path().join("out"));
+        run(command);
+        assert_eq!(
+            fs::read(control.path().join("out").join("file.txt")).unwrap(),
+            b"hello\r\n",
+            "setup is broken: the home directory's attributes should apply"
+        );
+
+        let home_path = home.path().to_string_lossy().into_owned();
+        let env = move |name: &str| match name {
+            "HOME" | "USERPROFILE" => Some(OsString::from(&home_path)),
+            other => std::env::var_os(other),
+        };
+        let checkout = clone_unchecked(&file_url(source.path()), None, "file", env).unwrap();
+        assert_eq!(
+            fs::read(checkout.path().join("file.txt")).unwrap(),
+            b"hello\n"
+        );
+    }
+
     #[test]
     fn a_filter_set_through_git_config_count_variables_has_no_effect() {
         let source = source_repository();
@@ -728,6 +1030,191 @@ mod tests {
         assert!(metadata.is_file(), "link should be a regular file");
         assert!(!metadata.file_type().is_symlink());
         assert_eq!(fs::read_to_string(&link).unwrap(), "file.txt");
+    }
+
+    #[test]
+    fn the_symbolic_links_of_the_clone_are_read_from_its_index() {
+        let source = source_repository();
+
+        let checkout =
+            clone_unchecked(&file_url(source.path()), None, "file", pass_through_all()).unwrap();
+
+        assert_eq!(checkout.symlinks, HashSet::from([PathBuf::from("link")]));
+    }
+
+    /// A repository with the given regular files and symbolic links (written
+    /// into the index directly, so it works on every OS).
+    fn repository_with_links(files: &[(&str, &str)], links: &[(&str, &str)]) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let mut init = plain_git(path);
+        init.args(["init", "-q", "-b", "main"]);
+        run(init);
+        for (name, contents) in files {
+            let file = path.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, contents).unwrap();
+            let mut add = plain_git(path);
+            add.args(["add", name]);
+            run(add);
+        }
+        for (name, target) in links {
+            let mut hash = plain_git(path);
+            hash.args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            let mut child = hash.spawn().unwrap();
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), target.as_bytes()).unwrap();
+            let blob = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+            let mut link = plain_git(path);
+            link.args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{},{name}", blob.trim()),
+            ]);
+            run(link);
+        }
+        let mut commit = plain_git(path);
+        commit.args(["commit", "-q", "-m", "fixture"]);
+        run(commit);
+        dir
+    }
+
+    /// Links in a remote repository arrive as plain files, and the scan still
+    /// treats them as links (#67): one out of the repository is reported, and
+    /// a `.vscode/tasks.json` link is judged by the file it points at.
+    #[test]
+    fn links_of_a_clone_are_scanned_as_links() {
+        let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+        let source = repository_with_links(
+            &[("notes.txt", autorun), ("main.rs", "fn main() {}\n")],
+            &[
+                ("escape", "../../../../home/user/.ssh/id_rsa"),
+                (".vscode/tasks.json", "../notes.txt"),
+                ("docs/readme-link", "../main.rs"),
+            ],
+        );
+        let checkout =
+            clone_unchecked(&file_url(source.path()), None, "file", pass_through_all()).unwrap();
+        let rules = repo_sniff_core::builtin_rules().unwrap();
+
+        let report = repo_sniff_core::scan_with_links(
+            checkout.path(),
+            &rules,
+            repo_sniff_core::Limits::default(),
+            &checkout.symlinks,
+        );
+
+        let mut found: Vec<(String, String)> = report
+            .findings
+            .iter()
+            .map(|f| {
+                (
+                    f.file.to_string_lossy().replace('\\', "/"),
+                    f.rule_id.clone(),
+                )
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                // Its own file, as a system without symlinks reads it: not JSON.
+                (
+                    ".vscode/tasks.json".to_string(),
+                    "ide.vscode-folder-open-task".to_string()
+                ),
+                // The file it points at, as a system with symlinks reads it.
+                (
+                    ".vscode/tasks.json".to_string(),
+                    "ide.vscode-folder-open-task".to_string()
+                ),
+                ("escape".to_string(), "repo.symlink-outside".to_string()),
+            ]
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.explanation.contains("runs automatically")
+                    && f.explanation.contains("symbolic link"))
+        );
+        let links = report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, repo_sniff_core::SkipReason::Symlink { .. }))
+            .count();
+        assert_eq!(links, 3);
+        assert!(report.is_complete());
+
+        // Control: read without the list, the same clone has no link at all.
+        let blind =
+            repo_sniff_core::scan(checkout.path(), &rules, repo_sniff_core::Limits::default());
+        assert!(
+            !blind
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "repo.symlink-outside"),
+            "setup is broken: without the index the link should be a plain file"
+        );
+    }
+
+    /// A link's blob can be any bytes. Git for Windows writes it as a plain
+    /// file by default, so a `.vscode/tasks.json` "link" whose blob is a tasks
+    /// file is a tasks file there, and must still be reported.
+    #[test]
+    fn a_link_whose_blob_is_content_is_still_scanned_as_content() {
+        let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+        let long = format!("{autorun}{}", " ".repeat(5000));
+        let source = repository_with_links(
+            &[("main.rs", "fn main() {}\n")],
+            &[
+                (".vscode/tasks.json", autorun),
+                ("b/.vscode/tasks.json", &long),
+            ],
+        );
+        let checkout =
+            clone_unchecked(&file_url(source.path()), None, "file", pass_through_all()).unwrap();
+        assert_eq!(checkout.symlinks.len(), 2);
+
+        let report = repo_sniff_core::scan_with_links(
+            checkout.path(),
+            &repo_sniff_core::builtin_rules().unwrap(),
+            repo_sniff_core::Limits::default(),
+            &checkout.symlinks,
+        );
+
+        let autoruns: Vec<String> = report
+            .findings
+            .iter()
+            .filter(|f| {
+                f.rule_id == "ide.vscode-folder-open-task"
+                    && f.explanation.contains("runs automatically")
+            })
+            .map(|f| f.file.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(autoruns, [".vscode/tasks.json", "b/.vscode/tasks.json"]);
+    }
+
+    #[test]
+    fn symlinks_are_picked_from_an_index_listing_by_mode() {
+        let listing = b"100644 0123 0\tfile.txt\0\
+                        120000 4567 0\tdir/link\0\
+                        100755 89ab 0\trun.sh\0\
+                        160000 cdef 0\tvendor/sub\0\
+                        120000 0123 0\tname with\ttab and spaces\0\
+                        garbage\0\0";
+        let mut links: Vec<PathBuf> = symlinks_in_index_listing(listing).into_iter().collect();
+        links.sort();
+        assert_eq!(
+            links,
+            [
+                PathBuf::from("dir/link"),
+                PathBuf::from("name with\ttab and spaces")
+            ]
+        );
+        assert!(symlinks_in_index_listing(b"").is_empty());
     }
 
     #[test]
