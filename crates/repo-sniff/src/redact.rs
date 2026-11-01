@@ -9,11 +9,13 @@
 /// Replaces the user and password part of every `scheme://user:pass@host`
 /// found in `text` with `***`.
 ///
-/// The user information is taken to end at the last `@` before the first
-/// `?` or `#` of the word, not only before the first `/`. A valid URL cannot
-/// have a `/` in its user information, but a pasted one with an unescaped
-/// secret might, and showing half of a secret is a leak. The price is that an
-/// `@` inside a path also hides what comes before it, which is acceptable.
+/// The user information is taken to end at the last `@` of the word. A valid
+/// URL has no `/`, `?` or `#` in its user information, but a pasted one with
+/// an unescaped secret might (`https://user:pa#ss@host/r`), and from the text
+/// alone `user:a/b?c@host` cannot be told apart from `host/path?mail=a@b`.
+/// Showing half of a secret is a leak, so the ambiguous case is hidden: the
+/// price is that an `@` inside a path or query also hides what comes before
+/// it, which only shortens the message.
 pub fn redact_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -25,17 +27,14 @@ pub fn redact_credentials(text: &str) -> String {
             .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '`'))
             .unwrap_or(tail.len());
         let (word, after) = tail.split_at(word_end);
-        let query = word.find(['?', '#']).unwrap_or(word.len());
-        let (before_query, query_and_fragment) = word.split_at(query);
 
-        match before_query.rfind('@') {
+        match word.rfind('@') {
             Some(at) => {
                 out.push_str("***@");
-                out.push_str(&before_query[at + 1..]);
+                out.push_str(&word[at + 1..]);
             }
-            None => out.push_str(before_query),
+            None => out.push_str(word),
         }
-        out.push_str(query_and_fragment);
         rest = after;
     }
     out.push_str(rest);
@@ -86,10 +85,38 @@ mod tests {
     }
 
     #[test]
-    fn an_at_sign_in_the_query_is_not_user_information() {
+    fn a_secret_with_a_question_mark_or_hash_is_still_hidden() {
+        for (url, secret) in [
+            ("https://u:p#w@example.invalid/r", "p#w"),
+            ("https://u:p?w@example.invalid/r", "p?w"),
+            ("https://user:pa#ss@example.invalid/r", "pa#ss"),
+            ("https://u:a/b?c@example.invalid/r", "a/b?c"),
+            ("https://TOKEN#x?y@example.invalid/r?ref=main#top", "TOKEN"),
+        ] {
+            let shown = redact_credentials(url);
+            assert!(!shown.contains(secret), "{url} -> {shown}");
+            assert!(
+                shown.starts_with("https://***@example.invalid/r"),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_or_fragment_after_the_host_is_kept() {
+        assert_eq!(
+            redact_credentials("https://T@example.invalid/r?ref=main#top"),
+            "https://***@example.invalid/r?ref=main#top"
+        );
+    }
+
+    #[test]
+    fn an_at_sign_in_a_query_hides_what_comes_before_it() {
+        // `host/path?mail=a@b` reads the same as `user:a/b?c@host`, so the
+        // ambiguous case is hidden rather than risk showing a secret.
         assert_eq!(
             redact_credentials("https://example.com/path?email=a@b.c"),
-            "https://example.com/path?email=a@b.c"
+            "https://***@b.c"
         );
     }
 

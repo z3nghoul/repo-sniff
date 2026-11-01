@@ -178,13 +178,16 @@ fn credentials_in_the_target_never_reach_stdout_or_stderr() {
     for target in [
         "https://TOKEN123@example.invalid/owner/repo",
         "https://user:SECRET456@example.invalid/owner/repo.git",
+        // A password with an unescaped `#` or `?` (#31).
+        "https://user:PART1#PART2@example.invalid/owner/repo",
+        "https://user:PART1?PART2@example.invalid/owner/repo",
     ] {
         let output = run(dir.path(), &["scan", target]);
 
         assert_eq!(code(&output), 2, "{target}");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        for secret in ["TOKEN123", "SECRET456", "user:"] {
+        for secret in ["TOKEN123", "SECRET456", "PART1", "PART2", "user:"] {
             assert!(!stdout.contains(secret), "{secret} in stdout: {stdout}");
             assert!(!stderr.contains(secret), "{secret} in stderr: {stderr}");
         }
