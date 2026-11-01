@@ -291,9 +291,13 @@ fn java_class(head: &[u8]) -> bool {
         && !names_a_known_cpu(head)
 }
 
-/// Whether any 20-byte `fat_arch` entry after the 8-byte fat header, within
-/// `head`, has the CPU type of x86, x86-64, ARM, ARM64, ARM64_32, PowerPC or
-/// PowerPC 64. A fat binary needs such an entry to run anywhere.
+/// Whether one of the first `nfat_arch` entries of the fat architecture
+/// table (as far as the head reaches) is one a loader would run: the CPU type
+/// of x86, x86-64, ARM, ARM64, ARM64_32, PowerPC or PowerPC 64, an alignment
+/// of at most 2^15, an offset aligned to it and past the table. A fat binary
+/// needs such an entry to run anywhere. Looking only at those entries, and
+/// only at sane ones, keeps ordinary class files, whose constant pool can
+/// hold a 7 or a 12 anywhere, from being taken for fat binaries.
 fn names_a_known_cpu(head: &[u8]) -> bool {
     const KNOWN: [u32; 7] = [
         7,
@@ -304,12 +308,29 @@ fn names_a_known_cpu(head: &[u8]) -> bool {
         18,
         0x0100_0012,
     ];
+    let word = |bytes: &[u8], at: usize| {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let Some(count) = word(head, 4) else {
+        return false;
+    };
+    let table_end = 8 + 20 * u64::from(count);
     head.get(8..)
         .unwrap_or_default()
         .chunks_exact(20)
+        .take(count as usize)
         .any(|entry| {
-            let cpu = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]);
+            let (Some(cpu), Some(offset), Some(align)) =
+                (word(entry, 0), word(entry, 8), word(entry, 16))
+            else {
+                return false;
+            };
             KNOWN.contains(&cpu)
+                && align <= 15
+                && offset % (1u32 << align) == 0
+                && u64::from(offset) >= table_end
         })
 }
 
@@ -671,15 +692,34 @@ mod tests {
             None,
             "no NUL, not binary"
         );
-        // A padded fat binary whose first entry is junk shaped like a class
-        // file, with a real x86-64 entry further on.
+        // A padded fat binary (52 architectures) whose first entry is junk
+        // shaped like a class file, with a real x86-64 entry after it.
         let mut tricky = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52, 0, 20, 10, 0];
         tricky.resize(8 + 20, 0x41);
-        tricky.extend_from_slice(&[0x01, 0, 0, 0x07]);
-        tricky.resize(8 + 40, 0);
+        tricky.extend_from_slice(&[0x01, 0, 0, 0x07, 0, 0, 0, 3]);
+        tricky.extend_from_slice(&0x1000u32.to_be_bytes()); // offset
+        tricky.extend_from_slice(&0x2000u32.to_be_bytes()); // size
+        tricky.extend_from_slice(&12u32.to_be_bytes()); // align 2^12
         assert_eq!(
             code_of(&tricky, "main.class"),
             Some(Code::Native("Mach-O fat"))
+        );
+        // A class file whose constant pool happens to hold a 7 on a 20-byte
+        // boundary past the first entries: still a class.
+        let mut class_with_seven = class.to_vec();
+        class_with_seven.resize(8 + 20 * 60, 0x20);
+        class_with_seven[8 + 20 * 55..8 + 20 * 55 + 4].copy_from_slice(&[0, 0, 0, 7]);
+        assert_eq!(
+            code_of(&class_with_seven, "main.class"),
+            Some(Code::Bytecode("Java class"))
+        );
+        // ... and one with a 7 in the first entries, but no sane offset.
+        let mut seven_up_front = class.to_vec();
+        seven_up_front.resize(8 + 20 * 4, 0x20);
+        seven_up_front[8 + 20..8 + 20 + 4].copy_from_slice(&[0, 0, 0, 7]);
+        assert_eq!(
+            code_of(&seven_up_front, "main.class"),
+            Some(Code::Bytecode("Java class"))
         );
     }
 
