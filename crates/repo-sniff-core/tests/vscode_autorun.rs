@@ -421,4 +421,17 @@ fn a_link_target_that_names_no_single_file_for_certain_is_not_guessed() {
     let report = scan(root, &builtin_rules().unwrap(), Limits::default());
     assert!(unreadable_link(&report), "{:?}", report.skipped);
     assert!(!report.is_complete());
+
+    // The decoy chain: the Unix reading `.vscode/..\notes.txt` is a link to
+    // the payload, the Windows reading is the harmless `notes.txt`.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join("payload.json"), autorun).unwrap();
+    fs::write(root.join("notes.txt"), honest).unwrap();
+    symlink("../payload.json", root.join(".vscode/..\\notes.txt")).unwrap();
+    symlink("..\\notes.txt", root.join(".vscode/tasks.json")).unwrap();
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+    assert!(unreadable_link(&report), "{:?}", report.skipped);
+    assert!(!report.is_complete());
 }
