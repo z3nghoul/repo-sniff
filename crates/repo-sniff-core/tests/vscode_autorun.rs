@@ -394,21 +394,24 @@ fn a_link_target_that_names_no_single_file_for_certain_is_not_guessed() {
         })
     };
 
-    // A target that is not UTF-8, next to a harmless file whose name is its
-    // lossy text.
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join(".vscode")).unwrap();
-    fs::write(root.join(OsStr::from_bytes(b"notes\xfe")), autorun).unwrap();
-    fs::write(root.join("notes\u{FFFD}"), honest).unwrap();
-    symlink(
-        OsStr::from_bytes(b"../notes\xfe"),
-        root.join(".vscode/tasks.json"),
-    )
-    .unwrap();
-    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
-    assert!(unreadable_link(&report), "{:?}", report.skipped);
-    assert!(!report.is_complete());
+    // Not on macOS, where the file system refuses names that are not UTF-8.
+    if !cfg!(target_os = "macos") {
+        // A target that is not UTF-8, next to a harmless file whose name is its
+        // lossy text.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".vscode")).unwrap();
+        fs::write(root.join(OsStr::from_bytes(b"notes\xfe")), autorun).unwrap();
+        fs::write(root.join("notes\u{FFFD}"), honest).unwrap();
+        symlink(
+            OsStr::from_bytes(b"../notes\xfe"),
+            root.join(".vscode/tasks.json"),
+        )
+        .unwrap();
+        let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+        assert!(unreadable_link(&report), "{:?}", report.skipped);
+        assert!(!report.is_complete());
+    }
 
     // `..\notes.txt` opens the root `notes.txt` on Windows, and a file named
     // `.vscode/..\notes.txt` on Unix.
