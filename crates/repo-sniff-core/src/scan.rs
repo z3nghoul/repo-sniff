@@ -125,12 +125,13 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
 /// Like `scan`, for a checkout whose symbolic links were written as plain
 /// files (see `walk::walk_with_links`): each path in `links` is treated as a
 /// link to the target its file holds, so the link rules and the checks that
-/// read through links see it as they would see a real one.
+/// read through links see it as they would see a real one, and its file is
+/// also scanned as content, as a system without symlinks reads it.
 pub fn scan_with_links(
     root: &Path,
     rules: &[Rule],
     limits: Limits,
-    links: &HashSet<String>,
+    links: &HashSet<PathBuf>,
 ) -> Report {
     let walked = walk::walk_with_links(root, limits, links);
 
@@ -154,7 +155,27 @@ pub fn scan_with_links(
                     }),
             ),
     );
-    let regular_files: HashSet<String> = walked.files.iter().map(|path| to_slash(path)).collect();
+    // A recorded link is handed over as content too, but it is not a regular
+    // file that another link can point at.
+    let link_paths: HashSet<&PathBuf> = walked
+        .skipped
+        .iter()
+        .filter(|entry| matches!(entry.reason, SkipReason::Symlink { .. }))
+        .map(|entry| &entry.path)
+        .collect();
+    let regular_files: HashSet<String> = walked
+        .files
+        .iter()
+        .filter(|path| !link_paths.contains(path))
+        .map(|path| to_slash(path))
+        .collect();
+    // Links recorded by the caller whose files are scanned as content too.
+    let recorded_links: HashSet<PathBuf> = walked
+        .files
+        .iter()
+        .filter(|path| link_paths.contains(path))
+        .cloned()
+        .collect();
     // The same paths by their lowercase form, for link targets spelled in
     // another case (NTFS and APFS ignore case by default).
     let lowercase_files: HashMap<String, String> = regular_files
@@ -421,6 +442,13 @@ pub fn scan_with_links(
     report
         .findings
         .sort_by(|a, b| (&a.file, a.line, &a.rule_id).cmp(&(&b.file, b.line, &b.rule_id)));
+    // A recorded link is offered to the rules that judge names twice, as a
+    // file and as a link; the same finding is listed once.
+    if !recorded_links.is_empty() {
+        report
+            .findings
+            .dedup_by(|a, b| a == b && recorded_links.contains(&a.file));
+    }
     report
 }
 
@@ -1964,6 +1992,74 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    /// A recorded link must not hide a regular file whose name differs only in
+    /// bytes that are not UTF-8: names are compared exactly, never lossily.
+    #[cfg(unix)]
+    #[test]
+    fn a_recorded_link_does_not_hide_a_file_whose_name_differs_in_invalid_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = PathBuf::from(OsStr::from_bytes(b"x\xfe.code-workspace"));
+        let file = PathBuf::from(OsStr::from_bytes(b"x\xff.code-workspace"));
+        fs::write(dir.path().join(&link), "notes.txt").unwrap();
+        fs::write(
+            dir.path().join(&file),
+            r#"{"tasks": {"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}}"#,
+        )
+        .unwrap();
+        let links = HashSet::from([link.clone()]);
+
+        let report = scan_with_links(
+            dir.path(),
+            &builtin_rules().unwrap(),
+            Limits::default(),
+            &links,
+        );
+
+        let autorun: Vec<&PathBuf> = report
+            .findings
+            .iter()
+            .filter(|f| f.explanation.contains("runs automatically"))
+            .map(|f| &f.file)
+            .collect();
+        assert_eq!(autorun, [&file]);
+        let listed_links: Vec<&PathBuf> = report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, SkipReason::Symlink { .. }))
+            .map(|s| &s.path)
+            .collect();
+        assert_eq!(listed_links, [&link]);
+    }
+
+    #[test]
+    fn a_recorded_link_gets_a_name_finding_once() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "x.bat", b"@echo off\n");
+        write(dir.path(), "tools/run.bat", b"../x.bat");
+        let links = HashSet::from([PathBuf::from("tools/run.bat")]);
+
+        let report = scan_with_links(
+            dir.path(),
+            &builtin_rules().unwrap(),
+            Limits::default(),
+            &links,
+        );
+
+        let on_link: Vec<(String, String)> = report
+            .findings
+            .iter()
+            .filter(|f| f.file == Path::new("tools/run.bat"))
+            .map(|f| (f.rule_id.clone(), f.explanation.clone()))
+            .collect();
+        let mut unique = on_link.clone();
+        unique.dedup();
+        assert_eq!(on_link, unique);
+        assert!(!on_link.is_empty());
     }
 
     #[test]

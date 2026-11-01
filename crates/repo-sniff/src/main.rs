@@ -5,7 +5,7 @@ mod report;
 mod target;
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -128,7 +128,7 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
 /// `clone::Checkout`); it is empty for a local folder, whose links are real.
 fn scan_dir(
     root: &Path,
-    links: &HashSet<String>,
+    links: &HashSet<PathBuf>,
     label: &str,
     fail_on: FailOn,
 ) -> Result<ExitCode> {

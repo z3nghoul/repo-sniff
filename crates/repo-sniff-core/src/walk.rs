@@ -18,8 +18,6 @@ use std::sync::{Arc, Mutex};
 
 use ignore::WalkBuilder;
 
-use crate::sanitize::to_slash;
-
 /// A recorded symbolic link (see `walk_with_links`) whose plain file is longer
 /// than this is listed without a target: no system resolves a link target
 /// that long (Linux allows 4095 bytes).
@@ -152,13 +150,17 @@ pub fn walk(root: &Path, limits: Limits) -> WalkResult {
 }
 
 /// Like `walk`, for a checkout whose symbolic links were written as plain
-/// files: `links` holds the paths (relative, with `/`) that the repository
-/// records as links. A clone made with `core.symlinks=false` writes each link
-/// as a small file holding its target; such a file is listed as a symlink with
-/// that target, exactly as a real link would be, and is not read as content.
-/// Only a caller that made the checkout itself and read its git index should
-/// pass anything here.
-pub fn walk_with_links(root: &Path, limits: Limits, links: &HashSet<String>) -> WalkResult {
+/// files: `links` holds the paths, relative to the root, that the repository
+/// records as links, compared exactly (never through a lossy string, so a
+/// link cannot stand in for a file whose name differs only in invalid UTF-8).
+/// A clone made with `core.symlinks=false` writes each link as a file holding
+/// its target. Such a file is listed as a symlink with that target, for the
+/// rules that judge links, and is also handed over as an ordinary file,
+/// because a tool on a system without symlinks (Git for Windows by default)
+/// reads exactly that file: a link whose "target" is a tasks file is a tasks
+/// file there. Only a caller that made the checkout itself and read its git
+/// index should pass anything here.
+pub fn walk_with_links(root: &Path, limits: Limits, links: &HashSet<PathBuf>) -> WalkResult {
     // `.git` entries are not walked into, but each one is remembered so the
     // report can list it instead of dropping it.
     let git_entries = Arc::new(Mutex::new(Vec::new()));
@@ -212,14 +214,14 @@ pub fn walk_with_links(root: &Path, limits: Limits, links: &HashSet<String>) -> 
         if !file_type.is_file() {
             continue; // directories are walked into, not scanned
         }
-        if !links.is_empty() && links.contains(&to_slash(&path)) {
+        if !links.is_empty() && links.contains(&path) {
             result.skipped.push(Skipped {
-                path,
+                path: path.clone(),
                 reason: SkipReason::Symlink {
                     target: recorded_link_target(entry.path()),
                 },
             });
-            continue;
+            // No `continue`: its content is scanned too, see above.
         }
 
         let size = match entry.metadata() {
@@ -394,13 +396,14 @@ mod tests {
         );
         write(dir.path(), "empty", "");
         write(dir.path(), "main.rs", "fn main() {}");
-        let links: HashSet<String> = ["out", "sub/in", "long", "empty", "missing"]
-            .map(String::from)
+        let links: HashSet<PathBuf> = ["out", "sub/in", "long", "empty", "missing"]
+            .map(PathBuf::from)
             .into();
 
         let result = walk_with_links(dir.path(), Limits::default(), &links);
 
-        assert_eq!(result.files, [PathBuf::from("main.rs")]);
+        // Every file is still handed over as content.
+        assert_eq!(result.files.len(), 5);
         let mut skipped: Vec<(PathBuf, SkipReason)> = result
             .skipped
             .into_iter()
@@ -424,8 +427,10 @@ mod tests {
                 link("sub/in", Some("../main.rs")),
             ]
         );
-        // Without the list, the same files are ordinary content.
-        assert_eq!(walk(dir.path(), Limits::default()).files.len(), 5);
+        // Without the list, the same files are only ordinary content.
+        let plain = walk(dir.path(), Limits::default());
+        assert_eq!(plain.files.len(), 5);
+        assert!(plain.skipped.is_empty());
     }
 
     #[test]
