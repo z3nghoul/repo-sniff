@@ -221,6 +221,11 @@ vulnerability in the scanner itself.
 Test fixtures are synthetic, harmless files that only *imitate* suspicious
 patterns; each one is marked `SYNTHETIC TEST FIXTURE — not functional`.
 
+Built with Claude Code as the implementing agent. Design, rule semantics, review
+policy and merge decisions are mine; every change goes through an independent
+review pass, fixtures-first tests, CI on three OSes and a benchmark against 10
+well-known repositories.
+
 ## License
 
 [AGPL-3.0](LICENSE)
