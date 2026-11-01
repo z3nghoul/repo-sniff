@@ -155,11 +155,15 @@ fn ssh_targets_are_a_runtime_error_that_explains_how_to_scan_a_local_clone() {
     for target in [
         "ssh://git@example.invalid/owner/repo.git",
         "git@example.invalid:owner/repo.git",
+        // Any user, not only `git`, and never repeated with its token (#32).
+        "deploy:FAKE_TOKEN@example.invalid:owner/repo.git",
     ] {
         let output = run(dir.path(), &["scan", target]);
 
         assert_eq!(code(&output), 2, "{target}");
         let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("FAKE_TOKEN"), "{stderr}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("FAKE_TOKEN"));
         assert!(stderr.contains("ssh targets are not supported"), "{stderr}");
         assert!(stderr.contains("repo-sniff scan some-folder"), "{stderr}");
         assert!(

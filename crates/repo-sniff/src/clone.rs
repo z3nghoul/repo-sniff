@@ -19,6 +19,7 @@ use repo_sniff_core::display_safe;
 use tempfile::TempDir;
 
 use crate::redact::redact_credentials;
+use crate::target::is_scp_like;
 
 /// URL schemes that send the repository over the network unencrypted.
 const PLAIN_TEXT_SCHEMES: &[&str] = &["http://", "git://"];
@@ -250,7 +251,7 @@ fn ensure_https_only(url: &str) -> Result<()> {
              alter the code being scanned. Use an https:// URL instead"
         );
     }
-    if lower.starts_with("ssh://") || lower.starts_with("git@") {
+    if lower.starts_with("ssh://") || lower.starts_with("git@") || is_scp_like(url) {
         bail!(
             "ssh targets are not supported: repo-sniff fetches over https only. To scan a \
              private or ssh-only repository, clone it yourself and scan the folder:\n  \
@@ -317,8 +318,10 @@ mod tests {
             "ssh://git@github.com/owner/repo.git",
             "git@github.com:owner/repo.git",
             "SSH://git@github.com/owner/repo.git",
+            "deploy:FAKE_TOKEN@example.invalid:o/r.git",
         ] {
             let message = ensure_https_only(url).unwrap_err().to_string();
+            assert!(!message.contains("FAKE_TOKEN"), "{url}: {message}");
             assert!(
                 message.contains("ssh targets are not supported"),
                 "{url}: {message}"
