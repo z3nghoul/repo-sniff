@@ -36,7 +36,8 @@ What it does to protect you:
   by a `git` that runs with an empty environment, an empty configuration and
   an empty home directory. No filter, credential helper or fsmonitor from
   your own or the system's git configuration runs, hooks and templates are
-  off, symlinks are written as plain files, and submodules are not fetched.
+  off, symlinks are written as plain files (the scanner then reads them as links
+  from the clone's own index), and submodules are not fetched.
   There are no interactive prompts. For a private repository, clone it
   yourself and scan the folder.
 - **Secrets.** A token pasted into a URL (`https://TOKEN@host/...`) is hidden
@@ -44,9 +45,20 @@ What it does to protect you:
   an unescaped `/`, `?` or `#` is refused before anything is sent (curl would
   take part of it for the host), and so is an scp-like address with any user
   (`deploy:TOKEN@host:path`), which is an ssh target.
-- **Reading.** Symlinks are never followed. File names and text taken from the
-  repository are cleaned before they are printed, so a hostile repository
-  cannot paint over the report. The work per file is bounded.
+- **Reading.** Symlinks are listed, not followed, with one exception: a
+  symlinked VS Code tasks file or `.code-workspace` is judged through the
+  regular file inside the repository it points at. If that target cannot be
+  read for certain (a link to another link, a name that differs between Unix
+  and Windows, a path through a directory link, a target over the limit), the
+  link is listed as unreadable and the scan is inconclusive. File names and
+  text taken from the repository are cleaned before they are printed, so a
+  hostile repository cannot paint over the report.
+- **Limits.** The work is bounded. The walk stops after 100,000 files. A file
+  over 100 MiB is not read. A file over 5 MiB is read as a stream, line by
+  line, and only the line rules look at it; a line over 16 MiB is not
+  analyzed. Reads through symlinks are capped at 64 MiB per scan. Reaching
+  the file limit, a file or line over its limit and the symlink cap each make
+  the scan inconclusive instead of passing silently.
 - **Honesty.** A scan is never reported as clean when it cannot vouch for what
   it looked at: the report says `INCONCLUSIVE` and the exit status is 3 (see
   [Exit status](#exit-status)).
@@ -57,7 +69,7 @@ What it does to protect you:
 |---|---|---|
 | `deception.bidi-control` | CRITICAL | Unicode bidirectional control characters that make code look different from what it does (Trojan Source, CVE-2021-42574) |
 | `ide.vscode-folder-open-task` | MEDIUM to CRITICAL | VS Code tasks that run when a folder is opened, in `.vscode/tasks.json` and `*.code-workspace`; CRITICAL if the command downloads or runs code from a string; a file that cannot be parsed is reported for a manual look, HIGH if it mentions `runOn` and `folderOpen`, MEDIUM otherwise |
-| `deception.nul-byte-in-script` | HIGH | A NUL byte inside a script (by extension or shebang). The script is still scanned as text, because shells and interpreters run it |
+| `deception.nul-byte-in-script` | HIGH | A NUL byte inside a script (by extension or shebang). The script is still scanned as text, because shells and interpreters run it. A script with a UTF-16 byte order mark is decoded first, so its NUL bytes are not a finding and the line rules see its real text, except `.bat`, `.cmd`, shell and PHP scripts, which run the bytes after the mark and are read as bytes. Not decoded: UTF-16 without a byte order mark, and UTF-16 in files that are not scripts |
 | `deps.python-pth-exec` | INFO to CRITICAL | Python `.pth` files with a line that starts with `import`, which Python runs every time it starts. Judged the way every supported Python version would read it; known honest forms (setuptools, virtualenv, editable installs, pytest-cov) are lowered |
 | `deps.python-start-entrypoint` | HIGH, LOW | Python 3.15 `.start` files, whose `package.module:callable` entry points Python calls every time it starts; LOW for file names Python never reads |
 | `repo.disguised-executable` | CRITICAL | A native executable (ELF, PE, Mach-O, found by magic bytes) whose name promises something else: a document, image, data, archive or script extension (`logo.png`, `tool.sh`), a double extension such as `invoice.pdf.exe`, bidi or invisible characters in the name |
@@ -65,7 +77,7 @@ What it does to protect you:
 | `repo.windows-dropper` | HIGH, CRITICAL | Files that run on a double click on Windows: a `.lnk` with a shortcut header, a `.scr` that is a PE, an `.hta`; CRITICAL when the name poses as a document or image |
 | `repo.windows-script` | LOW to CRITICAL | Windows scripts: `.bat`, `.cmd`, `.ps1`, `.psm1` (LOW, common build glue); `.vbs`, `.wsf`, `.wsh` (MEDIUM); Script Encoder output `.vbe`, `.jse` (HIGH); CRITICAL when the name poses as a document or image |
 | `repo.wsh-javascript` | MEDIUM | JavaScript that uses Windows Script Host objects: `WScript` or `WSH`, `ActiveXObject` / `CreateObject` with the shell, file system, stream, server-side HTTP, WMI or task scheduler ProgIDs |
-| `repo.symlink-outside` | HIGH, MEDIUM | A symbolic link that points outside the repository (MEDIUM into system program folders); local folders only for now |
+| `repo.symlink-outside` | HIGH, MEDIUM | A symbolic link that points outside the repository (MEDIUM into system program folders); local folders and remote clones |
 
 The full catalog of planned detections, with their levels and MITRE ATT&CK
 techniques, is in [docs/DETECTIONS.md](docs/DETECTIONS.md).
@@ -159,8 +171,8 @@ Scan: complete (every file was read)
 A scan that could not vouch for what it looked at is never reported as clean:
 the report ends with `Scan: INCONCLUSIVE`, says why, and the exit status is 3
 even with `--fail-on none`; findings at the threshold still take precedence
-(exit 1). Images, archives, symlinks and the root `.git` folder are listed
-and do not change the status. This makes `repo-sniff scan . --fail-on high` usable as a CI check
+(exit 1). Images, archives, symlinks that no check had to read and the root `.git`
+folder are listed and do not change the status. This makes `repo-sniff scan . --fail-on high` usable as a CI check
 without mistaking "nothing found in what was read" for "safe". How executables
 and other binary files affect the status is described in
 [docs/DETECTIONS.md](docs/DETECTIONS.md#6-exit-status-and-binary-files).
@@ -168,8 +180,8 @@ and other binary files affect the status is described in
 ## Benchmark
 
 Ten popular honest repositories, scanned from their default branches with
-`repo-sniff scan <url>` on 2026-11-01. The scanner was `main` (`6c671ad`) with
-the open hardening pull requests #75, #76 and #77 merged locally. The target
+`repo-sniff scan <url>` on 2026-11-01. The scanner was `main` (`71fb3b5`), which
+includes the hardening pull requests #75, #76 and #77. The target
 is 0 CRITICAL findings on honest code; it is met, and no scan is
 INCONCLUSIVE.
 
@@ -189,7 +201,7 @@ INCONCLUSIVE.
 27 of the 30 HIGH findings are vendored executables (true detections of
 benign files) and one is a real folder-open task in vscode (#43). cpython's 2
 are a known false positive (#42), and they alone cause its exit 1. The
-previous run, with the scanner that is now on `main`, gave the same findings
+previous run, with the same changes merged locally, gave the same findings
 on the same heads (cpython has moved since). Commits of the
 scanned repositories, every HIGH and MEDIUM finding with a verdict, and how to
 re-run it are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
