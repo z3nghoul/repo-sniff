@@ -211,6 +211,13 @@ pub fn scan_with_links(
             .or_default()
             .push(key.clone());
     }
+    // Every link by its lowercase `/` path: a reading of a target that names
+    // a link is not a regular file, and must not be skipped over in favour of
+    // another reading that names one.
+    let link_keys: HashSet<String> = link_paths
+        .iter()
+        .map(|path| to_slash(path).to_lowercase())
+        .collect();
     let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
@@ -433,9 +440,13 @@ pub fn scan_with_links(
                 let mut bytes = Vec::new();
                 if jsonc || file_rule {
                     let target_file = match target.as_deref() {
-                        Some(target) => {
-                            link_target_to_read(&slash_path, target, &exact_files, &lowercase_exact)
-                        }
+                        Some(target) => link_target_to_read(
+                            &slash_path,
+                            target,
+                            &exact_files,
+                            &lowercase_exact,
+                            &link_keys,
+                        ),
                         None => Ok(None),
                     };
                     let mut not_read = |error: &str| {
@@ -745,12 +756,14 @@ fn link_target_file(
 /// certain. Otherwise which file the tool that follows the link opens depends
 /// on the system or on bytes the text cannot show, so the target is reported
 /// as not read (`Err`) rather than guessed: a guess can be the harmless twin.
-/// `Ok(None)` when no reading names a regular file.
+/// A reading that names another link is `Err` too (links to links are not
+/// followed). `Ok(None)` when no reading names a regular file.
 fn link_target_to_read(
     link: &str,
     target: &Path,
     exact_files: &HashMap<String, Option<PathBuf>>,
     lowercase_exact: &HashMap<String, Vec<String>>,
+    link_keys: &HashSet<String>,
 ) -> Result<Option<PathBuf>, &'static str> {
     let Some(target) = target.to_str() else {
         return Err("its target is not valid UTF-8");
@@ -760,6 +773,9 @@ fn link_target_to_read(
         let Some(path) = resolve_link_with(link, target, separators) else {
             continue;
         };
+        if link_keys.contains(&path.to_lowercase()) {
+            return Err("a reading of its target names another symbolic link");
+        }
         if let Some((key, _)) = exact_files.get_key_value(&path) {
             named.push(key);
         }
