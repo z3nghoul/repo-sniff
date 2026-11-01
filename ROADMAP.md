@@ -103,6 +103,7 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
 - [ ] npm install hooks: lifecycle scripts
 - [ ] Loader signatures (line and file rules, no AST; the full versions come in milestones 7 and 8): long base64 or hex blobs next to `eval`, `Function`, `exec` or `child_process`; obfuscator.io signatures (`_0x` identifiers, a string array with a rotator function); minified one-line code in a file not named `.min` among ordinary sources; a `fetch` / `axios` / `http.get` result passed to `eval` or `Function`
+  - [ ] Windows script loaders, line rules on the content of `.ps1`, `.psm1`, `.bat`, `.cmd`, `.vbs` and the same strings in any other file: `IEX` / `Invoke-Expression` together with `DownloadString`, `Invoke-WebRequest` or `iwr`; `powershell` with `-enc` / `-EncodedCommand`, `-w hidden` or `-ep bypass`; `certutil` with `-urlcache` or `-decode`; `bitsadmin /transfer`; `mshta` with a URL; `rundll32` with `javascript:`; `regsvr32` with `/i:` and a URL; `Add-MpPreference -ExclusionPath`. Signatures only: full LOLBin capabilities stay in milestone 7 and decoding `-enc` payloads in milestone 8
 - [ ] Python install hooks: `setup.py`, build backends
 - [x] Python startup files: `.pth` lines run by any supported Python version (graded levels INFO to CRITICAL; symlinked, oversized and non-UTF-8 files included) and `.start` entry points (Python 3.15)
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
@@ -115,8 +116,8 @@ Each in its own branch and pull request, fixtures approved first:
 - [x] File-level checks: `Matcher::File` with a `FileCtx`, now `Ctx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
 - [x] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
 - [ ] Non-regular files (FIFOs, devices, sockets) listed in `Report.skipped` too
-- [ ] Clone limits: timeout with git killed on expiry, disk-size limit during the clone, Ctrl+C removes the temp folder and stops git
 - [ ] `--max-files` and `--max-file-size` flags for the walk limits; a changed limit is shown in the report
+- [ ] Clone limits: timeout with git killed on expiry, disk-size limit during the clone, Ctrl+C removes the temp folder and stops git
 - [ ] Minimum git version check with a loud warning and `--allow-old-git` (versions taken from the git security advisories); version parsing tested on `2.43.0`, `2.39.5 (Apple Git-154)`, `2.47.1.windows.1`
 - [ ] Local targets: open files without following symlinks and check metadata after opening (no swap between walk and read)
 - [ ] Tracked files, local targets only: read the git index directly (`gix` or an own parser) without running git, because a local repository's `.git/config` is attacker-controlled; untracked files still scanned and marked; `.gitignore` is still never applied (cloned repositories need nothing here: the clone has no untracked files)
@@ -135,9 +136,9 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] Capability combinations raise severity (built on the correlation pass)
 - [ ] "Needs manual review" section: grouped, capped, no (or minimal) effect on the score
 - [ ] `.repo-sniff.toml`: `[filters]` and `[[exclude]]` with mandatory reason
-- [ ] Parallel scanning with rayon
 - [ ] Configuration is never taken from the scanned repository by default: its `.repo-sniff.toml` is ignored unless `--config <path>` names a file explicitly; the GitHub Action reads the configuration from the base branch, never from the pull request head; every exclusion and every changed limit is listed in the report, so nothing is hidden silently
 - [ ] `repo-sniff rules` lists the built-in rules (id, family, stage, level, ATT&CK) and `repo-sniff explain <rule-id>` prints one rule's description, example and what it does not catch
+- [ ] Parallel scanning with rayon
 - [ ] Many rules stay fast: `RegexSet` or Aho-Corasick prefilter for line rules; per-file cap on findings from line rules
 
 ## Milestone 4 — SARIF, GitHub Action, releases
@@ -145,8 +146,8 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] SARIF output for GitHub code scanning: regions from the byte spans; messages in `text`, never `markdown`
 - [ ] GitHub Action that scans pull requests: workflow commands escaped (`::`, `%`, `\r`, `\n`) or output wrapped in `::stop-commands::<token>`; `permissions: contents: read`; never `pull_request_target` with a checkout of the PR head; no tokens in the scan step
 - [ ] Release binaries for Linux, Windows and macOS with checksums and GitHub artifact attestations (or signatures)
-
 - [ ] Man page and shell completions (bash, zsh, fish, PowerShell) generated from the clap definitions and shipped with the release binaries
+
 ## Milestone 5 — README as a showcase
 
 - [ ] Demo GIF or screenshot of the report
@@ -164,8 +165,8 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] Start screen: URL/path input, recent scans
 - [ ] Scanning screen: background thread, progress by stage over a channel, live finding count
 - [ ] Results screen: list, details with code snippet, review points tab, live filters, `/` search
-- [ ] Filters and rules screen (fastfetch-style): radio rows, stage × family checkbox grid, tri-state, presets, description line
 - [ ] Help screen on `?`: key bindings of the current screen
+- [ ] Filters and rules screen (fastfetch-style): radio rows, stage × family checkbox grid, tri-state, presets, description line
 - [ ] Settings: UI language (shown as UK/EN), default filters, reset; stored in the OS config dir
 - [ ] Export filters to `.repo-sniff.toml`
 
@@ -191,7 +192,7 @@ Localization:
 - [ ] tree-sitter for Rust, PowerShell, bash and Go
 - [ ] `engine = "ts-query"` in rule TOML (`language` + `query`); taint tracking at least within one function
 - [ ] Import graph: whether a flagged file is imported or run at all
-- [ ] Stage 5 capability families: process spawning, LOLBins, injection, persistence, credential theft, exfiltration, keylogging, defense evasion
+- [ ] Stage 5 capability families: process spawning, LOLBins (full version of the Windows script loader signatures in the M2 "Loader signatures" family), injection, persistence, credential theft, exfiltration, keylogging, defense evasion
 - [ ] Download → write → make executable → run chain
 - [ ] Crypto mining, ransomware behavior
 - [ ] UAC bypass, anti-VM and anti-debugging
@@ -212,7 +213,7 @@ Review points:
 ## Milestone 8 — Obfuscation
 
 - [ ] Shannon entropy, long base64/hex blobs, minified code among normal sources (full version of the early line and file rules in the M2 "Loader signatures" family)
-- [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`) with depth and size limits; each finding keeps its decoding chain
+- [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`, which the M2 "Loader signatures" family only flags) with depth and size limits; each finding keeps its decoding chain
 - [ ] Packer and obfuscator signatures, reflection and dynamic imports (obfuscator.io signatures start in the M2 "Loader signatures" family)
 
 Review points:
@@ -244,8 +245,8 @@ Review points:
 - [ ] Fake recruiter assignment lures in the name, description and README ("defi exchange test", "real estate rental platform", "dex staking platform"), together with repository signals
 - [ ] Reading remote repositories without a checkout: bare clone with `ls-tree`/`cat-file` (with `GIT_NO_LAZY_FETCH=1` for partial clones), or streaming the GitHub tarball without extracting it (symlinks and `../` entries handled)
 - [ ] MCP server as a thin wrapper over `--json`, only after M3 and M4
-
 - [ ] Documentation site built with mdBook from `docs/` (detections, rules, guarantees, benchmark)
+
 ## Considered and rejected
 
 - Web vulnerability rules (XSS, SQL/NoSQL injection, open redirect, missing auth): a different class of tool and noise for a malware scanner.
