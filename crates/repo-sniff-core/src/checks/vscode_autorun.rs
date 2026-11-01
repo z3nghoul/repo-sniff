@@ -9,7 +9,7 @@
 //! comments, line breaks between key and value, and `\uXXXX` escapes in keys
 //! cannot hide the setting.
 
-use super::{Ctx, Hit};
+use super::{Ctx, Hit, TextSpan};
 use crate::finding::Severity;
 use crate::jsonc::{self, Node};
 use crate::sanitize::display_safe;
@@ -99,6 +99,7 @@ fn check_task(task: &Node, ctx: &Ctx<'_>) -> Option<Hit> {
     }
 
     let line = ctx.line_of(run_on.offset);
+    let span = Some(TextSpan(run_on.offset..run_on.end));
     let label = display_safe(
         task.get("label")
             .and_then(Node::as_str)
@@ -111,6 +112,7 @@ fn check_task(task: &Node, ctx: &Ctx<'_>) -> Option<Hit> {
     match SUSPICIOUS.iter().find(|s| lower.contains(*s)) {
         Some(fragment) => Some(Hit {
             line,
+            span,
             severity: Severity::Critical,
             reason: format!(
                 "task \"{label}\" runs automatically when the folder is opened, \
@@ -120,6 +122,7 @@ fn check_task(task: &Node, ctx: &Ctx<'_>) -> Option<Hit> {
         }),
         None => Some(Hit {
             line,
+            span,
             severity: ctx.base,
             reason: format!("task \"{label}\" runs automatically when the folder is opened"),
         }),
@@ -166,6 +169,7 @@ fn unparseable(ctx: &Ctx<'_>, err: &jsonc::ParseError) -> Vec<Hit> {
     let mentions = text.contains("runOn") && text.contains("folderOpen");
     vec![Hit {
         line,
+        span: None,
         severity: if mentions { ctx.base } else { Severity::Medium },
         reason: format!(
             "file could not be parsed ({}); VS Code may still accept it, review it by hand",

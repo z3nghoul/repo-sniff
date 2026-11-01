@@ -158,6 +158,9 @@ mod tests {
             attack: vec![],
             file: PathBuf::from("a"),
             line: 1,
+            column: None,
+            span: None,
+            snippet: None,
             explanation: String::new(),
         }
     }

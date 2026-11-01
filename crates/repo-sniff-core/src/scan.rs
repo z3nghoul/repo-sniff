@@ -4,12 +4,13 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-use crate::checks::{Check, Ctx, Decode, FileIssue, RepoIndex, Views};
+use crate::checks::{Check, Ctx, Decode, FileIssue, Hit, RepoIndex, TextSpan, Views};
 use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
-use crate::sanitize::{display_safe, to_slash};
+use crate::sanitize::{display_safe, snippet_safe, to_slash};
 use crate::walk::{self, Limits, SkipReason, Skipped};
 use regex::Regex;
 
@@ -41,6 +42,19 @@ const MAX_FINDINGS_PER_FILE_CHECK: usize = 100;
 /// A line rule lists at most this many findings per file; the rest are only
 /// counted (`Report::unlisted`), so a hostile file cannot flood the report.
 const MAX_LINE_FINDINGS_PER_RULE: usize = 100;
+
+/// A snippet shows at most this many characters of its line.
+const MAX_SNIPPET_CHARS: usize = 120;
+
+/// When a match is further into a long line, its snippet starts this many
+/// characters before it, so the match is always in view.
+const SNIPPET_LEAD_CHARS: usize = 40;
+
+/// Column, span and snippet are worked out for at most this many hits of one
+/// check in one file; the rest keep their line. Locating a hit looks back to
+/// the start of its line, so without a cap a hostile file with many hits on one
+/// very long line would make that quadratic.
+const MAX_LOCATED_HITS: usize = 100;
 
 /// Added to findings from a file that has NUL bytes and does not read as text.
 const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
@@ -291,6 +305,7 @@ impl Env<'_> {
             examined: false,
             findings: Vec::new(),
         };
+        let own_bytes = issue.is_none();
         for (rule, check) in self.file_rules {
             if !rule.applies_to(slash_path) {
                 continue;
@@ -309,18 +324,10 @@ impl Env<'_> {
             hits.truncate(MAX_FINDINGS_PER_FILE_CHECK);
 
             let start = checked.findings.len();
-            for hit in hits {
-                checked.findings.push(Finding {
-                    rule_id: rule.id.clone(),
-                    severity: hit.severity,
-                    stage: rule.stage,
-                    attack: rule.attack.clone(),
-                    file: relative.to_path_buf(),
-                    line: hit.line,
-                    // The reason may quote the scanned file, so it is cleaned
-                    // before it can reach a terminal.
-                    explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
-                });
+            for (index, hit) in hits.into_iter().enumerate() {
+                checked
+                    .findings
+                    .push(hit_finding(rule, relative, hit, index, views, own_bytes));
             }
             if unlisted > 0
                 && let Some(last) = checked.findings[start..].last_mut()
@@ -399,16 +406,33 @@ impl<'a> LineScanner<'a> {
         self.rules.is_empty()
     }
 
-    fn feed(&mut self, relative: &Path, line_number: usize, line: &str) {
+    /// `file_offset` is where the line starts in the file, given only when
+    /// the file's text is its bytes exactly, so a span is never wrong;
+    /// `column_exact` says whether a count of characters is a column (see
+    /// `Views::columns_are_exact`).
+    fn feed(
+        &mut self,
+        relative: &Path,
+        line_number: usize,
+        line: &str,
+        file_offset: Option<usize>,
+        column_exact: bool,
+    ) {
         for (index, (rule, pattern)) in self.rules.iter().enumerate() {
-            if !pattern.is_match(line) {
-                continue;
-            }
             if self.listed[index] == MAX_LINE_FINDINGS_PER_RULE {
-                self.hidden[index] += 1;
+                if pattern.is_match(line) {
+                    self.hidden[index] += 1;
+                }
                 continue;
             }
+            // `find` matches exactly when `is_match` does, and says where.
+            let Some(found) = pattern.find(line) else {
+                continue;
+            };
             self.listed[index] += 1;
+            let span = file_offset.map(|start| start + found.start()..start + found.end());
+            let location =
+                Location::in_line(line, found.start(), line_number == 1, column_exact, span);
             self.findings.push(Finding {
                 rule_id: rule.id.clone(),
                 severity: rule.severity,
@@ -416,6 +440,9 @@ impl<'a> LineScanner<'a> {
                 attack: rule.attack.clone(),
                 file: relative.to_path_buf(),
                 line: line_number,
+                column: location.column,
+                span: location.span,
+                snippet: location.snippet,
                 explanation: rule.description.clone(),
             });
         }
@@ -542,9 +569,15 @@ fn scan_streamed(
         });
     }
     let nul_line = if script { probe.first_nul_line } else { None };
+    let identical = !binary_looking && probe.nuls == 0 && probe.is_text();
 
     for rule in &applicable {
         if let (Matcher::NulByte, Some(line)) = (&rule.matcher, nul_line) {
+            // As for a file read whole (`nul_span`).
+            let span = probe
+                .first_nul_offset
+                .and_then(|offset| usize::try_from(offset).ok())
+                .map(|offset| offset..offset + 1);
             out.findings.push(Finding {
                 rule_id: rule.id.clone(),
                 severity: rule.severity,
@@ -552,6 +585,9 @@ fn scan_streamed(
                 attack: rule.attack.clone(),
                 file: relative.to_path_buf(),
                 line,
+                column: None,
+                span,
+                snippet: None,
                 explanation: rule.description.clone(),
             });
         }
@@ -570,12 +606,15 @@ fn scan_streamed(
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut number = 0;
+        // Where the next line starts in the file.
+        let mut offset: u64 = 0;
         loop {
             line.clear();
             let cap = limits.max_line_size as u64 + 2;
+            let line_start = offset;
             match (&mut reader).take(cap).read_until(b'\n', &mut line) {
                 Ok(0) => break,
-                Ok(_) => {}
+                Ok(read) => offset += read as u64,
                 Err(err) => {
                     out.skipped.push(unreadable(err));
                     break;
@@ -600,7 +639,14 @@ fn scan_streamed(
             } else {
                 text_without_nuls(&line)
             };
-            lines.feed(relative, number, &text);
+            // As for a file read whole, a span is given only when the whole
+            // file is its own text: no NUL bytes, valid UTF-8, not read as ASCII.
+            let file_offset = if identical {
+                usize::try_from(line_start).ok()
+            } else {
+                None
+            };
+            lines.feed(relative, number, &text, file_offset, identical);
         }
     }
     let mut found = lines.finish(relative, unlisted);
@@ -635,10 +681,17 @@ fn scan_text<'v>(
     }
 
     let text = views.text();
+    let identical = views.text_is_bytes();
+    let column_exact = views.columns_are_exact();
     let mut findings = Vec::new();
     let mut lines = LineScanner::new(&applicable);
     for (index, line) in text.lines().enumerate() {
-        lines.feed(relative, index + 1, line);
+        // `lines` hands out slices of `text`, so the distance between the
+        // pointers is where the line starts.
+        let file_offset = identical
+            .then(|| (line.as_ptr() as usize).checked_sub(text.as_ptr() as usize))
+            .flatten();
+        lines.feed(relative, index + 1, line, file_offset, column_exact);
     }
     findings.extend(lines.finish(relative, unlisted));
     for rule in applicable {
@@ -654,18 +707,8 @@ fn scan_text<'v>(
                     rule.severity,
                     views,
                 );
-                for hit in check(&ctx) {
-                    findings.push(Finding {
-                        rule_id: rule.id.clone(),
-                        severity: hit.severity,
-                        stage: rule.stage,
-                        attack: rule.attack.clone(),
-                        file: relative.to_path_buf(),
-                        line: hit.line,
-                        // The reason may quote the scanned file, so it is
-                        // cleaned before it can reach a terminal.
-                        explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
-                    });
+                for (index, hit) in check(&ctx).into_iter().enumerate() {
+                    findings.push(hit_finding(rule, relative, hit, index, views, true));
                 }
             }
             // File-level rules already ran on the raw bytes.
@@ -679,6 +722,9 @@ fn scan_text<'v>(
                         attack: rule.attack.clone(),
                         file: relative.to_path_buf(),
                         line,
+                        column: None,
+                        span: nul_span(views.bytes()),
+                        snippet: None,
                         explanation: rule.description.clone(),
                     });
                 }
@@ -686,6 +732,174 @@ fn scan_text<'v>(
         }
     }
     findings
+}
+
+/// Turns what a check reported into a finding. `own_bytes` is false for an
+/// entry the walk did not hand over (an oversized file, or a symbolic link
+/// whose bytes are its target's): it has no text of its own to point into, so
+/// its findings get no location.
+fn hit_finding(
+    rule: &Rule,
+    relative: &Path,
+    hit: Hit,
+    index: usize,
+    views: &Views<'_>,
+    own_bytes: bool,
+) -> Finding {
+    let location = match &hit.span {
+        Some(TextSpan(span)) if own_bytes && index < MAX_LOCATED_HITS => {
+            locate_hit(views, hit.line, span)
+        }
+        _ => Location::default(),
+    };
+    Finding {
+        rule_id: rule.id.clone(),
+        severity: hit.severity,
+        stage: rule.stage,
+        attack: rule.attack.clone(),
+        file: relative.to_path_buf(),
+        line: hit.line,
+        column: location.column,
+        span: location.span,
+        snippet: location.snippet,
+        // The reason may quote the scanned file, so it is cleaned before it can
+        // reach a terminal.
+        explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
+    }
+}
+
+/// Where a check's span is, if it holds up: a span that is reversed, out of
+/// bounds or splits a character is dropped, and so is one that is not on the
+/// line the check reported. A check that splits lines its own way (the `.pth`
+/// rules split on more than `\n`) could otherwise get a column and a snippet
+/// from another line than the one it names.
+fn locate_hit(views: &Views<'_>, line: usize, span: &Range<usize>) -> Location {
+    let text = views.text();
+    if span.start > span.end
+        || !text.is_char_boundary(span.start)
+        || !text.is_char_boundary(span.end)
+        || views.line_of(span.start) != line
+    {
+        return Location::default();
+    }
+    let identical = views.text_is_bytes();
+    Location::in_text(text, span, views.columns_are_exact(), identical)
+}
+
+/// Where in its line a finding points.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Location {
+    column: Option<usize>,
+    span: Option<Range<usize>>,
+    snippet: Option<String>,
+}
+
+impl Location {
+    /// `line` is a whole line without its terminator and `at` a byte offset in
+    /// it. `column_exact` says whether a count of characters in the line is a
+    /// column (see `Views::columns_are_exact`); on the first line of a file a
+    /// byte order mark is not counted. `span` is passed through.
+    fn in_line(
+        line: &str,
+        at: usize,
+        first_line: bool,
+        column_exact: bool,
+        span: Option<Range<usize>>,
+    ) -> Location {
+        let (line, at) = match line.strip_prefix('\u{feff}') {
+            Some(rest) if first_line => (rest, at.saturating_sub('\u{feff}'.len_utf8())),
+            _ => (line, at),
+        };
+        let Some(before) = line.get(..at.min(line.len())) else {
+            return Location {
+                span,
+                ..Location::default()
+            };
+        };
+        Location {
+            column: column_exact.then(|| before.chars().count() + 1),
+            span,
+            snippet: Some(snippet(line, before.len())),
+        }
+    }
+
+    /// `span` is a valid byte range in `text`; `identical` says whether `text`
+    /// is the file byte for byte, so the range is also the file's.
+    fn in_text(text: &str, span: &Range<usize>, column_exact: bool, identical: bool) -> Location {
+        let line_start = text[..span.start].rfind('\n').map_or(0, |at| at + 1);
+        let line_end = text[span.start..]
+            .find('\n')
+            .map_or(text.len(), |at| span.start + at);
+        let line = &text[line_start..line_end];
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        Location::in_line(
+            line,
+            span.start - line_start,
+            line_start == 0,
+            column_exact,
+            identical.then(|| span.clone()),
+        )
+    }
+}
+
+/// The byte range of the first NUL byte of a file. A NUL finding gets only
+/// this: the byte is exact, while a column in text that has the NULs dropped
+/// would point next to it.
+fn nul_span(bytes: &[u8]) -> Option<Range<usize>> {
+    let at = bytes.iter().position(|&b| b == 0)?;
+    Some(at..at + 1)
+}
+
+/// A short, printable piece of `line` around byte offset `at`. Leading
+/// whitespace is dropped and tabs become spaces. Before the match, at most
+/// `SNIPPET_LEAD_CHARS` characters of output are kept, counted after escaping,
+/// so a run of escaped characters cannot push the match out of view; the match
+/// and what follows fill the rest of `MAX_SNIPPET_CHARS`. `...` marks each
+/// cut. Only the window is ever escaped, never the whole line.
+fn snippet(line: &str, at: usize) -> String {
+    let body = line.trim_start();
+    let at = at.saturating_sub(line.len() - body.len()).min(body.len());
+    let Some((before, after)) = body.split_at_checked(at) else {
+        return String::new();
+    };
+    let shown = |c: char| {
+        let mut buffer = [0; 4];
+        let text = if c == '\t' {
+            " "
+        } else {
+            &*c.encode_utf8(&mut buffer)
+        };
+        snippet_safe(text, 16)
+    };
+
+    let mut lead = Vec::new();
+    let mut used = 0;
+    let mut cut = false;
+    for c in before.chars().rev() {
+        let piece = shown(c);
+        let cost = piece.chars().count();
+        if used + cost > SNIPPET_LEAD_CHARS {
+            cut = true;
+            break;
+        }
+        used += cost;
+        lead.push(piece);
+    }
+
+    let mut out = String::new();
+    if cut {
+        out.push_str("...");
+    }
+    for piece in lead.iter().rev() {
+        out.push_str(piece);
+    }
+    let tail: String = after
+        .chars()
+        .take(MAX_SNIPPET_CHARS + 1)
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .collect();
+    out.push_str(&snippet_safe(tail.trim_end(), MAX_SNIPPET_CHARS - used));
+    out
 }
 
 /// What the scanner decides about a file before any rule runs.
@@ -879,17 +1093,21 @@ struct NulProbe {
     newlines: usize,
     /// The 1-based line of the first NUL byte, counting `\n` as shells do.
     first_nul_line: Option<usize>,
+    /// The byte offset of the first NUL byte in the file.
+    first_nul_offset: Option<u64>,
 }
 
 impl NulProbe {
     fn feed(&mut self, chunk: &[u8]) {
+        let chunk_start = self.total;
         self.total += chunk.len() as u64;
         if self.first_nul_line.is_none() {
             let before = chunk.iter().position(|&b| b == 0);
             let end = before.unwrap_or(chunk.len());
             self.newlines += chunk[..end].iter().filter(|&&b| b == b'\n').count();
-            if before.is_some() {
+            if let Some(position) = before {
                 self.first_nul_line = Some(1 + self.newlines);
+                self.first_nul_offset = Some(chunk_start + position as u64);
             }
         }
         for (index, segment) in chunk.split(|&b| b == 0).enumerate() {
@@ -984,6 +1202,7 @@ mod tests {
     fn probe(ctx: &Ctx<'_>) -> Vec<Hit> {
         vec![Hit {
             line: 1,
+            span: None,
             severity: ctx.base,
             reason: format!(
                 "path={} bytes={} issue={:?} helper={} truncated={}",
@@ -1416,6 +1635,7 @@ mod tests {
         fn probe_jsonc(ctx: &Ctx<'_>) -> Vec<Hit> {
             vec![Hit {
                 line: 1,
+                span: None,
                 severity: ctx.base,
                 reason: format!(
                     "path={} helper={} truncated={} parsed={} text={:?}",
@@ -1452,6 +1672,7 @@ mod tests {
             (1..=150)
                 .map(|line| Hit {
                     line,
+                    span: None,
                     severity: Severity::High,
                     reason: "bad \u{1b}[2J text".to_string(),
                 })

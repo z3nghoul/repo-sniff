@@ -59,6 +59,7 @@ pub fn check(ctx: &Ctx<'_>) -> Vec<Hit> {
         hits.push(match inert {
             Some(why) => Hit {
                 line: number,
+                span: None,
                 severity: Severity::Low,
                 reason: format!(
                     "Python's site module ignores this file because {why}, but this line is an \
@@ -67,6 +68,7 @@ pub fn check(ctx: &Ctx<'_>) -> Vec<Hit> {
             },
             None => Hit {
                 line: number,
+                span: None,
                 severity: ctx.base,
                 reason: format!(
                     "Python 3.15 and later calls the entry point `{entry}` every time the \
@@ -79,6 +81,7 @@ pub fn check(ctx: &Ctx<'_>) -> Vec<Hit> {
     if total > entries.len() {
         hits.push(Hit {
             line: entries.last().map_or(1, |&(number, _)| number),
+            span: None,
             severity: ctx.base,
             reason: format!(
                 "{} more entry points in this file are not listed",
@@ -113,6 +116,7 @@ fn issue_hit(issue: &FileIssue, inert: bool) -> Hit {
     };
     Hit {
         line: 1,
+        span: None,
         severity,
         reason,
     }

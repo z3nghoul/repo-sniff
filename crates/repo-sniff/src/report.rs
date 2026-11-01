@@ -285,6 +285,9 @@ mod tests {
             attack: vec![],
             file,
             line: 3,
+            column: None,
+            span: None,
+            snippet: None,
             explanation: "because".to_string(),
         }
     }

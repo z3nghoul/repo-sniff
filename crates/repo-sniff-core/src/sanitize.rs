@@ -29,6 +29,17 @@ pub fn display_path(path: &Path) -> String {
 /// Returns `text` with every dangerous character replaced by a visible
 /// `\u{XXXX}` escape, cut to about `max_chars` characters (`...` marks the cut).
 pub fn display_safe(text: &str, max_chars: usize) -> String {
+    escape(text, max_chars, is_unsafe)
+}
+
+/// Like `display_safe`, for code quoted from the scanned file in a snippet: it
+/// also escapes characters that are invisible or change the layout without
+/// being control characters, so a snippet shows exactly what is in the file.
+pub fn snippet_safe(text: &str, max_chars: usize) -> String {
+    escape(text, max_chars, |ch| is_unsafe(ch) || is_invisible(ch))
+}
+
+fn escape(text: &str, max_chars: usize, needs_escape: impl Fn(char) -> bool) -> String {
     let mut out = String::new();
     let mut count = 0;
     for ch in text.chars() {
@@ -36,7 +47,7 @@ pub fn display_safe(text: &str, max_chars: usize) -> String {
             out.push_str("...");
             break;
         }
-        if is_unsafe(ch) {
+        if needs_escape(ch) {
             let escaped = format!("\\u{{{:04X}}}", ch as u32);
             count += escaped.chars().count();
             out.push_str(&escaped);
@@ -63,9 +74,42 @@ fn is_unsafe(ch: char) -> bool {
         )
 }
 
+/// Characters that draw nothing, or join and alter their neighbours, without
+/// being control or bidi characters: harmless in a terminal, but in quoted code
+/// they hide what is really there.
+fn is_invisible(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x00AD                 // soft hyphen
+        | 0x034F               // combining grapheme joiner
+        | 0x115F | 0x1160      // Hangul choseong and jungseong fillers
+        | 0x17B4 | 0x17B5      // Khmer inherent vowels
+        | 0x180E               // Mongolian vowel separator
+        | 0x2028 | 0x2029      // line and paragraph separators
+        | 0x206A..=0x206F      // deprecated format characters
+        | 0x3164 | 0xFFA0      // Hangul fillers
+        | 0xFE00..=0xFE0F      // variation selectors
+        | 0xFFF9..=0xFFFB      // interlinear annotation
+        | 0x1D173..=0x1D17A    // musical formatting
+        | 0xE0000..=0xE007F    // tag characters
+        | 0xE0100..=0xE01EF // variation selectors supplement
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snippets_also_escape_invisible_characters() {
+        let text = "a\u{2028}b\u{AD}c\u{E0041}d\u{3164}e\u{FE0F}f\u{202E}g\u{1B}";
+        assert_eq!(
+            snippet_safe(text, 200),
+            "a\\u{2028}b\\u{00AD}c\\u{E0041}d\\u{3164}e\\u{FE0F}f\\u{202E}g\\u{001B}"
+        );
+        // Paths and labels keep their current form.
+        assert_eq!(display_safe("a\u{2028}b", 200), "a\u{2028}b");
+    }
 
     #[test]
     fn ordinary_text_is_unchanged() {
