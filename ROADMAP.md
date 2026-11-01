@@ -103,6 +103,7 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] .NET in the IDE: MSBuild props/targets, analyzers and source generators shipped as DLLs
 - [ ] npm install hooks: lifecycle scripts
 - [ ] Loader signatures (line and file rules, no AST; the full versions come in milestones 7 and 8): long base64 or hex blobs next to `eval`, `Function`, `exec` or `child_process`; obfuscator.io signatures (`_0x` identifiers, a string array with a rotator function); minified one-line code in a file not named `.min` among ordinary sources; a `fetch` / `axios` / `http.get` result passed to `eval` or `Function`
+  - [ ] Windows script loaders, in its own pull request: line rules on the content of `.ps1`, `.psm1`, `.bat`, `.cmd`, `.vbs`, and the same strings in any other file at a lower level (hits in build and IDE hook files rank above hits in documentation; Markdown defers to the README rule of the human deception family). Strings: `IEX` / `Invoke-Expression` / `| iex` / `[scriptblock]::Create` / `Invoke-Command` together with `DownloadString` / `DownloadData` / `DownloadFile` / `Invoke-WebRequest` / `iwr` / `Invoke-RestMethod` / `irm` / `curl` / `wget` / `Start-BitsTransfer`; `powershell`, `pwsh`, `powershell_ise` (also with `.exe` or a full path) with `-EncodedCommand` or any prefix down to `-e` / `-ec` followed by a long base64 operand, `-WindowStyle` / `-w` with `hidden` / `h`, `-ExecutionPolicy` / `-ep` with `bypass` or `unrestricted`; `certutil` with `-urlcache`, `-verifyctl`, `-decode` or `-decodehex`; `bitsadmin` with `/transfer` or `/addfile`; `mshta` with a URL or `vbscript:` / `javascript:` / `about:`; `rundll32` with `javascript:`, `vbscript:`, `url.dll` or `mshtml,RunHTMLApplication`; `regsvr32` with `/i:` and a URL; `Add-MpPreference -ExclusionPath` / `-ExclusionProcess` / `-ExclusionExtension` and `Set-MpPreference -Disable…` (its own rule id, superseded in milestone 7 rather than reported twice). A URL is http(s), ftp, `file:`, a UNC path or a raw IP. Matching ignores case, "together with" means the same logical line, option characters are `-`, `/` and the dashes PowerShell accepts (U+2013 to U+2015), and before matching `.bat` / `.cmd` text loses carets, empty `""` pairs and `^` continuations, and PowerShell text loses backticks that are not escapes and its backtick continuations (spans are mapped back to the original). `-ep bypass` alone is LOW, raised only together with `-enc`, `-w hidden` or a download; known honest one-liners (Chocolatey and Scoop installers, `powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1`) get fixtures with their expected level. ATT&CK: T1059.001, T1105, T1140, T1197, T1218.005 / .010 / .011, T1562.001, T1027.010, T1564.003. Known gaps until milestones 7 and 8: download and execution on different lines; `%VAR:~n,m%` substrings, variables joined into a command and delayed expansion in batch files; string concatenation, the `-f` format operator, `[char]` arrays, `-join`, reversed strings, `&(gcm i*x)` and `Set-Alias` in PowerShell; `"power" & "shell"` and `Chr()` in VBScript; JSON `\u` and XML entity escapes unless the rules also run on decoded string values. Signatures only: full LOLBin capabilities stay in milestone 7 and decoding `-enc` payloads in milestone 8
 - [ ] Python install hooks: `setup.py`, build backends
 - [x] Python startup files: `.pth` lines run by any supported Python version (graded levels INFO to CRITICAL; symlinked, oversized and non-UTF-8 files included) and `.start` entry points (Python 3.15)
 - [ ] Other ecosystem hooks: Dockerfile `curl | sh`, composer scripts, Rakefile / Gemfile, binding.gyp, Maven exec-plugin
@@ -115,6 +116,7 @@ Each in its own branch and pull request, fixtures approved first:
 - [x] File-level checks: `Matcher::File` with a `FileCtx`, now `Ctx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
 - [x] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
 - [ ] Non-regular files (FIFOs, devices, sockets) listed in `Report.skipped` too
+- [ ] `--max-files <N>` and `--max-file-size <SIZE>` flags: they set `Limits::max_files` and `Limits::max_file_size` (sizes take `K`, `M`, `G` suffixes in binary units; 0 is rejected; upper bounds 10 000 000 files and 4 GiB); a `max_file_size` below the 5 MiB in-memory limit also lowers that limit. Limits come only from the command line, never from a configuration file. A changed limit is shown in the report and later in the JSON and SARIF output, and lowering a limit can only make a scan inconclusive, never clean
 - [ ] Clone limits: timeout with git killed on expiry, disk-size limit during the clone, Ctrl+C removes the temp folder and stops git
 - [ ] Minimum git version check with a loud warning and `--allow-old-git` (versions taken from the git security advisories); version parsing tested on `2.43.0`, `2.39.5 (Apple Git-154)`, `2.47.1.windows.1`
 - [ ] Local targets: open files without following symlinks and check metadata after opening (no swap between walk and read)
@@ -134,14 +136,17 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] Capability combinations raise severity (built on the correlation pass)
 - [ ] "Needs manual review" section: grouped, capped, no (or minimal) effect on the score
 - [ ] `.repo-sniff.toml`: `[filters]` and `[[exclude]]` with mandatory reason
+- [ ] Configuration is never taken from the scanned repository: no implicit lookup of `.repo-sniff.toml` in the target, the current directory or its parents; no other locations (`pyproject.toml`, `Cargo.toml` metadata, `.config/`, subdirectories); no environment variable that changes rules, filters, exclusions or limits (a direnv `.envrc` could set it); no inline suppression comments in scanned files; no `include` or `extends`. A configuration is used only when `--config <path>` names it, and the report says when that path is inside the target. A `.repo-sniff.toml` found in the target is reported as ignored, with the findings it would have hidden (a repository that tries to silence itself is a signal). The scan status is computed before exclusions and filters: they can hide a finding, never turn an unread file, a limit hit or an unanalyzed executable into a clean result. An exclusion names a rule id, an exact path, a reason and a fingerprint of the matched line, so it does not cover a new payload added to the same file later. Every exclusion and filter in effect (`[filters]`, and the TUI default filters from the OS config dir) is listed in the report; findings hidden by a filter still count toward `--fail-on`. `CONTRIBUTING.md` and `docs/DETECTIONS.md` are updated to this model when it lands
+- [ ] `repo-sniff rules` lists the built-in rules (id, family, stage, level, ATT&CK) and `repo-sniff explain <rule-id>` prints one rule's description, example and what it does not catch; every rule, including the Rust checks, carries a mandatory non-empty `gaps` text that the loader rejects when it is missing
 - [ ] Parallel scanning with rayon
 - [ ] Many rules stay fast: `RegexSet` or Aho-Corasick prefilter for line rules; per-file cap on findings from line rules
 
 ## Milestone 4 — SARIF, GitHub Action, releases
 
 - [ ] SARIF output for GitHub code scanning: regions from the byte spans; messages in `text`, never `markdown`
-- [ ] GitHub Action that scans pull requests: workflow commands escaped (`::`, `%`, `\r`, `\n`) or output wrapped in `::stop-commands::<token>`; `permissions: contents: read`; never `pull_request_target` with a checkout of the PR head; no tokens in the scan step
+- [ ] GitHub Action that scans pull requests: workflow commands escaped (`::`, `%`, `\r`, `\n`) or output wrapped in `::stop-commands::<token>`; `permissions: contents: read`; never `pull_request_target` with a checkout of the PR head; no tokens in the scan step; the configuration is read from the base commit of the event (`pull_request.base.sha`) as a git object, never as a path in the working tree, and a `push` uses the pushed commit's parent; because a pull request that edits the workflow can still change how the Action runs, the documentation requires the check to be enforced by a repository ruleset (required workflow or required status check) with CODEOWNERS review on `.github/`, and the scan flags a pull request that changes `.repo-sniff.toml` or a workflow step that runs repo-sniff
 - [ ] Release binaries for Linux, Windows and macOS with checksums and GitHub artifact attestations (or signatures)
+- [ ] Man page and shell completions (bash, zsh, fish, PowerShell) generated from the clap definitions in release CI, never written by hand, and shipped with the release binaries
 
 ## Milestone 5 — README as a showcase
 
@@ -160,9 +165,10 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] Start screen: URL/path input, recent scans
 - [ ] Scanning screen: background thread, progress by stage over a channel, live finding count
 - [ ] Results screen: list, details with code snippet, review points tab, live filters, `/` search
+- [ ] Help screen on `?`: key bindings of the current screen (inside the `/` search box `?` is text)
 - [ ] Filters and rules screen (fastfetch-style): radio rows, stage × family checkbox grid, tri-state, presets, description line
 - [ ] Settings: UI language (shown as UK/EN), default filters, reset; stored in the OS config dir
-- [ ] Export filters to `.repo-sniff.toml`
+- [ ] Export filters to a configuration file in the OS config dir or a path the user picks, used through `--config` (a `.repo-sniff.toml` in the scanned repository is ignored)
 
 Localization:
 
@@ -186,7 +192,7 @@ Localization:
 - [ ] tree-sitter for Rust, PowerShell, bash and Go
 - [ ] `engine = "ts-query"` in rule TOML (`language` + `query`); taint tracking at least within one function
 - [ ] Import graph: whether a flagged file is imported or run at all
-- [ ] Stage 5 capability families: process spawning, LOLBins, injection, persistence, credential theft, exfiltration, keylogging, defense evasion
+- [ ] Stage 5 capability families: process spawning, LOLBins (full version of the Windows script loader signatures in the M2 "Loader signatures" family), injection, persistence, credential theft, exfiltration, keylogging, defense evasion
 - [ ] Download → write → make executable → run chain
 - [ ] Crypto mining, ransomware behavior
 - [ ] UAC bypass, anti-VM and anti-debugging
@@ -207,7 +213,7 @@ Review points:
 ## Milestone 8 — Obfuscation
 
 - [ ] Shannon entropy, long base64/hex blobs, minified code among normal sources (full version of the early line and file rules in the M2 "Loader signatures" family)
-- [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`) with depth and size limits; each finding keeps its decoding chain
+- [ ] Recursive decoding (base64, hex, char codes, zlib, single-byte XOR, PowerShell `-enc`, which the M2 "Loader signatures" family only flags) with depth and size limits; each finding keeps its decoding chain
 - [ ] Packer and obfuscator signatures, reflection and dynamic imports (obfuscator.io signatures start in the M2 "Loader signatures" family)
 
 Review points:
@@ -239,6 +245,7 @@ Review points:
 - [ ] Fake recruiter assignment lures in the name, description and README ("defi exchange test", "real estate rental platform", "dex staking platform"), together with repository signals
 - [ ] Reading remote repositories without a checkout: bare clone with `ls-tree`/`cat-file` (with `GIT_NO_LAZY_FETCH=1` for partial clones), or streaming the GitHub tarball without extracting it (symlinks and `../` entries handled)
 - [ ] MCP server as a thin wrapper over `--json`, only after M3 and M4
+- [ ] Documentation site built with mdBook from `docs/` (detections, rules, guarantees, benchmark)
 
 ## Considered and rejected
 
