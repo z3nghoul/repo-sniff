@@ -82,16 +82,19 @@ Finish the open work, close the holes that make a scan lie, then merge
 One pull request while there are only a handful of rules, so new formats stop
 needing a new engine variant each.
 
-- [ ] One check signature `fn(&Ctx) -> Vec<Hit>` with lazily cached views (`ctx.bytes()`, `ctx.text()`, `ctx.jsonc()`, later `yaml`, `toml`, `xml`, AST) and the repository index available to every check
+- [x] One check signature `fn(&Ctx) -> Vec<Hit>` with lazily cached views (`ctx.bytes()`, `ctx.text()`, `ctx.jsonc()`, later `yaml`, `toml`, `xml`, AST) and the repository index available to every check
 - [ ] File classification before rules: BOM and UTF-16 decoding, shebang, magic bytes, language; rules may select by `languages = [...]` next to `files` (UTF-16 `.ps1` and Trojan Source in UTF-16 reach line rules)
-- [ ] `Finding` gains column, byte span and a short snippet (more fields come with the milestones that need them)
+  - [x] Already done in the gate pull requests: executables recognized by magic bytes (ELF, PE, Mach-O, fat Mach-O) ([#25](https://github.com/z3nghoul/repo-sniff/pull/25)); scripts recognized by extension or shebang, UTF-16 with a byte order mark decoded for script extensions when the first 8 KiB has a NUL byte, so a UTF-16 `.ps1` reaches the line rules, and known binary headers recognized ([#26](https://github.com/z3nghoul/repo-sniff/pull/26)); data with a known header or with NUL bytes that does not read as text (the NUL-density test) read as ASCII only instead of skipped ([#47](https://github.com/z3nghoul/repo-sniff/pull/47)); the same classification for files over 5 MiB read as a stream, except that a UTF-16 script there is listed as too large ([#52](https://github.com/z3nghoul/repo-sniff/pull/52))
+  - [ ] Still open: a language per file and `languages = [...]` next to `files`; UTF-16 decoding for every text file, not only scripts (Trojan Source in a UTF-16 `.rs` file is read as ASCII only today, so the bidi rule misses it); UTF-16 decoded whatever the first 8 KiB holds (a UTF-16 `.ps1` whose first 8 KiB has no NUL byte, for example only characters such as U+0101, is not decoded today) and for streamed files; UTF-16 without a byte order mark
+- [ ] One phase for every check: offer `jsonc` checks (and the later structured formats) oversized, streamed and symlinked files the way `file` checks are offered them, so that, for example, a `.vscode/tasks.json` that is a symlink to another file in the repository is judged instead of only listed
+- [x] `Finding` gains column, byte span and a short snippet (more fields come with the milestones that need them; the `.pth` and `.start` checks do not give spans yet)
 - [x] Generic fixture harness: a fixture folder plus `expected.toml` (beside it, as `<family>.expected.toml`), so a new rule needs no new test code (separate small pull request)
 
 ### Rule families
 
 Each in its own branch and pull request, fixtures approved first:
 
-- [ ] Repository contents: committed binaries (when this rule lands, remove the "executable binary makes the scan INCONCLUSIVE" exception from the scan engine: such files become findings), disguised executables (magic bytes), droppers (.lnk, .scr, .hta), Windows scripts (.bat, .ps1, .vbs), symlinks out of the repo
+- [x] Repository contents: committed binaries (when this rule lands, remove the "executable binary makes the scan INCONCLUSIVE" exception from the scan engine: such files become findings), disguised executables (magic bytes), droppers (.lnk, .scr, .hta), Windows scripts (.bat, .ps1, .vbs), symlinks out of the repo (a new `head` engine; an executable that no rule reported still makes the scan inconclusive; symlinks only for local targets until the git index is read)
 - [ ] Repository contents: committed virtual environments (`pyvenv.cfg`) as a finding of their own, in a separate pull request
 - [ ] Repository contents, local targets: dangerous keys in `.git/config` (`core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `core.pager`, `alias.* = !...`, `filter.*`, `include.path`) and non-sample files in `.git/hooks/`, read as plain files without running git; nested `.git` folders reported
 - [ ] Suspicious files: password-protected archives (flagged, never unpacked), data appended after PNG `IEND` / JPEG `EOI`, large high-entropy files of unknown format, binary "test files" referenced by build scripts
@@ -108,7 +111,7 @@ Each in its own branch and pull request, fixtures approved first:
 
 ### Infrastructure
 
-- [x] File-level checks: `Matcher::File` with a `FileCtx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
+- [x] File-level checks: `Matcher::File` with a `FileCtx`, now `Ctx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
 - [x] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
 - [ ] Non-regular files (FIFOs, devices, sockets) listed in `Report.skipped` too
 - [ ] Clone limits: timeout with git killed on expiry, disk-size limit during the clone, Ctrl+C removes the temp folder and stops git

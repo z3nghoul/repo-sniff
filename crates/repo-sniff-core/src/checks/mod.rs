@@ -3,15 +3,27 @@
 //! A rule with `engine = "jsonc"` or `engine = "file"` in its TOML file only
 //! carries metadata (id, stage, severity, ATT&CK IDs, descriptions). The code
 //! that decides what to report lives here and is looked up by the rule's id.
+//!
+//! Every check has the same signature (`Check`) and reads the file through
+//! `Ctx`, whose views are computed on demand. The engine only decides when a
+//! check runs: an `engine = "file"` check sees the raw bytes of every file its
+//! globs select, before binary detection, including files that are too large or
+//! are symbolic links (see `FileIssue`); an `engine = "jsonc"` check runs only on
+//! files the line rules read, after the scanner has classified them.
 
 mod pylines;
 pub mod python_pth;
 pub mod python_start;
+pub mod repo_contents;
 pub mod vscode_autorun;
 
+use std::borrow::Cow;
+use std::cell::{Cell, OnceCell};
 use std::collections::{BTreeSet, HashSet};
+use std::ops::Range;
 
 use crate::finding::Severity;
+use crate::jsonc::{self, Node, ParseError};
 
 /// One thing a check wants to report in a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,15 +34,225 @@ pub struct Hit {
     /// What is wrong, shown to the user. May contain text from the scanned
     /// file; the scanner cleans it with `display_safe` before reporting.
     pub reason: String,
+    /// Where in `Ctx::text` the hit is, if the check knows. The scanner turns
+    /// it into the finding's column and snippet, and into a byte range of the
+    /// file when the text is the file byte for byte. A span that is out of
+    /// bounds, splits a character or is not on `line` is ignored. A check that
+    /// works on `Ctx::bytes` leaves it `None`.
+    pub span: Option<TextSpan>,
 }
 
-/// A check for structured (JSONC) files.
-///
-/// `path` is relative to the repository root with `/` separators, `text` is
-/// the whole file, and `base` is the severity from the rule's TOML file: the
-/// check reports it for the ordinary case and may go higher or lower when the
-/// file gives a reason to.
-pub type JsoncCheck = fn(path: &str, text: &str, base: Severity) -> Vec<Hit>;
+/// A byte range in `Ctx::text`, which is not always the file's bytes (UTF-16
+/// is decoded, NUL bytes are dropped, invalid UTF-8 is replaced). The type
+/// keeps it apart from a range of the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSpan(pub Range<usize>);
+
+/// Every check has this signature, whatever the format it reads: it asks the
+/// context for the view it needs (`bytes`, `text`, `jsonc`) and reports hits.
+pub type Check = fn(&Ctx<'_>) -> Vec<Hit>;
+
+/// How the bytes of a file become the text the rules read. The scanner picks
+/// it when it classifies the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decode {
+    /// UTF-8 with the NUL bytes dropped first and invalid sequences replaced,
+    /// as `dash` and `bash` read a file.
+    Utf8WithoutNuls,
+    /// Only the ASCII bytes; every other byte becomes U+FFFD. Used for data
+    /// that does not read as text.
+    AsciiOnly,
+    /// UTF-16 after its byte order mark.
+    Utf16Bom,
+}
+
+/// The views of one file. Each is computed the first time a check asks for
+/// it and then shared by every rule that looks at the same file, so a file is
+/// decoded and parsed at most once, and not at all if no check needs it.
+pub(crate) struct Views<'a> {
+    bytes: &'a [u8],
+    decode: Decode,
+    /// The native executable format the scanner found, if any.
+    executable: Option<&'static str>,
+    /// The size of the whole file, when `bytes` is only its head.
+    size: Option<u64>,
+    text: OnceCell<Cow<'a, str>>,
+    jsonc: OnceCell<Result<Node, ParseError>>,
+    /// The last `line_of` answer, `(offset, line)`, to count on from.
+    line_cursor: Cell<(usize, usize)>,
+}
+
+impl<'a> Views<'a> {
+    pub(crate) fn new(bytes: &'a [u8], decode: Decode) -> Self {
+        Views {
+            bytes,
+            decode,
+            executable: None,
+            size: None,
+            text: OnceCell::new(),
+            jsonc: OnceCell::new(),
+            line_cursor: Cell::new((0, 1)),
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Records the native executable format the scanner found for the file.
+    pub(crate) fn with_executable(mut self, executable: Option<&'static str>) -> Self {
+        self.executable = executable;
+        self
+    }
+
+    /// Records the size of the whole file.
+    pub(crate) fn with_size(mut self, size: Option<u64>) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// The file as the line rules read it.
+    pub(crate) fn text(&self) -> &str {
+        self.text
+            .get_or_init(|| crate::scan::decode(self.decode, self.bytes))
+    }
+
+    /// The 1-based line of a byte offset in `text`, counting `\n`, so LF and
+    /// CRLF files agree; an offset past the end counts as the end. It counts on
+    /// from the previous answer, so offsets asked in document order, as a
+    /// parser hands them out, cost one pass over the text in total instead of
+    /// one pass each.
+    pub(crate) fn line_of(&self, offset: usize) -> usize {
+        let text = self.text().as_bytes();
+        let offset = offset.min(text.len());
+        let newlines = |range: &[u8]| range.iter().filter(|&&b| b == b'\n').count();
+        let (from, line) = self.line_cursor.get();
+        let line = if offset >= from {
+            line + newlines(&text[from..offset])
+        } else {
+            line - newlines(&text[offset..from])
+        };
+        self.line_cursor.set((offset, line));
+        line
+    }
+
+    /// Whether `text` is the file byte for byte, so an offset in one is the
+    /// same offset in the other. False until `text` has been computed, and
+    /// for decoded UTF-16, dropped NUL bytes, replaced invalid UTF-8 and the
+    /// ASCII-only view.
+    pub(crate) fn text_is_bytes(&self) -> bool {
+        matches!(
+            self.text.get(),
+            Some(Cow::Borrowed(text))
+                if text.as_ptr() == self.bytes.as_ptr() && text.len() == self.bytes.len()
+        )
+    }
+
+    /// Whether a count of characters in `text` is a column an editor would
+    /// show: the text is the file itself, or the file decoded from UTF-16.
+    /// Dropped NUL bytes, replaced invalid UTF-8 and the ASCII-only view shift
+    /// or split characters, so they give no column. Like `text_is_bytes`, it
+    /// is meant to be asked once `text` has been computed.
+    pub(crate) fn columns_are_exact(&self) -> bool {
+        self.text_is_bytes() || self.decode == Decode::Utf16Bom
+    }
+
+    /// `text` parsed as JSONC.
+    pub(crate) fn jsonc(&self) -> &Result<Node, ParseError> {
+        self.jsonc.get_or_init(|| jsonc::parse(self.text()))
+    }
+}
+
+/// What a check is given: where the file is, what the repository around it
+/// holds, and lazily computed views of the file's content.
+pub struct Ctx<'a> {
+    /// Path relative to the repository root, with `/` separators.
+    pub path: &'a str,
+    /// Why the file is not an ordinary readable file, if it is not. Only
+    /// `engine = "file"` checks are offered such files.
+    pub issue: Option<FileIssue>,
+    pub repo: &'a RepoIndex,
+    /// True if the walk stopped early, so `repo` may be missing files.
+    pub truncated: bool,
+    /// The severity from the rule's TOML file: the check reports it for the
+    /// ordinary case and may go higher or lower when the file gives a reason.
+    pub base: Severity,
+    views: &'a Views<'a>,
+}
+
+impl<'a> Ctx<'a> {
+    pub(crate) fn new(
+        path: &'a str,
+        issue: Option<FileIssue>,
+        repo: &'a RepoIndex,
+        truncated: bool,
+        base: Severity,
+        views: &'a Views<'a>,
+    ) -> Self {
+        Ctx {
+            path,
+            issue,
+            repo,
+            truncated,
+            base,
+            views,
+        }
+    }
+
+    /// The raw bytes of the file, so a file is judged the way the tool that
+    /// consumes it reads it, even when it would not pass for a text file. Empty
+    /// for a file that was too large to read.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.views.bytes()
+    }
+
+    /// The file as the line rules read it (see `Decode`). For a file that is
+    /// too large it is empty; for a symbolic link it is the text of the target
+    /// that `bytes` holds; for an executable it is its ASCII only.
+    pub fn text(&self) -> &'a str {
+        self.views.text()
+    }
+
+    /// The native executable format the scanner found for the file (`ELF`,
+    /// `PE`, `Mach-O`, ...), or `None`. A check that asks this and the
+    /// scanner's own "executable" listing always agree. It is found from the
+    /// first bytes, and for a PE from the `PE\0\0` signature where `e_lfanew`
+    /// points, read from the file even past the bytes a head check sees. Set
+    /// for head checks; `None` for other engines.
+    pub fn executable(&self) -> Option<&'static str> {
+        self.views.executable
+    }
+
+    /// The size of the whole file in bytes, for a head check, whose `bytes`
+    /// are only the first ones; `None` when unknown and for other engines.
+    pub fn file_size(&self) -> Option<u64> {
+        self.views.size
+    }
+
+    /// The 1-based line of a byte offset in `text` (see `Views::line_of`).
+    /// Use it instead of counting lines from the start for every hit, which is
+    /// quadratic on a file with many hits.
+    pub fn line_of(&self, offset: usize) -> usize {
+        self.views.line_of(offset)
+    }
+
+    /// The file parsed as JSONC, or the parse error.
+    pub fn jsonc(&self) -> &'a Result<Node, ParseError> {
+        self.views.jsonc()
+    }
+}
+
+impl std::fmt::Debug for Ctx<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ctx")
+            .field("path", &self.path)
+            .field("bytes", &self.views.bytes().len())
+            .field("issue", &self.issue)
+            .field("truncated", &self.truncated)
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Everything a file check may want to know about the repository.
 #[derive(Debug, Default, Clone)]
@@ -79,55 +301,73 @@ impl RepoIndex {
 pub enum FileIssue {
     /// Larger than the scan's file size limit; `bytes` is empty.
     TooLarge { size: u64 },
-    /// A symbolic link. `target` is where it points (as text). `bytes` holds
-    /// the target's content when that is a regular file inside the repository,
-    /// and is empty otherwise.
-    Symlink { target: Option<String> },
+    /// A symbolic link. `target` is where it points (as text). `resolved` is
+    /// the repository path it points at when, resolved as text from the link's
+    /// folder, it stays inside the repository; `None` when the target is
+    /// absolute, leaves the repository or could not be read. `bytes` holds the
+    /// target's content when that is a regular file inside the repository, and
+    /// is empty otherwise.
+    Symlink {
+        target: Option<String>,
+        resolved: Option<String>,
+    },
 }
 
-/// What a file check is given. It sees the raw bytes, so a file is judged the
-/// way the tool that will consume it sees it, even when it would not pass for
-/// a text file.
-#[derive(Debug)]
-pub struct FileCtx<'a> {
-    /// Path relative to the repository root, with `/` separators.
-    pub path: &'a str,
-    pub bytes: &'a [u8],
-    pub issue: Option<FileIssue>,
-    pub repo: &'a RepoIndex,
-    /// True if the walk stopped early, so `repo` may be missing files.
-    pub truncated: bool,
-    /// The severity from the rule's TOML file.
-    pub base: Severity,
-}
-
-/// A check that works on one whole file, selected by the rule's `files` globs.
-pub type FileCheck = fn(&FileCtx<'_>) -> Vec<Hit>;
+/// How many leading bytes an `engine = "head"` check is given: the same
+/// window the scanner reads to tell text from binary data.
+pub const HEAD_LEN: usize = 8 * 1024;
 
 /// Every file check, keyed by the id of the rule it implements.
-const FILE_CHECKS: &[(&str, FileCheck)] = &[
+const FILE_CHECKS: &[(&str, Check)] = &[
     ("deps.python-pth-exec", python_pth::check),
     ("deps.python-start-entrypoint", python_start::check),
 ];
 
 /// Finds the file check registered for a rule id.
-pub fn file_check(rule_id: &str) -> Option<FileCheck> {
+pub fn file_check(rule_id: &str) -> Option<Check> {
     FILE_CHECKS
         .iter()
         .find(|(id, _)| *id == rule_id)
         .map(|(_, check)| *check)
 }
 
+/// Every head check, keyed by the id of the rule it implements.
+const HEAD_CHECKS: &[(&str, Check)] = &[
+    ("repo.committed-binary", repo_contents::committed_binary),
+    (
+        "repo.disguised-executable",
+        repo_contents::disguised_executable,
+    ),
+    ("repo.symlink-outside", repo_contents::symlink_outside),
+    ("repo.windows-dropper", repo_contents::windows_dropper),
+    ("repo.windows-script", repo_contents::windows_script),
+];
+
+/// Finds the head check registered for a rule id.
+pub fn head_check(rule_id: &str) -> Option<Check> {
+    HEAD_CHECKS
+        .iter()
+        .find(|(id, _)| *id == rule_id)
+        .map(|(_, check)| *check)
+}
+
 /// Every jsonc check, keyed by the id of the rule it implements.
-const JSONC_CHECKS: &[(&str, JsoncCheck)] =
-    &[("ide.vscode-folder-open-task", vscode_autorun::check)];
+const JSONC_CHECKS: &[(&str, Check)] = &[("ide.vscode-folder-open-task", vscode_autorun::check)];
 
 /// Finds the check registered for a rule id.
-pub fn jsonc_check(rule_id: &str) -> Option<JsoncCheck> {
+pub fn jsonc_check(rule_id: &str) -> Option<Check> {
     JSONC_CHECKS
         .iter()
         .find(|(id, _)| *id == rule_id)
         .map(|(_, check)| *check)
+}
+
+/// Runs a check on a text file with an empty repository around it.
+#[cfg(test)]
+pub(crate) fn run_on_text(check: Check, path: &str, text: &str, base: Severity) -> Vec<Hit> {
+    let views = Views::new(text.as_bytes(), Decode::Utf8WithoutNuls);
+    let repo = RepoIndex::default();
+    check(&Ctx::new(path, None, &repo, false, base, &views))
 }
 
 #[cfg(test)]
@@ -151,6 +391,21 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_head_check_has_a_builtin_rule() {
+        let rules = builtin_rules().unwrap();
+        for (id, _) in HEAD_CHECKS {
+            let rule = rules
+                .iter()
+                .find(|rule| rule.id == *id)
+                .unwrap_or_else(|| panic!("check `{id}` has no rule in rules/*.toml"));
+            assert!(
+                matches!(rule.matcher, Matcher::Head(_)),
+                "rule `{id}` must use engine = \"head\""
+            );
+        }
+    }
+
+    #[test]
     fn every_registered_file_check_has_a_builtin_rule() {
         let rules = builtin_rules().unwrap();
         for (id, _) in FILE_CHECKS {
@@ -161,6 +416,38 @@ mod tests {
             assert!(
                 matches!(rule.matcher, Matcher::File(_)),
                 "rule `{id}` must use engine = \"file\""
+            );
+        }
+    }
+
+    #[test]
+    fn views_are_computed_once_and_shared() {
+        let bytes = b"{\"a\": 1}\0";
+        let views = Views::new(bytes, Decode::Utf8WithoutNuls);
+        assert!(views.text.get().is_none(), "nothing is decoded up front");
+        let repo = RepoIndex::default();
+        let first = Ctx::new("x.json", None, &repo, false, Severity::Low, &views);
+        let second = Ctx::new("x.json", None, &repo, false, Severity::High, &views);
+
+        assert!(
+            first.jsonc().is_ok(),
+            "parsed from the text without the NUL"
+        );
+        assert!(std::ptr::eq(first.jsonc(), second.jsonc()));
+        assert!(std::ptr::eq(first.text(), second.text()));
+        assert_eq!(second.bytes(), bytes);
+    }
+
+    #[test]
+    fn line_of_agrees_with_counting_from_the_start_in_any_order() {
+        let text = "a\nbb\r\n\nccc\r\nd";
+        let views = Views::new(text.as_bytes(), Decode::Utf8WithoutNuls);
+        let offsets = [0, 5, 2, 3, 15, 999, 7, 1, 8, 4, 0, 14, 6, 13];
+        for offset in offsets {
+            assert_eq!(
+                views.line_of(offset),
+                jsonc::line_of(text, offset),
+                "offset {offset}"
             );
         }
     }

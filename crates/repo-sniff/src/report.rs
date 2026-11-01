@@ -140,14 +140,17 @@ pub fn render(report: &Report, target: &str) -> String {
 /// inconclusive first, then the rest, each kind together.
 fn skip_rank(reason: &SkipReason) -> u8 {
     match reason {
-        SkipReason::Executable { .. } => 0,
+        SkipReason::Executable {
+            reported: false, ..
+        } => 0,
         SkipReason::TooLarge { .. } => 1,
         SkipReason::Unreadable { .. } => 2,
         SkipReason::LineTooLong { .. } => 3,
         SkipReason::GitMetadata { nested: true } => 4,
-        SkipReason::Binary => 5,
-        SkipReason::Symlink { .. } => 6,
-        SkipReason::GitMetadata { nested: false } => 7,
+        SkipReason::Executable { reported: true, .. } => 5,
+        SkipReason::Binary => 6,
+        SkipReason::Symlink { .. } => 7,
+        SkipReason::GitMetadata { nested: false } => 8,
     }
 }
 
@@ -156,8 +159,17 @@ fn skip_text(reason: &SkipReason) -> String {
         SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
         SkipReason::Symlink { .. } => "symlink, not followed".to_string(),
         SkipReason::Binary => "binary format, ASCII rules only".to_string(),
-        SkipReason::Executable { format } => {
+        SkipReason::Executable {
+            format,
+            reported: false,
+        } => {
             format!("executable binary ({format}), not analyzed")
+        }
+        SkipReason::Executable {
+            format,
+            reported: true,
+        } => {
+            format!("executable binary ({format}), reported above, its code not analyzed")
         }
         SkipReason::Unreadable { error } => format!("unreadable: {error}"),
         SkipReason::LineTooLong { line } => {
@@ -217,8 +229,15 @@ fn completeness(report: &Report) -> String {
     };
     if report.is_complete() {
         let binaries = count(|r| matches!(r, SkipReason::Binary));
+        let reported = count(|r| matches!(r, SkipReason::Executable { reported: true, .. }));
         let git = count(|r| matches!(r, SkipReason::GitMetadata { .. }));
         let mut notes = Vec::new();
+        if reported > 0 {
+            notes.push(format!(
+                "{reported} executable binaries are reported as findings, their code was not \
+                 analyzed"
+            ));
+        }
         if binaries > 0 {
             notes.push(format!("{binaries} binary files were read as ASCII only"));
         }
@@ -252,7 +271,15 @@ fn completeness(report: &Report) -> String {
             "{long_lines} files have a line too long to analyze"
         ));
     }
-    let executables = count(|r| matches!(r, SkipReason::Executable { .. }));
+    let executables = count(|r| {
+        matches!(
+            r,
+            SkipReason::Executable {
+                reported: false,
+                ..
+            }
+        )
+    });
     if executables > 0 {
         reasons.push(format!(
             "{executables} executable binaries were not analyzed"
@@ -285,6 +312,9 @@ mod tests {
             attack: vec![],
             file,
             line: 3,
+            column: None,
+            span: None,
+            snippet: None,
             explanation: "because".to_string(),
         }
     }
@@ -317,7 +347,10 @@ mod tests {
             truncated: true,
             skipped: vec![Skipped {
                 path: PathBuf::from("tool"),
-                reason: SkipReason::Executable { format: "ELF" },
+                reason: SkipReason::Executable {
+                    format: "ELF",
+                    reported: false,
+                },
             }],
             ..Report::default()
         };
@@ -457,7 +490,13 @@ mod tests {
         let report = Report {
             skipped: vec![
                 skip("a.bin", SkipReason::Binary),
-                skip("tool", SkipReason::Executable { format: "ELF" }),
+                skip(
+                    "tool",
+                    SkipReason::Executable {
+                        format: "ELF",
+                        reported: false,
+                    },
+                ),
                 skip("big.txt", SkipReason::TooLarge { size: 99 }),
                 skip("link", SkipReason::Symlink { target: None }),
                 skip(
@@ -502,7 +541,10 @@ mod tests {
         for name in ["vendor/z.dll", "a.exe"] {
             skipped.push(Skipped {
                 path: PathBuf::from(name),
-                reason: SkipReason::Executable { format: "PE" },
+                reason: SkipReason::Executable {
+                    format: "PE",
+                    reported: false,
+                },
             });
         }
         let report = Report {

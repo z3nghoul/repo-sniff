@@ -1,9 +1,10 @@
 //! The `ide.vscode-folder-open-task` rule against its fixtures.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use repo_sniff_core::{Finding, Limits, Severity, Stage, builtin_rules, scan};
+use repo_sniff_core::{Finding, Limits, Report, Severity, SkipReason, Stage, builtin_rules, scan};
 
 const RULE_ID: &str = "ide.vscode-folder-open-task";
 
@@ -107,5 +108,90 @@ fn findings_carry_rule_metadata_and_a_specific_explanation() {
         broken.explanation.contains("could not be parsed"),
         "{}",
         broken.explanation
+    );
+}
+
+/// Scans a repository whose only file is `.vscode/tasks.json`.
+fn scan_tasks(contents: &[u8], limits: Limits) -> Report {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".vscode").join("tasks.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, contents).unwrap();
+    scan(dir.path(), &builtin_rules().unwrap(), limits)
+}
+
+#[test]
+fn a_tasks_file_the_jsonc_rule_cannot_read_whole_is_listed_not_judged() {
+    // Pins today's behaviour: the jsonc rule only sees files read whole, and
+    // the file is listed instead, so the scan is never reported as clean.
+    let autorun = br#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let size = autorun.len() as u64;
+    let reasons = |report: &Report| -> Vec<SkipReason> {
+        report.skipped.iter().map(|s| s.reason.clone()).collect()
+    };
+
+    // Over the hard limit: not read at all.
+    let tiny = Limits {
+        max_file_size: 10,
+        ..Limits::default()
+    };
+    let report = scan_tasks(autorun, tiny);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.files_scanned, 0);
+    assert_eq!(reasons(&report), [SkipReason::TooLarge { size }]);
+
+    // Over the in-memory limit: the line rules read it as a stream, and it is
+    // listed as too large for the jsonc rule.
+    let streamed = Limits {
+        max_buffered_size: 10,
+        ..Limits::default()
+    };
+    let report = scan_tasks(autorun, streamed);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.files_scanned, 1);
+    assert_eq!(reasons(&report), [SkipReason::TooLarge { size }]);
+    assert!(!report.is_complete());
+
+    // An executable under that name: never parsed or counted, listed as an
+    // executable, and reported as one disguised as a JSON file.
+    let mut elf = b"\x7fELF\x02\x01\x01\0".to_vec();
+    elf.extend_from_slice(autorun);
+    let report = scan_tasks(&elf, Limits::default());
+    let rules: Vec<_> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert_eq!(rules, ["repo.disguised-executable"]);
+    assert_eq!(report.files_scanned, 0);
+    assert_eq!(
+        reasons(&report),
+        [SkipReason::Executable {
+            format: "ELF",
+            reported: true
+        }]
+    );
+}
+
+#[test]
+fn many_auto_run_tasks_are_all_listed_in_linear_time() {
+    // Counting lines from the start of the file for every task made this
+    // quadratic: 20 000 tasks took minutes. Each task is on its own line, and
+    // every task must still be listed (the jsonc rule has no cap).
+    let count = 20_000;
+    let mut text = String::from("{\"tasks\": [\n");
+    for index in 0..count {
+        let comma = if index + 1 < count { "," } else { "" };
+        text.push_str(&format!(
+            "{{\"label\": \"t{index}\", \"runOptions\": {{\"runOn\": \"folderOpen\"}}}}{comma}\n"
+        ));
+    }
+    text.push_str("]}\n");
+
+    let started = std::time::Instant::now();
+    let report = scan_tasks(text.as_bytes(), Limits::default());
+    let elapsed = started.elapsed();
+
+    let lines: Vec<usize> = report.findings.iter().map(|f| f.line).collect();
+    assert_eq!(lines, (2..2 + count).collect::<Vec<_>>());
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "took {elapsed:?}"
     );
 }

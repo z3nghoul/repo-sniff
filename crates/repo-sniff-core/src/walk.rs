@@ -62,10 +62,13 @@ pub enum SkipReason {
     /// looked inside the binary format itself.
     Binary,
     /// The magic bytes say it is an executable format (ELF, PE, Mach-O,
-    /// including fat binaries). It is code that runs, and nothing analyzes it
-    /// yet.
+    /// including fat binaries). It is code that runs, and nothing analyzes
+    /// what is inside. `reported` is true when a rule that names executables
+    /// (`names_executables`) reported the file, so the report already shows it
+    /// as a finding.
     Executable {
         format: &'static str,
+        reported: bool,
     },
     Unreadable {
         error: String,
@@ -90,9 +93,10 @@ impl SkipReason {
     ///
     /// - A file that was too large or could not be opened: its bytes were
     ///   not read.
-    /// - An executable binary: it was read, but it is code that runs and
-    ///   nothing analyzes it yet. This goes away when the "committed
-    ///   binaries" rule exists, because then such a file is a finding.
+    /// - An executable binary that no rule reported: it is code that runs,
+    ///   and nothing said so. With the built-in rules every executable is a
+    ///   finding of the repository contents family instead, which keeps it a
+    ///   non-pass at the default threshold and names the file.
     ///
     /// - A nested `.git` folder: a whole repository inside the one that was
     ///   scanned, and none of it was read. The root `.git` is not counted.
@@ -106,7 +110,10 @@ impl SkipReason {
             SkipReason::TooLarge { .. }
                 | SkipReason::Unreadable { .. }
                 | SkipReason::LineTooLong { .. }
-                | SkipReason::Executable { .. }
+                | SkipReason::Executable {
+                    reported: false,
+                    ..
+                }
                 | SkipReason::GitMetadata { nested: true }
         )
     }
