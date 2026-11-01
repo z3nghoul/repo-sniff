@@ -1,13 +1,12 @@
 # Benchmark on honest repositories
 
-Date: 2026-11-01, second run. Scanner: `repo-sniff 0.1.0`, release build of a
-local branch that merges the hardening pull requests into `main` (`6c671ad`):
-#75 at `979fd45` (clone and secrets), #76 at `f238457` (symlinks, including
-links in remote clones) and #77 at `1ddfa3c` (UTF-16 scripts). Each
-repository was scanned from its default branch with `repo-sniff scan <url>`
-(default `--fail-on high`) and a 600 second limit per repository including the
-clone. No repository timed out or hit the file limit. Re-run with
-`TIMEOUT=600 scripts/benchmark.sh`; the commits below are the heads that were
+Date: 2026-11-01, second run. Scanner: `repo-sniff 0.1.0`, release build of
+`main` at `71fb3b5`, which includes the hardening pull requests #75 (clone and
+secrets), #76 (symlinks, including links in remote clones) and #77 (UTF-16
+scripts). Each repository was scanned from its default branch with
+`repo-sniff scan <url>` (default `--fail-on high`) and a 300 second limit per
+repository including the clone. No repository timed out or hit the file limit.
+Re-run with `scripts/benchmark.sh`; the commits below are the heads that were
 current at the time of the run (only cpython moved since the first run on
 this page).
 
@@ -25,22 +24,25 @@ repository, and none is a VS Code tasks file.
 | Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Seconds |
 |---|---|---|---|---|---|---|---|---|---|---|
 | BurntSushi/ripgrep | 91f5d22ef48b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 7 binary, 1 symlink, 1 git metadata | 1 |
-| rust-lang/cargo | 809bcc525b61 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 121 symlink, 1 git metadata | 1 |
+| rust-lang/cargo | 809bcc525b61 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 121 symlink, 1 git metadata | 2 |
 | psf/requests | 3c7baaa05ab4 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 6 binary, 2 symlink, 1 git metadata | 1 |
 | pallets/flask | 49943b5a9441 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 5 binary, 1 git metadata | 1 |
-| pypa/pip | ec43c48b2f2d | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 1 |
+| pypa/pip | ec43c48b2f2d | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 2 |
 | expressjs/express | 1c6f1b0fe400 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 1 git metadata | 1 |
-| microsoft/vscode | 1306698e328e | findings | 1 | 0 | 8 | 0 | 50 | 0 | 330 binary, 7 executable, 1 symlink, 1 git metadata | 14 |
-| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 3 | 5 | 0 | 16 binary, 3 symlink, 1 git metadata | 5 |
-| python/cpython | 9c0cfb141c23 | findings | 1 | 0 | 2 | 1 | 28 | 0 | 146 binary, 4 symlink, 1 git metadata | 9 |
-| microsoft/terminal | 703ef7f969d9 | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 4 |
+| microsoft/vscode | 1306698e328e | findings | 1 | 0 | 8 | 0 | 50 | 0 | 330 binary, 7 executable, 1 symlink, 1 git metadata | 10 |
+| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 3 | 5 | 0 | 16 binary, 3 symlink, 1 git metadata | 3 |
+| python/cpython | 9c0cfb141c23 | findings | 1 | 0 | 2 | 1 | 28 | 0 | 146 binary, 4 symlink, 1 git metadata | 8 |
+| microsoft/terminal | 703ef7f969d9 | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 3 |
 
 Seconds include the clone. "Binary" means a file with a known binary header or
 with NUL bytes that does not read as text; the line rules read its ASCII only.
 "Executable" files are listed because nothing analyzes their code, but each
 one is reported above as a finding, so they no longer make a scan
-inconclusive. "Symlink" entries are listed as links, not followed; their
-targets are judged when they are inside the repository.
+inconclusive. "Symlink" entries are listed as links and not followed,
+except that a link a check reads through (a VS Code tasks file,
+a `.code-workspace`, a `.pth` or `.start` file) is judged by its target when
+that is a regular file inside the repository. Every link is checked for
+pointing outside the repository.
 
 ## CRITICAL, HIGH and MEDIUM findings
 
