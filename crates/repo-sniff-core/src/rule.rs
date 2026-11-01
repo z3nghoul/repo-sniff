@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::checks::{self, FileCheck, JsoncCheck};
+use crate::checks::{self, Check};
 use crate::finding::{Severity, Stage};
 
 /// Rule files shipped inside the binary, as `(file name, contents)`.
@@ -81,8 +81,8 @@ struct RuleFile {
 #[derive(Debug, Clone)]
 pub enum Matcher {
     LineRegex(Regex),
-    Jsonc(JsoncCheck),
-    File(FileCheck),
+    Jsonc(Check),
+    File(Check),
     NulByte,
 }
 
