@@ -434,4 +434,21 @@ fn a_link_target_that_names_no_single_file_for_certain_is_not_guessed() {
     let report = scan(root, &builtin_rules().unwrap(), Limits::default());
     assert!(unreadable_link(&report), "{:?}", report.skipped);
     assert!(!report.is_complete());
+
+    // A directory link followed by `..`: the system resolves the `..` inside
+    // the directory the link points at, so the text reading
+    // `.vscode/tasks2.json` is the harmless twin of `evil/tasks2.json`.
+    for target in ["dl/../tasks2.json", "DL/../tasks2.json"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".vscode")).unwrap();
+        fs::create_dir_all(root.join("evil/inner")).unwrap();
+        fs::write(root.join("evil/tasks2.json"), autorun).unwrap();
+        fs::write(root.join(".vscode/tasks2.json"), honest).unwrap();
+        symlink("../evil/inner", root.join(".vscode/dl")).unwrap();
+        symlink(target, root.join(".vscode/tasks.json")).unwrap();
+        let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+        assert!(unreadable_link(&report), "{target}: {:?}", report.skipped);
+        assert!(!report.is_complete());
+    }
 }
