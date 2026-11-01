@@ -28,14 +28,17 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     "rb", "pl", "pm", "php", "ps1", "psm1", "psd1", "bat", "cmd", "vbs", "wsf", "lua",
 ];
 
-/// Script extensions whose host reads a file with a UTF-16 byte order mark as
-/// UTF-16: Windows PowerShell (`.ps1`, `.psm1`, `.psd1`), Windows Script Host
-/// (`.vbs`, `.js`, `.wsf`) and Perl (`.pl`, `.pm`). Only these are decoded. The
-/// others (`cmd.exe`, the Unix shells, PHP, Python, Ruby, Lua, Node) read the
-/// bytes and ignore or choke on the mark, so a `.bat` that starts with
-/// `FF FE` runs as ANSI text while an editor shows it as UTF-16 garbage, a
-/// known way to hide a batch payload. Such a file is read as bytes, as before.
-const UTF16_SCRIPT_EXTENSIONS: &[&str] = &["ps1", "psm1", "psd1", "vbs", "js", "wsf", "pl", "pm"];
+/// Script extensions whose host ignores a UTF-16 byte order mark and runs the
+/// bytes after it: `cmd.exe` (`.bat`, `.cmd`), the Unix shells and PHP. A
+/// `.bat` that starts with `FF FE` runs as ANSI text while an editor shows it
+/// as UTF-16 garbage, a known way to hide a batch payload, so such a file is
+/// read as bytes. Every other script extension with a byte order mark is
+/// decoded from UTF-16: PowerShell, Windows Script Host, Perl and tsc decode
+/// it, and Python, Ruby, Lua and Node cannot run such a file at all, so
+/// reading it as bytes would stop no attack and only lose detection.
+const BYTE_SCRIPT_EXTENSIONS: &[&str] = &[
+    "sh", "bash", "zsh", "ksh", "csh", "fish", "php", "bat", "cmd",
+];
 
 /// A file with NUL bytes that is not a script is read by the line rules only
 /// if at most one byte in this many is NUL. Text with a stray NUL has a
@@ -1359,9 +1362,9 @@ fn classify(slash_path: &str, bytes: &[u8]) -> Class {
         };
     }
     if is_utf16_script(slash_path, bytes) {
-        // Windows PowerShell, WSH and Perl read a script with a UTF-16 byte
-        // order mark as UTF-16, whatever its first bytes hold: text made only
-        // of characters such as U+0101 has no NUL byte at all.
+        // A script whose host decodes a UTF-16 byte order mark is decoded
+        // whatever its first bytes hold: text made only of characters such
+        // as U+0101 has no NUL byte at all.
         utf16 = true;
     } else if looks_binary(bytes) && !script && known_binary_magic(bytes) {
         // A script with a NUL byte is still a script, and the NUL is reported
@@ -1414,9 +1417,11 @@ fn is_script(slash_path: &str, bytes: &[u8]) -> bool {
 }
 
 /// A file with a UTF-16 byte order mark whose host decodes it as UTF-16
-/// (`UTF16_SCRIPT_EXTENSIONS`).
+/// (a script extension that is not in `BYTE_SCRIPT_EXTENSIONS`).
 fn is_utf16_script(slash_path: &str, bytes: &[u8]) -> bool {
-    has_utf16_bom(bytes) && extension_in(slash_path, UTF16_SCRIPT_EXTENSIONS)
+    has_utf16_bom(bytes)
+        && has_script_extension(slash_path)
+        && !extension_in(slash_path, BYTE_SCRIPT_EXTENSIONS)
 }
 
 fn has_script_extension(slash_path: &str) -> bool {
@@ -3033,6 +3038,51 @@ mod tests {
         assert_eq!(whole.findings, streamed.findings);
         assert_eq!(whole.skipped, streamed.skipped);
         assert_eq!(whole.files_scanned, streamed.files_scanned);
+    }
+
+    /// tsc, Perl and the script hosts decode a UTF-16 byte order mark, and
+    /// Python, Ruby and Node cannot run such a file, so it is decoded: the
+    /// bidi character is found and the NUL bytes of UTF-16 are not reported.
+    #[test]
+    fn a_utf16_script_of_any_decoding_host_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "// a\n// \u{202E} evil\n";
+        write(dir.path(), "src.ts", &utf16(text, true));
+        write(dir.path(), "app.tsx", &utf16(text, true));
+        write(dir.path(), "lib.mjs", &utf16(text, false));
+        write(
+            dir.path(),
+            "tool.py",
+            &utf16("# a\n# \u{202E} evil\n", true),
+        );
+        write(
+            dir.path(),
+            "Run.PS1",
+            &utf16("# a\n# \u{202E} evil\n", true),
+        );
+        // A big-endian mark on a batch file: still read as bytes.
+        let mut batch = vec![0xFE, 0xFF];
+        batch.extend_from_slice("&cls\r\nrem \u{202E} evil\r\n".as_bytes());
+        write(dir.path(), "run.bat", &batch);
+        let rules = builtin_rules().unwrap();
+
+        for limits in [Limits::default(), streaming()] {
+            let report = scan(dir.path(), &rules, limits);
+
+            assert_eq!(
+                builtin_findings(&report, "deception.bidi-control"),
+                [
+                    ("Run.PS1".to_string(), 2),
+                    ("app.tsx".to_string(), 2),
+                    ("lib.mjs".to_string(), 2),
+                    ("run.bat".to_string(), 2),
+                    ("src.ts".to_string(), 2),
+                    ("tool.py".to_string(), 2),
+                ],
+                "{limits:?}"
+            );
+            assert!(builtin_findings(&report, NUL_RULE).is_empty(), "{limits:?}");
+        }
     }
 
     /// `cmd.exe`, the shells and PHP ignore a UTF-16 byte order mark and run
