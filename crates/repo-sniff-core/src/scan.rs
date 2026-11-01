@@ -773,8 +773,10 @@ fn link_target_to_read(
         let Some(path) = resolve_link_with(link, target, separators) else {
             continue;
         };
-        if link_keys.contains(&path.to_lowercase()) {
-            return Err("a reading of its target names another symbolic link");
+        if link_keys.contains(&path.to_lowercase())
+            || crosses_link(link, target, separators, link_keys)
+        {
+            return Err("a reading of its target goes through another symbolic link");
         }
         if let Some((key, _)) = exact_files.get_key_value(&path) {
             named.push(key);
@@ -796,6 +798,36 @@ fn link_target_to_read(
             .ok_or("its target's name does not name one file for certain"),
         _ => Err("its target names different files on different systems"),
     }
+}
+
+/// Whether walking the target passes through a link, including a directory
+/// link that a later `..` takes back off the text path: the system resolves
+/// `dl/../x` inside the directory `dl` points at, not next to `dl`.
+fn crosses_link(
+    link: &str,
+    target: &str,
+    separators: &[char],
+    link_keys: &HashSet<String>,
+) -> bool {
+    let mut parts: Vec<&str> = link.split('/').collect();
+    parts.pop();
+    for part in target.split(separators) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return false;
+                }
+            }
+            _ => {
+                parts.push(part);
+                if link_keys.contains(&parts.join("/").to_lowercase()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<String> {
