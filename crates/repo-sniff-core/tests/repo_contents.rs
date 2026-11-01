@@ -145,6 +145,12 @@ fn fixture_repository() -> tempfile::TempDir {
     write(root, "positive/disguised/fake.class", &fat_mach_o());
     write(root, "positive/disguised/Loader.class", &padded_fat_class());
     write(root, "positive/disguised/invoice.pdf          .exe", &pe());
+    write(root, "positive/disguised/invoice.pdf\u{3000}.exe", &pe());
+    write(
+        root,
+        "positive/lure/invoice.pdf\u{a0}\u{a0}.bat",
+        b"REM SYNTHETIC TEST FIXTURE - not functional\r\necho hello\r\n",
+    );
     // COM resolves member names in any case.
     write(
         root,
@@ -235,6 +241,11 @@ fn fixture_repository() -> tempfile::TempDir {
         link(
             "/System/Volumes/Data/Users/someone/.ssh/id_rsa",
             "positive/links/firmlink",
+        );
+        // APFS ignores case by default.
+        link(
+            "/System/volumes/Data/Users/someone/.ssh/id_rsa",
+            "positive/links/firmlink-lowercase",
         );
         // A folder whose name has backslashes, which Unix allows.
         fs::create_dir_all(root.join("positive/links/a\\b\\c")).unwrap();
@@ -350,6 +361,16 @@ fn every_fixture_gets_exactly_its_expected_findings() {
         ),
         row("positive/lure/invoice.pdf.bat", "windows-script", Critical),
         row(
+            "positive/disguised/invoice.pdf\u{3000}.exe",
+            "disguised-executable",
+            Critical,
+        ),
+        row(
+            "positive/lure/invoice.pdf\u{a0}\u{a0}.bat",
+            "windows-script",
+            Critical,
+        ),
+        row(
             "positive/lure/photo\u{202E}gpj.vbs",
             "windows-script",
             Critical,
@@ -382,6 +403,7 @@ fn every_fixture_gets_exactly_its_expected_findings() {
             row("positive/links/python", "symlink-outside", Medium),
             row("positive/links/sneaky", "symlink-outside", High),
             row("positive/links/firmlink", "symlink-outside", High),
+            row("positive/links/firmlink-lowercase", "symlink-outside", High),
             row("positive/links/backslashes", "symlink-outside", High),
             // The link hides the ELF it points at; the target is reported as
             // a committed binary on its own.
@@ -428,9 +450,9 @@ fn reported_executables_are_still_listed_and_the_scan_is_complete() {
             _ => None,
         })
         .collect();
-    // Eight committed, eight disguised, the screen saver, and the three files
+    // Eight committed, nine disguised, the screen saver, and the three files
     // that start with CAFEBABE (the scanner lists every one as executable).
-    assert_eq!(executables.len(), 20, "{:?}", report.skipped);
+    assert_eq!(executables.len(), 21, "{:?}", report.skipped);
     assert!(executables.iter().all(|&reported| reported));
 }
 

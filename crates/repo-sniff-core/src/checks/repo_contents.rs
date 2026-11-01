@@ -16,9 +16,13 @@
 //!
 //! `repo.windows-dropper` also reports `.lnk` files with a shortcut header and
 //! every `.hta`; `repo.windows-script` reports Windows script files by name.
-//! Neither replaces the rows above. A symbolic link is judged as disguised
-//! when its own name hides the native file it points at; the target is judged
-//! as its own file. Nothing here looks inside a binary.
+//! Neither replaces the rows above. Both raise their finding to CRITICAL when
+//! the name poses as a document or an image (`invoice.pdf.bat`, bidi or
+//! invisible characters). A symbolic link is judged by its own name with the
+//! head of its in-repository target: disguised when the name hides the native
+//! file it points at, a dropper or script when Windows would open it as one
+//! (a `.lnk` or `.scr` link whose target cannot be read is judged by name).
+//! The target is judged as its own file. Nothing here looks inside a binary.
 
 use super::{Ctx, FileIssue, Hit};
 use crate::finding::Severity;
@@ -204,8 +208,9 @@ fn extension(name: &str) -> Option<&str> {
 /// The extension before the last one, as in `invoice.pdf.exe`.
 fn inner_extension(name: &str) -> Option<&str> {
     let (stem, _) = name.rsplit_once('.')?;
-    // `invoice.pdf          .exe` hides the gap past the edge of a listing.
-    extension(stem.trim_end_matches(['.', ' ']))
+    // `invoice.pdf          .exe` hides the gap past the edge of a listing;
+    // no-break and ideographic spaces work as well as plain ones.
+    extension(stem.trim_end_matches(|c: char| c == '.' || c.is_whitespace()))
 }
 
 /// Whether the name is a versioned shared library such as `libfoo.so.1.2`.
@@ -608,7 +613,7 @@ pub fn symlink_outside(ctx: &Ctx<'_>) -> Vec<Hit> {
         && !target.contains("/./")
         && !target.contains("//")
         && !target.contains('\\')
-        && !target.starts_with("/System/Volumes/");
+        && !target.to_ascii_lowercase().starts_with("/system/volumes/");
     let system = plain
         && SYSTEM_PROGRAM_DIRS
             .iter()
