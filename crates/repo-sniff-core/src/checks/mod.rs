@@ -266,11 +266,21 @@ impl RepoIndex {
 pub enum FileIssue {
     /// Larger than the scan's file size limit; `bytes` is empty.
     TooLarge { size: u64 },
-    /// A symbolic link. `target` is where it points (as text). `bytes` holds
-    /// the target's content when that is a regular file inside the repository,
-    /// and is empty otherwise.
-    Symlink { target: Option<String> },
+    /// A symbolic link. `target` is where it points (as text). `resolved` is
+    /// the repository path it points at when, resolved as text from the link's
+    /// folder, it stays inside the repository; `None` when the target is
+    /// absolute, leaves the repository or could not be read. `bytes` holds the
+    /// target's content when that is a regular file inside the repository, and
+    /// is empty otherwise.
+    Symlink {
+        target: Option<String>,
+        resolved: Option<String>,
+    },
 }
+
+/// How many leading bytes an `engine = "head"` check is given: the same
+/// window the scanner reads to tell text from binary data.
+pub const HEAD_LEN: usize = 8 * 1024;
 
 /// Every file check, keyed by the id of the rule it implements.
 const FILE_CHECKS: &[(&str, Check)] = &[
@@ -281,6 +291,17 @@ const FILE_CHECKS: &[(&str, Check)] = &[
 /// Finds the file check registered for a rule id.
 pub fn file_check(rule_id: &str) -> Option<Check> {
     FILE_CHECKS
+        .iter()
+        .find(|(id, _)| *id == rule_id)
+        .map(|(_, check)| *check)
+}
+
+/// Every head check, keyed by the id of the rule it implements.
+const HEAD_CHECKS: &[(&str, Check)] = &[];
+
+/// Finds the head check registered for a rule id.
+pub fn head_check(rule_id: &str) -> Option<Check> {
+    HEAD_CHECKS
         .iter()
         .find(|(id, _)| *id == rule_id)
         .map(|(_, check)| *check)
@@ -321,6 +342,21 @@ mod tests {
             assert!(
                 matches!(rule.matcher, Matcher::Jsonc(_)),
                 "rule `{id}` must use engine = \"jsonc\""
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_head_check_has_a_builtin_rule() {
+        let rules = builtin_rules().unwrap();
+        for (id, _) in HEAD_CHECKS {
+            let rule = rules
+                .iter()
+                .find(|rule| rule.id == *id)
+                .unwrap_or_else(|| panic!("check `{id}` has no rule in rules/*.toml"));
+            assert!(
+                matches!(rule.matcher, Matcher::Head(_)),
+                "rule `{id}` must use engine = \"head\""
             );
         }
     }
