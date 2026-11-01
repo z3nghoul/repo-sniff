@@ -116,7 +116,7 @@ Each in its own branch and pull request, fixtures approved first:
 - [x] File-level checks: `Matcher::File` with a `FileCtx`, now `Ctx` (raw bytes, path, index of repository paths, `truncated` flag); rules selected by file name run on raw bytes before binary detection
 - [x] Report every skipped file (binary, oversized, symlink, unreadable) in `Report.skipped`; nothing is skipped silently
 - [ ] Non-regular files (FIFOs, devices, sockets) listed in `Report.skipped` too
-- [ ] `--max-files` and `--max-file-size` flags for the walk limits; a changed limit is shown in the report
+- [ ] `--max-files <N>` and `--max-file-size <SIZE>` flags: they set `Limits::max_files` and `Limits::max_file_size` (sizes take `K`, `M`, `G` suffixes in binary units; 0 is rejected; upper bounds 10 000 000 files and 4 GiB); a `max_file_size` below the 5 MiB in-memory limit also lowers that limit. Limits come only from the command line, never from a configuration file. A changed limit is shown in the report and later in the JSON and SARIF output, and lowering a limit can only make a scan inconclusive, never clean
 - [ ] Clone limits: timeout with git killed on expiry, disk-size limit during the clone, Ctrl+C removes the temp folder and stops git
 - [ ] Minimum git version check with a loud warning and `--allow-old-git` (versions taken from the git security advisories); version parsing tested on `2.43.0`, `2.39.5 (Apple Git-154)`, `2.47.1.windows.1`
 - [ ] Local targets: open files without following symlinks and check metadata after opening (no swap between walk and read)
@@ -136,17 +136,17 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] Capability combinations raise severity (built on the correlation pass)
 - [ ] "Needs manual review" section: grouped, capped, no (or minimal) effect on the score
 - [ ] `.repo-sniff.toml`: `[filters]` and `[[exclude]]` with mandatory reason
-- [ ] Configuration is never taken from the scanned repository by default: its `.repo-sniff.toml` is ignored unless `--config <path>` names a file explicitly; the GitHub Action reads the configuration from the base branch, never from the pull request head; every exclusion and every changed limit is listed in the report, so nothing is hidden silently
-- [ ] `repo-sniff rules` lists the built-in rules (id, family, stage, level, ATT&CK) and `repo-sniff explain <rule-id>` prints one rule's description, example and what it does not catch
+- [ ] Configuration is never taken from the scanned repository: no implicit lookup of `.repo-sniff.toml` in the target, the current directory or its parents; no other locations (`pyproject.toml`, `Cargo.toml` metadata, `.config/`, subdirectories); no environment variable that changes rules, filters, exclusions or limits (a direnv `.envrc` could set it); no inline suppression comments in scanned files; no `include` or `extends`. A configuration is used only when `--config <path>` names it, and the report says when that path is inside the target. A `.repo-sniff.toml` found in the target is reported as ignored, with the findings it would have hidden (a repository that tries to silence itself is a signal). The scan status is computed before exclusions and filters: they can hide a finding, never turn an unread file, a limit hit or an unanalyzed executable into a clean result. An exclusion names a rule id, an exact path, a reason and a fingerprint of the matched line, so it does not cover a new payload added to the same file later. Every exclusion and filter in effect (`[filters]`, and the TUI default filters from the OS config dir) is listed in the report; findings hidden by a filter still count toward `--fail-on`. `CONTRIBUTING.md` and `docs/DETECTIONS.md` are updated to this model when it lands
+- [ ] `repo-sniff rules` lists the built-in rules (id, family, stage, level, ATT&CK) and `repo-sniff explain <rule-id>` prints one rule's description, example and what it does not catch; every rule, including the Rust checks, carries a mandatory non-empty `gaps` text that the loader rejects when it is missing
 - [ ] Parallel scanning with rayon
 - [ ] Many rules stay fast: `RegexSet` or Aho-Corasick prefilter for line rules; per-file cap on findings from line rules
 
 ## Milestone 4 — SARIF, GitHub Action, releases
 
 - [ ] SARIF output for GitHub code scanning: regions from the byte spans; messages in `text`, never `markdown`
-- [ ] GitHub Action that scans pull requests: workflow commands escaped (`::`, `%`, `\r`, `\n`) or output wrapped in `::stop-commands::<token>`; `permissions: contents: read`; never `pull_request_target` with a checkout of the PR head; no tokens in the scan step
+- [ ] GitHub Action that scans pull requests: workflow commands escaped (`::`, `%`, `\r`, `\n`) or output wrapped in `::stop-commands::<token>`; `permissions: contents: read`; never `pull_request_target` with a checkout of the PR head; no tokens in the scan step; the configuration is read from the base commit of the event (`pull_request.base.sha`) as a git object, never as a path in the working tree, and a `push` uses the pushed commit's parent; because a pull request that edits the workflow can still change how the Action runs, the documentation requires the check to be enforced by a repository ruleset (required workflow or required status check) with CODEOWNERS review on `.github/`, and the scan flags a pull request that changes `.repo-sniff.toml` or a workflow step that runs repo-sniff
 - [ ] Release binaries for Linux, Windows and macOS with checksums and GitHub artifact attestations (or signatures)
-- [ ] Man page and shell completions (bash, zsh, fish, PowerShell) generated from the clap definitions and shipped with the release binaries
+- [ ] Man page and shell completions (bash, zsh, fish, PowerShell) generated from the clap definitions in release CI, never written by hand, and shipped with the release binaries
 
 ## Milestone 5 — README as a showcase
 
@@ -165,10 +165,10 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] Start screen: URL/path input, recent scans
 - [ ] Scanning screen: background thread, progress by stage over a channel, live finding count
 - [ ] Results screen: list, details with code snippet, review points tab, live filters, `/` search
-- [ ] Help screen on `?`: key bindings of the current screen
+- [ ] Help screen on `?`: key bindings of the current screen (inside the `/` search box `?` is text)
 - [ ] Filters and rules screen (fastfetch-style): radio rows, stage × family checkbox grid, tri-state, presets, description line
 - [ ] Settings: UI language (shown as UK/EN), default filters, reset; stored in the OS config dir
-- [ ] Export filters to `.repo-sniff.toml`
+- [ ] Export filters to a configuration file in the OS config dir or a path the user picks, used through `--config` (a `.repo-sniff.toml` in the scanned repository is ignored)
 
 Localization:
 
