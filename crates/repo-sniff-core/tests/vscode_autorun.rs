@@ -374,3 +374,51 @@ fn reading_through_many_links_is_bounded() {
     assert_eq!(judged + too_large, 40);
     assert!(!report.is_complete());
 }
+
+/// When the text of a link's target does not name one file for certain, the
+/// scan must not guess: a guess can be a harmless twin while the system that
+/// follows the link opens the payload. Such a link is listed as unreadable.
+#[cfg(unix)]
+#[test]
+fn a_link_target_that_names_no_single_file_for_certain_is_not_guessed() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let autorun = r#"{"tasks": [{"label": "x", "runOptions": {"runOn": "folderOpen"}}]}"#;
+    let honest = r#"{"tasks": [{"label": "build", "command": "make"}]}"#;
+    let unreadable_link = |report: &Report| {
+        report.skipped.iter().any(|s| {
+            s.path == Path::new(".vscode/tasks.json")
+                && matches!(s.reason, SkipReason::Unreadable { .. })
+        })
+    };
+
+    // A target that is not UTF-8, next to a harmless file whose name is its
+    // lossy text.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join(OsStr::from_bytes(b"notes\xfe")), autorun).unwrap();
+    fs::write(root.join("notes\u{FFFD}"), honest).unwrap();
+    symlink(
+        OsStr::from_bytes(b"../notes\xfe"),
+        root.join(".vscode/tasks.json"),
+    )
+    .unwrap();
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+    assert!(unreadable_link(&report), "{:?}", report.skipped);
+    assert!(!report.is_complete());
+
+    // `..\notes.txt` opens the root `notes.txt` on Windows, and a file named
+    // `.vscode/..\notes.txt` on Unix.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join("notes.txt"), autorun).unwrap();
+    fs::write(root.join(".vscode/..\\notes.txt"), honest).unwrap();
+    symlink("..\\notes.txt", root.join(".vscode/tasks.json")).unwrap();
+    let report = scan(root, &builtin_rules().unwrap(), Limits::default());
+    assert!(unreadable_link(&report), "{:?}", report.skipped);
+    assert!(!report.is_complete());
+}

@@ -188,6 +188,29 @@ pub fn scan_with_links(
         .iter()
         .map(|path| (path.to_lowercase(), path.clone()))
         .collect();
+    // For reading a link's whole target: each `/` path of a regular file with
+    // its exact path, or `None` when the text does not name one file for
+    // certain (a name that is not UTF-8, or two names with the same text), and
+    // every path by its lowercase form.
+    let mut exact_files: HashMap<String, Option<PathBuf>> = HashMap::new();
+    for path in walked
+        .files
+        .iter()
+        .filter(|path| !link_paths.contains(path))
+    {
+        let exact = path.to_str().is_some().then(|| path.clone());
+        exact_files
+            .entry(to_slash(path))
+            .and_modify(|known| *known = None)
+            .or_insert(exact);
+    }
+    let mut lowercase_exact: HashMap<String, Vec<String>> = HashMap::new();
+    for key in exact_files.keys() {
+        lowercase_exact
+            .entry(key.to_lowercase())
+            .or_default()
+            .push(key.clone());
+    }
     let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
@@ -409,9 +432,12 @@ pub fn scan_with_links(
                 let file_rule = has_file_rule(&slash_path);
                 let mut bytes = Vec::new();
                 if jsonc || file_rule {
-                    let target_file = target_text.as_deref().and_then(|target| {
-                        link_target_file(&slash_path, target, &regular_files, &lowercase_files)
-                    });
+                    let target_file = match target.as_deref() {
+                        Some(target) => {
+                            link_target_to_read(&slash_path, target, &exact_files, &lowercase_exact)
+                        }
+                        None => Ok(None),
+                    };
                     let mut not_read = |error: &str| {
                         skipped.push(Skipped {
                             path: entry.path.clone(),
@@ -421,7 +447,11 @@ pub fn scan_with_links(
                         });
                     };
                     match target_file {
-                        Some(path) => {
+                        Err(why) => {
+                            not_read(&format!("link target not read: {why}"));
+                            jsonc = false;
+                        }
+                        Ok(Some(path)) => {
                             let path = root.join(path);
                             let size = fs::metadata(&path).map_or(0, |metadata| metadata.len());
                             if (jsonc && size > limits.max_buffered_size)
@@ -450,13 +480,13 @@ pub fn scan_with_links(
                         // A rule that would judge the file behind the link
                         // could not: the target is outside, another link
                         // (#69), a folder or missing. Not a clean result.
-                        None if jsonc => {
+                        Ok(None) if jsonc => {
                             not_read(
                                 "link target not read: it is not a regular file in the repository",
                             );
                             jsonc = false;
                         }
-                        None => {}
+                        Ok(None) => {}
                     }
                 }
                 // Read the way the target would be read under the link's name.
@@ -488,9 +518,24 @@ pub fn scan_with_links(
     // A recorded link is offered to the rules that judge names twice, as a
     // file and as a link; the same finding is listed once.
     if !recorded_links.is_empty() {
-        report
-            .findings
-            .dedup_by(|a, b| a == b && recorded_links.contains(&a.file));
+        // Findings are sorted by file, line and rule only, so an equal one may
+        // sit anywhere in its group: compare within the group.
+        let mut kept: Vec<Finding> = Vec::with_capacity(report.findings.len());
+        for finding in std::mem::take(&mut report.findings) {
+            let duplicate = recorded_links.contains(&finding.file)
+                && kept
+                    .iter()
+                    .rev()
+                    .take_while(|k| {
+                        (&k.file, k.line, &k.rule_id)
+                            == (&finding.file, finding.line, &finding.rule_id)
+                    })
+                    .any(|k| *k == finding);
+            if !duplicate {
+                kept.push(finding);
+            }
+        }
+        report.findings = kept;
     }
     report
 }
@@ -692,6 +737,49 @@ fn link_target_file(
                 lowercase_files.get(&path.to_lowercase()).cloned()
             }
         })
+}
+
+/// The regular file whose whole content JSONC and file rules read for a link:
+/// every reading of the target (Unix and Windows separators, exact case and
+/// any case) must name the same file, and that file must be named for
+/// certain. Otherwise which file the tool that follows the link opens depends
+/// on the system or on bytes the text cannot show, so the target is reported
+/// as not read (`Err`) rather than guessed: a guess can be the harmless twin.
+/// `Ok(None)` when no reading names a regular file.
+fn link_target_to_read(
+    link: &str,
+    target: &Path,
+    exact_files: &HashMap<String, Option<PathBuf>>,
+    lowercase_exact: &HashMap<String, Vec<String>>,
+) -> Result<Option<PathBuf>, &'static str> {
+    let Some(target) = target.to_str() else {
+        return Err("its target is not valid UTF-8");
+    };
+    let mut named: Vec<&String> = Vec::new();
+    for separators in [&['/'][..], &['/', '\\'][..]] {
+        let Some(path) = resolve_link_with(link, target, separators) else {
+            continue;
+        };
+        if let Some((key, _)) = exact_files.get_key_value(&path) {
+            named.push(key);
+        }
+        named.extend(
+            lowercase_exact
+                .get(&path.to_lowercase())
+                .into_iter()
+                .flatten(),
+        );
+    }
+    named.sort();
+    named.dedup();
+    match named[..] {
+        [] => Ok(None),
+        [one] => exact_files[one]
+            .clone()
+            .map(Some)
+            .ok_or("its target's name does not name one file for certain"),
+        _ => Err("its target names different files on different systems"),
+    }
 }
 
 fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<String> {
