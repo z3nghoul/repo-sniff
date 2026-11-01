@@ -29,14 +29,17 @@ clean result never proves that a repository is harmless.
 What it does to protect you:
 
 - **Cloning.** Remote repositories are cloned over `https` only, shallowly,
-  by a `git` that runs with an empty environment and an empty configuration.
-  No filter, credential helper or fsmonitor from your own or the system's git
-  configuration runs, hooks and templates are off, symlinks are written as
-  plain files, and submodules are not fetched. There are no interactive
-  prompts. For a private repository, clone it yourself and scan the folder.
+  by a `git` that runs with an empty environment, an empty configuration and
+  an empty home directory. No filter, credential helper or fsmonitor from
+  your own or the system's git configuration runs, hooks and templates are
+  off, symlinks are written as plain files, and submodules are not fetched.
+  There are no interactive prompts. For a private repository, clone it
+  yourself and scan the folder.
 - **Secrets.** A token pasted into a URL (`https://TOKEN@host/...`) is hidden
-  in the notice, the report and error messages. Passwords containing `?` or `#`
-  and scp-like targets are known gaps.
+  in the notice, the report and error messages. A URL whose password holds
+  an unescaped `/`, `?` or `#` is refused before anything is sent (curl would
+  take part of it for the host), and so is an scp-like address with any user
+  (`deploy:TOKEN@host:path`), which is an ssh target.
 - **Reading.** Symlinks are never followed. File names and text taken from the
   repository are cleaned before they are printed, so a hostile repository
   cannot paint over the report. The work per file is bounded.
