@@ -1871,18 +1871,35 @@ mod tests {
             &lengths
         ));
 
-        let long = "a/".repeat(2047);
-        let started = std::time::Instant::now();
-        for _ in 0..2000 {
-            assert!(!crosses_link(
-                "w/x.code-workspace",
-                &long,
-                sep,
-                &keys,
-                &lengths
-            ));
-        }
-        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+        // Speed is judged by how the time grows, not by its value, which
+        // depends on the runner: a target four times as long takes about four
+        // times as long when linear and about sixteen times when quadratic.
+        // The fastest of several runs is taken to drop scheduler noise.
+        let time = |segments: usize| {
+            let target = "a/".repeat(segments);
+            (0..5)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    for _ in 0..20 {
+                        assert!(!crosses_link(
+                            "w/x.code-workspace",
+                            &target,
+                            sep,
+                            &keys,
+                            &lengths
+                        ));
+                    }
+                    started.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let (short, long) = (time(2_000), time(8_000));
+        let ratio = long.as_secs_f64() / short.as_secs_f64();
+        assert!(
+            ratio < 8.0,
+            "4x the target took {ratio:.1}x: {short:?} {long:?}"
+        );
     }
 
     use std::path::PathBuf;
