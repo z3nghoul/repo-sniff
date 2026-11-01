@@ -1,0 +1,58 @@
+# What the built-in rules report when vscode-autorun/ is scanned as one
+# repository. Read by tests/fixture_expectations.rs; a finding not listed here
+# fails the test, so every file under negative/ must stay unreported. The
+# marker comment is line 1 of each fixture.
+
+files_scanned = 14
+
+[[finding]]
+file = "positive/crlf/.vscode/tasks.json"
+line = 4
+rule = "ide.vscode-folder-open-task"
+severity = "high"
+
+[[finding]]
+file = "positive/download-critical/.vscode/tasks.json"
+line = 6
+rule = "ide.vscode-folder-open-task"
+severity = "critical"
+explanation_contains = '"curl"'
+
+[[finding]]
+file = "positive/escaped-key/.vscode/tasks.json"
+line = 2
+rule = "ide.vscode-folder-open-task"
+severity = "high"
+
+[[finding]]
+file = "positive/plain/.vscode/tasks.json"
+line = 8
+rule = "ide.vscode-folder-open-task"
+severity = "high"
+explanation_contains = '"build"'
+
+[[finding]]
+file = "positive/split-lines/.vscode/tasks.json"
+line = 6
+rule = "ide.vscode-folder-open-task"
+severity = "high"
+
+[[finding]]
+file = "positive/unparseable/.vscode/tasks.json"
+line = 2
+rule = "ide.vscode-folder-open-task"
+severity = "high"
+explanation_contains = "could not be parsed"
+
+[[finding]]
+file = "positive/windows-override/.vscode/tasks.json"
+line = 7
+rule = "ide.vscode-folder-open-task"
+severity = "critical"
+explanation_contains = '"powershell"'
+
+[[finding]]
+file = "positive/workspace/app.code-workspace"
+line = 6
+rule = "ide.vscode-folder-open-task"
+severity = "high"
