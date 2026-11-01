@@ -165,6 +165,30 @@ without mistaking "nothing found in what was read" for "safe". How executables
 and other binary files affect the status is described in
 [docs/DETECTIONS.md](docs/DETECTIONS.md#exit-status-and-binary-files).
 
+## Benchmark
+
+Ten popular honest repositories, scanned from their default branches with
+`repo-sniff scan <url>` on 2026-11-01 (scanner commit `0383fc2`). The target
+is 0 CRITICAL findings on honest code.
+
+| Repository | Exit | Critical | High | Medium | Low |
+|---|---|---|---|---|---|
+| BurntSushi/ripgrep | 0 | 0 | 0 | 0 | 0 |
+| rust-lang/cargo | 0 | 0 | 0 | 0 | 0 |
+| psf/requests | 0 | 0 | 0 | 0 | 1 |
+| pallets/flask | 0 | 0 | 0 | 0 | 1 |
+| pypa/pip | 1 | 0 | 6 | 0 | 0 |
+| expressjs/express | 0 | 0 | 0 | 0 | 0 |
+| microsoft/vscode | 1 | 0 | 8 | 0 | 50 |
+| git/git | 0 | 0 | 0 | 3 | 5 |
+| python/cpython | 1 | 0 | 2 | 1 | 28 |
+| microsoft/terminal | 1 | 0 | 14 | 0 | 74 |
+
+The HIGH findings are mostly vendored executables (true detections of benign
+files); exit 1 is the default `--fail-on high` doing its job. Commits of the
+scanned repositories, every HIGH and MEDIUM finding with a verdict, and how to
+re-run it are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
 ## Development
 
 ```sh
