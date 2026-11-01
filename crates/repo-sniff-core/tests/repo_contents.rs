@@ -228,6 +228,15 @@ fn fixture_repository() -> tempfile::TempDir {
         link("assets/page.txt", "positive/linked/invoice.hta");
         link("assets/icon.dat", "positive/linked/report.lnk");
         link("assets/notes.txt", "positive/linked/run.vbe");
+        // Targets the scanner reads another way than Unix does, or cannot
+        // read at all: Windows still opens these shortcuts.
+        link("assets\\icon.dat", "positive/linked/backslash.lnk");
+        link("ASSETS/ICON.DAT", "positive/linked/case.lnk");
+        link("assets/icon.dat", "positive/linked/hop");
+        link("hop", "positive/linked/chain.lnk");
+        link("assets", "positive/linked/folder");
+        link("folder/icon.dat", "positive/linked/through-folder.lnk");
+        link("..\\bin\\tool", "positive/links/backslash-logo.png");
         link("../text/mz.txt", "negative/links/inside");
         link("missing.txt", "negative/links/dangling");
         link("/dev/null", "negative/links/null");
@@ -359,6 +368,19 @@ fn every_fixture_gets_exactly_its_expected_findings() {
             row("positive/linked/invoice.hta", "windows-dropper", High),
             row("positive/linked/report.lnk", "windows-dropper", High),
             row("positive/linked/run.vbe", "windows-script", High),
+            row("positive/linked/backslash.lnk", "windows-dropper", High),
+            row("positive/linked/case.lnk", "windows-dropper", High),
+            row("positive/linked/chain.lnk", "windows-dropper", High),
+            row(
+                "positive/linked/through-folder.lnk",
+                "windows-dropper",
+                High,
+            ),
+            row(
+                "positive/links/backslash-logo.png",
+                "disguised-executable",
+                Critical,
+            ),
         ]);
     }
     let found = rows(&report);
@@ -572,12 +594,18 @@ fn a_pe_with_no_nul_in_its_first_8_kib_is_still_an_executable() {
     let dir = tempfile::tempdir().unwrap();
     write_far_pe(&dir.path().join("setup.exe"));
     write_far_pe(&dir.path().join("logo.png"));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("setup.exe", dir.path().join("pic.png")).unwrap();
 
     let report = scan(dir.path(), &builtin_rules().unwrap(), Limits::default());
 
     let found = rows(&report);
     assert!(found.contains(&row("setup.exe", "committed-binary", Severity::High)));
     assert!(found.contains(&row("logo.png", "disguised-executable", Severity::Critical)));
+    if cfg!(unix) {
+        // A link that hides it is judged with the same signature read.
+        assert!(found.contains(&row("pic.png", "disguised-executable", Severity::Critical)));
+    }
     assert!(report.is_complete(), "{:?}", report.skipped);
     let executables = report
         .skipped

@@ -1,7 +1,7 @@
 //! Running rules over a repository.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::ops::Range;
@@ -137,6 +137,12 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             ),
     );
     let regular_files: HashSet<String> = walked.files.iter().map(|path| to_slash(path)).collect();
+    // The same paths by their lowercase form, for link targets spelled in
+    // another case (NTFS and APFS ignore case by default).
+    let lowercase_files: HashMap<String, String> = regular_files
+        .iter()
+        .map(|path| (path.to_lowercase(), path.clone()))
+        .collect();
     let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
@@ -314,9 +320,11 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                 // Head rules get at most the first bytes of a regular file the
                 // link points at inside the repository; there may be any number
                 // of links, so nothing more is read for them.
-                let (head, executable) = resolved
-                    .as_ref()
-                    .filter(|path| regular_files.contains(*path))
+                let (head, executable) = target_text
+                    .as_deref()
+                    .and_then(|target| {
+                        link_target_file(&slash_path, target, &regular_files, &lowercase_files)
+                    })
                     .and_then(|path| read_head(&root.join(path)))
                     .unwrap_or_default();
                 let issue = FileIssue::Symlink {
@@ -542,6 +550,28 @@ fn resolve_link_text(link: &str, target: &str) -> Option<String> {
     let unix = resolve_link_with(link, target, &['/'])?;
     let windows = resolve_link_with(link, target, &['/', '\\'])?;
     Some(if cfg!(windows) { windows } else { unix })
+}
+
+/// The regular file in the repository a link points at, for reading its
+/// head: the Unix reading of the target, then the Windows one, each also
+/// looked up without case. `None` when neither names a regular file (a
+/// chain through another link, a link to a folder, or a target outside).
+fn link_target_file(
+    link: &str,
+    target: &str,
+    regular_files: &HashSet<String>,
+    lowercase_files: &HashMap<String, String>,
+) -> Option<String> {
+    [&['/'][..], &['/', '\\'][..]]
+        .into_iter()
+        .filter_map(|separators| resolve_link_with(link, target, separators))
+        .find_map(|path| {
+            if regular_files.contains(&path) {
+                Some(path)
+            } else {
+                lowercase_files.get(&path.to_lowercase()).cloned()
+            }
+        })
 }
 
 fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<String> {
