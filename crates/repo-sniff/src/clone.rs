@@ -252,8 +252,9 @@ fn validate_ref(git_ref: &str) -> Result<()> {
 /// - Whitespace, control characters, quotes, angle brackets and backticks:
 ///   curl rejects whitespace anyway, and the others would end the URL early in
 ///   any message that quotes it, leaving part of a password outside.
-/// - An `@` after the first `/`, `?`, `#` or `\` that follows `://`: the user
-///   information then holds one of those characters unescaped, and curl takes
+/// - An `@` after the first `/`, `?`, `#` or `\` that follows `://` (or two
+///   `@` before it): the user information then holds one of those characters
+///   unescaped, and curl takes
 ///   the text before it for the host. That text, part of a token, would be
 ///   printed in curl's error ("Could not resolve host: ...") and sent to the
 ///   DNS resolver or the proxy. Such a URL is refused before anything is
@@ -270,12 +271,15 @@ fn ensure_unambiguous(url: &str) -> Result<()> {
     }
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority_end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
-    if rest[authority_end..].contains('@') {
+    // Two `@` before the host mean an unescaped `@` in the user name or
+    // password: curl rejects that today, but nothing should depend on it.
+    if rest[authority_end..].contains('@') || rest[..authority_end].matches('@').count() > 1 {
         bail!(
             "the URL has an `@` after a `/`, `?`, `#` or `\\`, so git would read part of what \
              looks like a user name or password as the host and send it over the network. \
              Percent-encode those characters in the user name and password (`/` as %2F, `?` as \
-             %3F, `#` as %23, `\\` as %5C, `@` as %40)"
+             %3F, `#` as %23, `\\` as %5C, `@` as %40); an `@` in the path or query must \
+             be written as %40 too"
         );
     }
     Ok(())
@@ -303,8 +307,8 @@ fn ensure_https_only(url: &str) -> Result<()> {
     }
     if lower.starts_with("ssh://") || lower.starts_with("git@") || is_scp_like(url) {
         let local_hint = if is_scp_like(url) && !lower.starts_with("git@") {
-            "\nIf this is a local folder whose name only looks like `user@host:path`, \
-             scan it as ./<name>."
+            "\nIf this is a local folder whose name only looks like an ssh address, scan \
+             it as ./<name>."
         } else {
             ""
         };
@@ -410,6 +414,9 @@ mod tests {
             "https://user:FAKE`TOKEN@example.invalid/r",
             "https://user:FAKE<TOKEN@example.invalid/r",
             "https://user:FAKE\u{7}TOKEN@example.invalid/r",
+            "HTTPS://FAKE_TOKEN#x@example.invalid/r",
+            "https:///FAKE#x@example.invalid/r",
+            "https://user:FAKE@TOKEN@example.invalid/r",
         ] {
             let message = validate(url, None).unwrap_err().to_string();
             assert!(!message.contains("FAKE"), "{url}: {message}");
@@ -430,7 +437,12 @@ mod tests {
         let message = ensure_https_only("alpine@sha256:abc")
             .unwrap_err()
             .to_string();
-        assert!(message.contains("./<name>"), "{message}");
+        // As main prints it: the hint must survive the redaction.
+        let message = crate::redact::redact_credentials(&message);
+        assert!(
+            message.contains("an ssh address, scan it as ./<name>"),
+            "{message}"
+        );
         assert!(!message.contains("alpine"), "{message}");
         let message = ensure_https_only("git@example.invalid:o/r")
             .unwrap_err()
