@@ -14,10 +14,14 @@ It is aimed at the moment right before you `npm install`, `pip install`,
 these steps can run code from the repository on your machine, and fake
 "cheats", "tools" and "PoCs" exploit exactly that.
 
-> **Early development.** The scanning pipeline works end to end, but only two
-> detections exist so far (see [What it detects today](#what-it-detects-today)).
-> The rest of the planned layers are being added step by step; progress is
-> tracked in [ROADMAP.md](ROADMAP.md).
+> **Early development.** `repo-sniff scan` works on a local folder or an
+> https repository and prints a plain-text report with 11 rules in four
+> families: Trojan Source and NUL bytes, VS Code auto-run tasks, Python
+> startup files, and repository contents (committed executables, disguised
+> executables, Windows droppers and scripts, symlinks out of the repository);
+> see [What it detects today](#what-it-detects-today). There is no risk score,
+> JSON, SARIF or GitHub Action yet. Progress is tracked in
+> [ROADMAP.md](ROADMAP.md).
 
 ## Safety first
 
@@ -60,33 +64,47 @@ What it does to protect you:
 | `deception.nul-byte-in-script` | HIGH | A NUL byte inside a script (by extension or shebang). The script is still scanned as text, because shells and interpreters run it |
 | `deps.python-pth-exec` | INFO to CRITICAL | Python `.pth` files with a line that starts with `import`, which Python runs every time it starts. Judged the way every supported Python version would read it; known honest forms (setuptools, virtualenv, editable installs, pytest-cov) are lowered |
 | `deps.python-start-entrypoint` | HIGH | Python 3.15 `.start` files, whose `package.module:callable` entry points Python calls every time it starts |
+| `repo.disguised-executable` | CRITICAL | A native executable (ELF, PE, Mach-O, found by magic bytes) whose name promises something else: a document or image extension, a double extension such as `invoice.pdf.exe`, bidi or invisible characters in the name |
+| `repo.committed-binary` | HIGH, MEDIUM | A committed native executable or library (HIGH); validated bytecode such as `.pyc`, `.class`, `.jar`, `.wasm` (MEDIUM). Its code is not analyzed |
+| `repo.windows-dropper` | HIGH | Files that run on a double click on Windows: a `.lnk` with a shortcut header, a `.scr` that is a PE, an `.hta` |
+| `repo.windows-script` | LOW, MEDIUM, HIGH | Windows scripts: `.bat`, `.cmd`, `.ps1`, `.psm1` (LOW, common build glue); `.vbs`, `.wsf`, `.wsh` (MEDIUM); Script Encoder output `.vbe`, `.jse` (HIGH); CRITICAL when the name poses as a document or image |
+| `repo.wsh-javascript` | MEDIUM | JavaScript that uses Windows Script Host objects (`WScript`, `ActiveXObject` with the shell, file system or HTTP ProgIDs) |
+| `repo.symlink-outside` | HIGH | A symbolic link that points outside the repository (MEDIUM into system program folders); local folders only for now |
 
 The full catalog of planned detections, with their levels and MITRE ATT&CK
 techniques, is in [docs/DETECTIONS.md](docs/DETECTIONS.md).
 
 ## Planned analysis layers
 
-1. **Build/install hooks** — `preinstall`/`postinstall` in `package.json`,
-   `setup.py`, `build.rs`, Gradle tasks, `PreBuildEvent`/`PostBuildEvent` in
-   `.vcxproj`, GitHub Actions workflows, committed binaries.
-2. **Capabilities** — networking, process spawning, persistence (registry Run
-   keys, systemd, cron, LaunchAgents), keyboard/clipboard hooks, browser and
-   Discord data access, process injection. Risk comes from *combinations* of
+In the order of [ROADMAP.md](ROADMAP.md):
+
+1. **Automatic execution** (milestone 2, in progress): IDE settings
+   (devcontainer, `.idea` run configurations, `.envrc`), MSBuild props and
+   targets, npm lifecycle scripts, `setup.py` and build backends, other
+   ecosystem hooks (Dockerfile, composer, Gemfile, `binding.gyp`, Maven),
+   build scripts (`build.rs`, `.vcxproj` build events, CMake, Makefile,
+   Gradle), GitHub Actions workflows, `.git/config` of a local repository,
+   suspicious files (password-protected archives, data after an image),
+   third-party submodules, human deception (zero-width characters,
+   homoglyphs, README advice to disable the antivirus).
+2. **Report and scoring** (milestone 3): colored output, JSON, a risk score
+   on three axes (trigger, capability, concealment), a correlation pass, and
+   `.repo-sniff.toml` filters and exclusions.
+3. **SARIF, GitHub Action, release binaries** (milestone 4).
+4. **Capabilities and AST** (milestone 7): tree-sitter for Python,
+   JavaScript, C/C++ and more; process spawning, persistence, injection,
+   credential theft, exfiltration. Risk comes from *combinations* of
    capabilities, not from single matches.
-3. **AST analysis** with tree-sitter (Python, JavaScript, C/C++) to tell real
-   calls apart from comments and strings.
-4. **Obfuscation** — Shannon entropy, long base64/hex blobs, minified code
-   hidden among normal sources.
-5. **Dependencies** — typosquatting of popular packages, known
-   vulnerabilities via the OSV API.
-6. **README vs. behavior** — comparing what a project claims to do with what
-   its code can do.
+5. **Obfuscation** (milestone 8): entropy, long base64/hex blobs, minified
+   code among normal sources, recursive decoding.
+6. **Dependencies** (milestone 9): typosquatting, known vulnerabilities via
+   OSV, known malicious packages, lockfiles that resolve outside the registry.
+7. **Later**: comparing what a README claims with what the code can do.
 
-Output formats: colored terminal report, JSON, and SARIF for GitHub code
-scanning. A GitHub Action for scanning pull requests is planned too.
-
-Rules are plain TOML files, so new detections can be contributed without
-touching the engine.
+Line rules are plain TOML files (`engine = "line-regex"`), so a pattern can be
+added without touching the engine. Structural checks (JSONC, `.pth` files,
+file headers) are Rust functions with one signature, `fn(&Ctx) -> Vec<Hit>`;
+their TOML entry carries only the metadata.
 
 ## Usage
 
