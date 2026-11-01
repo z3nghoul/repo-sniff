@@ -42,10 +42,12 @@ What it does to protect you:
   cannot paint over the report. The work per file is bounded.
 - **Honesty.** A scan is never reported as clean when it cannot vouch for what
   it looked at: if the file limit was reached, a file was too large or could
-  not be read, a repository nested inside it (a `.git` folder below the root)
-  was not read, or an executable binary (ELF, PE, Mach-O including 64-bit fat
-  binaries) was not analyzed, the report says `INCONCLUSIVE` and the exit
-  status is 3. Other binary files
+  not be read, or a repository nested inside it (a `.git` folder below the
+  root) was not read, the report says `INCONCLUSIVE` and the exit status is 3.
+  An executable binary (ELF, PE, Mach-O including fat binaries, found by magic
+  bytes whatever it is called) is a finding of its own, HIGH or CRITICAL, and
+  is listed as not analyzed; one that no rule reported would make the scan
+  inconclusive. Other binary files
   (images, archives, compressed data) are read and listed as `binary, not
   analyzed`: no rule looks inside them yet.
 
@@ -134,14 +136,16 @@ Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
 | 0 | Nothing reached the `--fail-on` threshold, and the scan was not inconclusive (files it did not analyze are listed in the report) |
 | 1 | The scan found something at or above the threshold |
 | 2 | The scan could not run (bad target, clone failure, wrong options) |
-| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, a nested `.git` repository was not read, or an executable binary (ELF, PE, Mach-O) was not analyzed |
+| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, a nested `.git` repository was not read, or an executable binary (ELF, PE, Mach-O) was not reported by any rule |
 
 Other binary files (images, archives, compressed test data) are read and listed
 as `binary format, ASCII rules only`, and do not change the status. A scan is never
 reported as clean when it could not vouch for what it looked at: the report ends
 with `Scan: INCONCLUSIVE` and says why, and the exit status is 3 even with
-`--fail-on none`. The executable-binary case goes away when the "committed
-binaries" rule exists, because then such a file is a finding. The `.git` folder at the root is listed as
+`--fail-on none`. An executable binary is a HIGH finding (CRITICAL when its
+name hides it), so it fails the default threshold; with `--fail-on critical` or
+`--fail-on none` a plainly named executable is shown but no longer fails the
+scan. The `.git` folder at the root is listed as
 `git metadata, not analyzed` and does not change the status. This makes
 `repo-sniff scan . --fail-on high` usable as a CI check without mistaking "nothing found in what was read" for "safe".
 
