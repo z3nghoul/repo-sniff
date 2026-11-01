@@ -94,7 +94,7 @@ needing a new engine variant each.
 
 Each in its own branch and pull request, fixtures approved first:
 
-- [ ] Repository contents: committed binaries (when this rule lands, remove the "executable binary makes the scan INCONCLUSIVE" exception from the scan engine: such files become findings), disguised executables (magic bytes), droppers (.lnk, .scr, .hta), Windows scripts (.bat, .ps1, .vbs), symlinks out of the repo
+- [x] Repository contents: committed binaries (when this rule lands, remove the "executable binary makes the scan INCONCLUSIVE" exception from the scan engine: such files become findings), disguised executables (magic bytes), droppers (.lnk, .scr, .hta), Windows scripts (.bat, .ps1, .vbs), symlinks out of the repo (a new `head` engine; an executable that no rule reported still makes the scan inconclusive; symlinks only for local targets until the git index is read)
 - [ ] Repository contents: committed virtual environments (`pyvenv.cfg`) as a finding of their own, in a separate pull request
 - [ ] Repository contents, local targets: dangerous keys in `.git/config` (`core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `core.pager`, `alias.* = !...`, `filter.*`, `include.path`) and non-sample files in `.git/hooks/`, read as plain files without running git; nested `.git` folders reported
 - [ ] Suspicious files: password-protected archives (flagged, never unpacked), data appended after PNG `IEND` / JPEG `EOI`, large high-entropy files of unknown format, binary "test files" referenced by build scripts

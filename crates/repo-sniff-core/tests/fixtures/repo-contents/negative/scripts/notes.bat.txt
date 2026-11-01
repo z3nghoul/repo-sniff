@@ -1,0 +1,2 @@
+SYNTHETIC TEST FIXTURE — not functional
+Notes about build.bat, not a script.

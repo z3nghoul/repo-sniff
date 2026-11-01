@@ -1,13 +1,13 @@
 //! Running rules over a repository.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-use crate::checks::{Check, Ctx, Decode, FileIssue, Hit, RepoIndex, TextSpan, Views};
+use crate::checks::{Check, Ctx, Decode, FileIssue, HEAD_LEN, Hit, RepoIndex, TextSpan, Views};
 use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
 use crate::sanitize::{display_safe, snippet_safe, to_slash};
@@ -137,6 +137,12 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             ),
     );
     let regular_files: HashSet<String> = walked.files.iter().map(|path| to_slash(path)).collect();
+    // The same paths by their lowercase form, for link targets spelled in
+    // another case (NTFS and APFS ignore case by default).
+    let lowercase_files: HashMap<String, String> = regular_files
+        .iter()
+        .map(|path| (path.to_lowercase(), path.clone()))
+        .collect();
     let file_rules: Vec<(&Rule, Check)> = rules
         .iter()
         .filter_map(|rule| match rule.matcher {
@@ -144,11 +150,27 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
             _ => None,
         })
         .collect();
+    let head_rules: Vec<(&Rule, Check)> = rules
+        .iter()
+        .filter_map(|rule| match rule.matcher {
+            Matcher::Head(check) => Some((rule, check)),
+            _ => None,
+        })
+        .collect();
     let env = Env {
         index: &index,
         truncated: walked.truncated,
         file_rules: &file_rules,
+        head_rules: &head_rules,
     };
+    // Files over the size limit that the walk itself listed. Head rules see
+    // them by name; files read as a stream get their head rules there.
+    let walk_too_large: HashSet<PathBuf> = walked
+        .skipped
+        .iter()
+        .filter(|entry| matches!(entry.reason, SkipReason::TooLarge { .. }))
+        .map(|entry| entry.path.clone())
+        .collect();
 
     let mut report = Report {
         truncated: walked.truncated,
@@ -177,6 +199,7 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
                 rules,
                 &limits,
                 has_file_rule(&slash_path),
+                &env,
                 &mut report.unlisted,
             );
             report.findings.extend(streamed.findings);
@@ -206,14 +229,28 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
         // like a binary here.
         let checked = env.run_file_checks(relative, &slash_path, &views, None);
         report.findings.extend(checked.findings);
+        let headed = env.run_head_checks(
+            relative,
+            &slash_path,
+            head_of(&bytes),
+            None,
+            class.executable,
+            Some(bytes.len() as u64),
+        );
+        report.findings.extend(headed.findings);
 
-        // An executable is listed even when a file rule looked at it, and even
-        // when its name says script: the rule saw the bytes of a `.pth` or
-        // `.start` file, not the code of the program.
+        // An executable is always listed, since nothing analyzes its code. It
+        // makes the scan inconclusive unless a rule that names executables
+        // reported it; a finding of any other rule does not count, nor does a
+        // file rule that looked at it (that rule saw the bytes of a `.pth` or
+        // `.start` file, not the code of the program).
         if let Some(format) = class.executable {
             skipped.push(Skipped {
                 path: relative.clone(),
-                reason: SkipReason::Executable { format },
+                reason: SkipReason::Executable {
+                    format,
+                    reported: headed.named_executable,
+                },
             });
             if checked.examined {
                 report.files_scanned += 1;
@@ -251,17 +288,66 @@ pub fn scan(root: &Path, rules: &[Rule], limits: Limits) -> Report {
     for entry in &walk_skips {
         let slash_path = to_slash(&entry.path);
         let checked = match &entry.reason {
-            SkipReason::TooLarge { size } => env.run_file_checks(
-                &entry.path,
-                &slash_path,
-                &Views::new(&[], Decode::Utf8WithoutNuls),
-                Some(FileIssue::TooLarge { size: *size }),
-            ),
+            SkipReason::TooLarge { size } => {
+                let issue = FileIssue::TooLarge { size: *size };
+                if walk_too_large.contains(&entry.path) {
+                    // Only the first bytes are read, for the head rules (and
+                    // a PE signature, see `native_format`).
+                    let path = root.join(&entry.path);
+                    let (head, executable, size) = read_head(&path).unwrap_or_default();
+                    let headed = env.run_head_checks(
+                        &entry.path,
+                        &slash_path,
+                        &head,
+                        Some(issue.clone()),
+                        executable,
+                        size,
+                    );
+                    report.findings.extend(headed.findings);
+                }
+                env.run_file_checks(
+                    &entry.path,
+                    &slash_path,
+                    &Views::new(&[], Decode::Utf8WithoutNuls),
+                    Some(issue),
+                )
+            }
             SkipReason::Symlink { target } => {
-                let bytes =
-                    symlink_target_bytes(root, &entry.path, target.as_deref(), &regular_files);
+                let target_text = target
+                    .as_deref()
+                    .map(|target| target.to_string_lossy().into_owned());
+                let resolved = target_text
+                    .as_deref()
+                    .and_then(|target| resolve_link_text(&slash_path, target));
+                // Head rules get at most the first bytes of a regular file the
+                // link points at inside the repository; there may be any number
+                // of links, so nothing more is read for them.
+                let (head, executable, size) = target_text
+                    .as_deref()
+                    .and_then(|target| {
+                        link_target_file(&slash_path, target, &regular_files, &lowercase_files)
+                    })
+                    .and_then(|path| read_head(&root.join(path)))
+                    .unwrap_or_default();
                 let issue = FileIssue::Symlink {
-                    target: target.as_deref().map(to_slash),
+                    target: target_text,
+                    resolved,
+                };
+                let headed = env.run_head_checks(
+                    &entry.path,
+                    &slash_path,
+                    &head,
+                    Some(issue.clone()),
+                    executable,
+                    size,
+                );
+                report.findings.extend(headed.findings);
+                // File rules get the whole target, as before, and only when one
+                // selects the link.
+                let bytes = if has_file_rule(&slash_path) {
+                    symlink_target_bytes(root, &entry.path, target.as_deref(), &regular_files)
+                } else {
+                    Vec::new()
                 };
                 // Read the way the target would be read under the link's name.
                 let views = Views::new(&bytes, classify(&slash_path, &bytes).decode);
@@ -284,13 +370,22 @@ struct Env<'a> {
     index: &'a RepoIndex,
     truncated: bool,
     file_rules: &'a [(&'a Rule, Check)],
+    head_rules: &'a [(&'a Rule, Check)],
 }
 
-/// The outcome of offering one file to the file-level rules.
+/// The outcome of offering one file to the file-level or head rules.
 struct Checked {
-    /// True if at least one file-level rule applies to this path.
+    /// True if at least one of those rules applies to this path.
     examined: bool,
+    /// True if a rule that names executables (`Rule::names_executables`)
+    /// reported the file.
+    named_executable: bool,
     findings: Vec<Finding>,
+}
+
+/// The first bytes of a file, as head rules see them.
+fn head_of(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(HEAD_LEN)]
 }
 
 impl Env<'_> {
@@ -301,12 +396,41 @@ impl Env<'_> {
         views: &'v Views<'v>,
         issue: Option<FileIssue>,
     ) -> Checked {
+        self.run_checks(self.file_rules, relative, slash_path, views, issue)
+    }
+
+    /// Offers a file's name and first bytes to the head rules. `head` is
+    /// empty for a file that was not read.
+    fn run_head_checks(
+        &self,
+        relative: &Path,
+        slash_path: &str,
+        head: &[u8],
+        issue: Option<FileIssue>,
+        executable: Option<&'static str>,
+        size: Option<u64>,
+    ) -> Checked {
+        let views = Views::new(head, classify(slash_path, head).decode)
+            .with_executable(executable)
+            .with_size(size);
+        self.run_checks(self.head_rules, relative, slash_path, &views, issue)
+    }
+
+    fn run_checks<'v>(
+        &'v self,
+        rules: &'v [(&'v Rule, Check)],
+        relative: &Path,
+        slash_path: &'v str,
+        views: &'v Views<'v>,
+        issue: Option<FileIssue>,
+    ) -> Checked {
         let mut checked = Checked {
             examined: false,
+            named_executable: false,
             findings: Vec::new(),
         };
         let own_bytes = issue.is_none();
-        for (rule, check) in self.file_rules {
+        for (rule, check) in rules {
             if !rule.applies_to(slash_path) {
                 continue;
             }
@@ -320,6 +444,7 @@ impl Env<'_> {
                 views,
             );
             let mut hits = check(&ctx);
+            checked.named_executable |= rule.names_executables && !hits.is_empty();
             let unlisted = hits.len().saturating_sub(MAX_FINDINGS_PER_FILE_CHECK);
             hits.truncate(MAX_FINDINGS_PER_FILE_CHECK);
 
@@ -357,6 +482,124 @@ fn symlink_target_bytes(
         return Vec::new();
     }
     fs::read(root.join(resolved)).unwrap_or_default()
+}
+
+/// The first `HEAD_LEN` bytes of a file, read without reading the rest, its
+/// native executable format (see `native_format`) and its size.
+type Head = (Vec<u8>, Option<&'static str>, Option<u64>);
+
+fn read_head(path: &Path) -> Option<Head> {
+    let file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut head = Vec::new();
+    file.take(HEAD_LEN as u64).read_to_end(&mut head).ok()?;
+    let executable = native_format(&head, Some((path, size)));
+    Some((head, executable, Some(size)))
+}
+
+/// The Windows loader accepts a PE header up to this far into the file.
+const MAX_PE_OFFSET: u64 = 256 * 1024 * 1024;
+
+/// The native executable format of a file, from its first bytes. For an `MZ`
+/// header, the `PE\0\0` signature where `e_lfanew` (offset 0x3C) points
+/// decides, whatever else the bytes hold: a PE needs no NUL byte in its
+/// first 8 KiB, since every DOS header field but those two can be anything,
+/// and its header can lie up to 256 MiB into the file. When the signature is
+/// past `head`, `file` (the path and the size) lets one 4-byte read check
+/// it. When it cannot be checked at all, binary content starting with `MZ`
+/// still counts, as before. Other formats need binary content (a NUL byte
+/// in the first 8 KiB, which their headers always have).
+pub(crate) fn native_format(head: &[u8], file: Option<(&Path, u64)>) -> Option<&'static str> {
+    if !head.starts_with(b"MZ") {
+        return if looks_binary(head) {
+            executable_format(head)
+        } else {
+            None
+        };
+    }
+    if let Some(&[a, b, c, d]) = head.get(0x3C..0x40) {
+        let offset = u64::from(u32::from_le_bytes([a, b, c, d]));
+        let in_head = usize::try_from(offset)
+            .ok()
+            .and_then(|start| head.get(start..start.checked_add(4)?));
+        if let Some(signature) = in_head {
+            return (signature == b"PE\0\0").then_some("PE");
+        }
+        if let Some((path, size)) = file
+            && offset < MAX_PE_OFFSET
+            && offset + 4 <= size
+            && let Some(signature) = read_at(path, offset)
+        {
+            return (signature == *b"PE\0\0").then_some("PE");
+        }
+    }
+    looks_binary(head).then_some("PE")
+}
+
+/// Four bytes of a file at `offset`, or `None` if they cannot be read.
+fn read_at(path: &Path, offset: u64) -> Option<[u8; 4]> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = [0; 4];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// Resolves a symbolic link's target as text, whatever system the scan runs
+/// on, and returns the repository path (with `/`) it points at only when it
+/// stays inside the repository both the way Unix reads it (only `/`
+/// separates) and the way Windows reads it (`/` and `\` separate; a drive
+/// letter such as `C:`, or a UNC or device prefix such as `\\host`,
+/// `\\?\` or `\??\`, is absolute). `None` when either reading is absolute
+/// or climbs above the root. Of the two inside paths, the one for the system
+/// the scan runs on is returned.
+fn resolve_link_text(link: &str, target: &str) -> Option<String> {
+    let unix = resolve_link_with(link, target, &['/'])?;
+    let windows = resolve_link_with(link, target, &['/', '\\'])?;
+    Some(if cfg!(windows) { windows } else { unix })
+}
+
+/// The regular file in the repository a link points at, for reading its
+/// head: the Unix reading of the target, then the Windows one, each also
+/// looked up without case. `None` when neither names a regular file (a
+/// chain through another link, a link to a folder, or a target outside).
+fn link_target_file(
+    link: &str,
+    target: &str,
+    regular_files: &HashSet<String>,
+    lowercase_files: &HashMap<String, String>,
+) -> Option<String> {
+    [&['/'][..], &['/', '\\'][..]]
+        .into_iter()
+        .filter_map(|separators| resolve_link_with(link, target, separators))
+        .find_map(|path| {
+            if regular_files.contains(&path) {
+                Some(path)
+            } else {
+                lowercase_files.get(&path.to_lowercase()).cloned()
+            }
+        })
+}
+
+fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<String> {
+    let bytes = target.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if target.starts_with(['/', '\\']) || drive {
+        return None;
+    }
+    let mut parts: Vec<&str> = link.split('/').collect();
+    parts.pop();
+    for part in target.split(separators) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Resolves `target` relative to the directory of `link`, purely lexically.
@@ -489,6 +732,7 @@ fn scan_streamed(
     rules: &[Rule],
     limits: &Limits,
     file_rule_applies: bool,
+    env: &Env<'_>,
     unlisted: &mut Vec<Unlisted>,
 ) -> Streamed {
     let mut out = Streamed::default();
@@ -507,6 +751,19 @@ fn scan_streamed(
         out.skipped.push(unreadable(err));
         return out;
     }
+    // Head rules need only the name and the first bytes, so a large file is
+    // no way around them, and they never make it count as too large.
+    let executable = native_format(&head, Some((&path, size)));
+    let headed = env.run_head_checks(
+        relative,
+        slash_path,
+        head_of(&head),
+        None,
+        executable,
+        Some(size),
+    );
+    let named_executable = headed.named_executable;
+    out.findings.extend(headed.findings);
     let applicable: Vec<&Rule> = rules
         .iter()
         .filter(|rule| rule.applies_to(slash_path))
@@ -521,15 +778,17 @@ fn scan_streamed(
     };
     // A rule that selects the file by name gets to see it as too large (that
     // happens after the walk), executable or not, as for a file over the limit.
-    if looks_binary(&head)
-        && let Some(format) = executable_format(&head)
-    {
+    if let Some(format) = executable {
         if whole_file_rule {
             out.skipped.push(too_large);
         }
+        // As for a file read whole.
         out.skipped.push(Skipped {
             path: relative.to_path_buf(),
-            reason: SkipReason::Executable { format },
+            reason: SkipReason::Executable {
+                format,
+                reported: named_executable,
+            },
         });
         return out;
     }
@@ -711,8 +970,8 @@ fn scan_text<'v>(
                     findings.push(hit_finding(rule, relative, hit, index, views, true));
                 }
             }
-            // File-level rules already ran on the raw bytes.
-            Matcher::File(_) => {}
+            // File-level and head rules already ran on the raw bytes.
+            Matcher::File(_) | Matcher::Head(_) => {}
             Matcher::NulByte => {
                 if let Some(line) = nul_line {
                     findings.push(Finding {
@@ -923,15 +1182,15 @@ fn classify(slash_path: &str, bytes: &[u8]) -> Class {
     let mut utf16 = false;
     let mut binary_looking = false;
 
+    if let Some(format) = native_format(bytes, None) {
+        return Class {
+            executable: Some(format),
+            nul_line,
+            binary_looking: false,
+            decode: Decode::AsciiOnly,
+        };
+    }
     if looks_binary(bytes) {
-        if let Some(format) = executable_format(bytes) {
-            return Class {
-                executable: Some(format),
-                nul_line,
-                binary_looking: false,
-                decode: Decode::AsciiOnly,
-            };
-        }
         // A script with a NUL byte is still a script, and the NUL is reported
         // by its own rule (`nul_line`).
         if !script {
@@ -1141,20 +1400,39 @@ fn first_nul_line(bytes: &[u8]) -> Option<usize> {
 
 /// Names the executable format a file starts with, by its magic bytes:
 /// ELF, PE (the `MZ` header), Mach-O in all four byte orders, and fat Mach-O
-/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The fat header `CAFEBABE` is also the header of a Java class
-/// file; both are code that runs, so both count.
-fn executable_format(bytes: &[u8]) -> Option<&'static str> {
+/// binaries (32 and 64 bit; fat headers are always big-endian on disk). The
+/// fat header `CAFEBABE` is also the header of a Java class file; both are
+/// code that runs, so both count.
+///
+/// An `MZ` header counts as PE unless it points at the `PE\0\0` signature
+/// (through `e_lfanew` at offset 0x3C) inside the given bytes and that
+/// signature is not there: data that only happens to start with `MZ` is not
+/// a program. When the bytes are too short to tell, it still counts.
+pub(crate) fn executable_format(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x7F, b'E', b'L', b'F', ..] => Some("ELF"),
-        [b'M', b'Z', ..] => Some("PE"),
+        [b'M', b'Z', ..] => pe_signature_not_missing(bytes).then_some("PE"),
         [0xFE, 0xED, 0xFA, 0xCE | 0xCF, ..] | [0xCE | 0xCF, 0xFA, 0xED, 0xFE, ..] => Some("Mach-O"),
         [0xCA, 0xFE, 0xBA, 0xBE | 0xBF, ..] => Some("Mach-O fat (or Java class)"),
         _ => None,
     }
 }
 
+/// False only when an `MZ` header's `e_lfanew` points inside `bytes` and the
+/// four bytes there are not `PE\0\0`.
+fn pe_signature_not_missing(bytes: &[u8]) -> bool {
+    let Some(&[a, b, c, d]) = bytes.get(0x3C..0x40) else {
+        return true;
+    };
+    let offset = u32::from_le_bytes([a, b, c, d]) as usize;
+    match offset.checked_add(4).and_then(|end| bytes.get(offset..end)) {
+        Some(signature) => signature == b"PE\0\0",
+        None => true,
+    }
+}
+
 /// Same heuristic as git and ripgrep: a NUL byte near the start means binary.
-fn looks_binary(bytes: &[u8]) -> bool {
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
 }
 
@@ -1233,6 +1511,7 @@ mod tests {
             example: "x".to_string(),
             matcher: Matcher::File(check),
             files: Some(globs.build().unwrap()),
+            names_executables: false,
         }
     }
 
@@ -1342,7 +1621,10 @@ mod tests {
             SkipReason::Unreadable {
                 error: "denied".to_string(),
             },
-            SkipReason::Executable { format: "ELF" },
+            SkipReason::Executable {
+                format: "ELF",
+                reported: false,
+            },
         ] {
             let report = Report {
                 skipped: vec![skip(reason.clone())],
@@ -1365,6 +1647,35 @@ mod tests {
 
         assert!(report.is_complete());
         assert_eq!(report.inconclusive_count(), 0);
+    }
+
+    #[test]
+    fn an_mz_header_is_a_pe_only_with_its_signature() {
+        let mut pe = vec![0u8; 0x48];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C] = 0x40;
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        assert_eq!(executable_format(&pe), Some("PE"));
+        pe[0x40..0x44].copy_from_slice(b"text");
+        assert_eq!(
+            executable_format(&pe),
+            None,
+            "MZ data without a PE signature"
+        );
+        // When the bytes cannot tell, it still counts.
+        assert_eq!(
+            executable_format(b"MZ\x90\0\x03\0"),
+            Some("PE"),
+            "too short"
+        );
+        let mut far = vec![0u8; 0x48];
+        far[..2].copy_from_slice(b"MZ");
+        far[0x3C..0x40].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+        assert_eq!(
+            executable_format(&far),
+            Some("PE"),
+            "signature past the bytes"
+        );
     }
 
     #[test]
@@ -1425,7 +1736,13 @@ mod tests {
             reasons,
             [
                 ("data.gz".to_string(), SkipReason::Binary),
-                ("tool".to_string(), SkipReason::Executable { format: "ELF" }),
+                (
+                    "tool".to_string(),
+                    SkipReason::Executable {
+                        format: "ELF",
+                        reported: false,
+                    }
+                ),
             ]
         );
         assert!(
@@ -1840,6 +2157,7 @@ mod tests {
         let bidi: Vec<_> = report
             .findings
             .iter()
+            .filter(|f| f.rule_id == "deception.bidi-control")
             .map(|f| (to_slash(&f.file), f.line))
             .collect();
         assert_eq!(
@@ -2266,7 +2584,13 @@ mod tests {
 
         let report = scan(dir.path(), &rules, streaming());
 
-        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        // The streamed executable gets its head rules: a finding, and listed.
+        let found: Vec<_> = report
+            .findings
+            .iter()
+            .map(|f| (to_slash(&f.file), f.rule_id.as_str()))
+            .collect();
+        assert_eq!(found, [("tool.exe".to_string(), "repo.committed-binary")]);
         let mut reasons: Vec<_> = report
             .skipped
             .iter()
@@ -2278,12 +2602,15 @@ mod tests {
             [
                 (
                     "tool.exe".to_string(),
-                    SkipReason::Executable { format: "PE" }
+                    SkipReason::Executable {
+                        format: "PE",
+                        reported: true,
+                    }
                 ),
                 ("voice.mp3".to_string(), SkipReason::Binary),
             ]
         );
-        assert!(!report.is_complete());
+        assert!(report.is_complete());
     }
 
     #[test]
@@ -2321,7 +2648,10 @@ mod tests {
         assert_eq!(found.len(), 1, "the rule runs once");
         assert!(found[0].1.contains("issue=Some(TooLarge"), "{}", found[0].1);
         let kinds: Vec<_> = report.skipped.iter().map(|s| s.reason.clone()).collect();
-        assert!(kinds.contains(&SkipReason::Executable { format: "PE" }));
+        assert!(kinds.contains(&SkipReason::Executable {
+            format: "PE",
+            reported: false,
+        }));
         assert!(!report.is_complete());
     }
 
@@ -2458,8 +2788,20 @@ mod tests {
 
         let report = scan(dir.path(), &rules, Limits::default());
 
-        assert_eq!(report.inconclusive_count(), 1);
+        // Reported as an executable disguised as a script, not as a script.
+        assert_eq!(report.inconclusive_count(), 0);
         assert!(builtin_findings(&report, NUL_RULE).is_empty());
+        assert_eq!(
+            builtin_findings(&report, "repo.disguised-executable").len(),
+            1
+        );
+        assert_eq!(
+            report.skipped[0].reason,
+            SkipReason::Executable {
+                format: "ELF",
+                reported: true
+            }
+        );
     }
 
     #[test]
@@ -2775,5 +3117,110 @@ mod tests {
         assert_eq!(snippet("\u{e9}x", 2), "\u{e9}x");
         assert_eq!(nul_span(b"ab"), None);
         assert_eq!(nul_span(b"a\0"), Some(1..2));
+    }
+
+    fn head_rule(check: Check) -> Rule {
+        let mut rule = file_rule("**", check);
+        rule.id = "test.head".to_string();
+        rule.matcher = Matcher::Head(check);
+        rule.files = None;
+        rule
+    }
+
+    #[test]
+    fn head_rules_see_every_entry_once_and_never_make_a_file_too_large() {
+        fn seen(ctx: &Ctx<'_>) -> Vec<Hit> {
+            vec![Hit {
+                line: 1,
+                span: None,
+                severity: ctx.base,
+                reason: format!("bytes={} issue={:?}", ctx.bytes().len(), ctx.issue),
+            }]
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "small.txt", b"0123456789");
+        write(dir.path(), "big.txt", &[b'x'; 2000]);
+        write(dir.path(), "big.pth", &[b'#'; 2000]);
+        write(dir.path(), "huge.txt", &[b'y'; 5000]);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("small.txt", dir.path().join("link")).unwrap();
+        let rules = [head_rule(seen), file_rule("**/*.pth", probe)];
+        let limits = Limits {
+            max_buffered_size: 1024,
+            max_file_size: 4096,
+            ..Limits::default()
+        };
+
+        let report = scan(dir.path(), &rules, limits);
+
+        let head: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "test.head")
+            .map(|f| (to_slash(&f.file), f.explanation.clone()))
+            .collect();
+        let mut expected = vec![
+            ("big.pth".to_string(), "bytes=2000 issue=None".to_string()),
+            ("big.txt".to_string(), "bytes=2000 issue=None".to_string()),
+            (
+                "huge.txt".to_string(),
+                "bytes=5000 issue=Some(TooLarge { size: 5000 })".to_string(),
+            ),
+            ("small.txt".to_string(), "bytes=10 issue=None".to_string()),
+        ];
+        if cfg!(unix) {
+            expected.insert(
+                3,
+                (
+                    "link".to_string(),
+                    "bytes=10 issue=Some(Symlink { target: Some(\"small.txt\"), resolved: \
+                     Some(\"small.txt\") })"
+                        .to_string(),
+                ),
+            );
+        }
+        assert_eq!(head, expected);
+        // Only the files over the limit, and the streamed file that a file
+        // rule selects, are listed as too large; the head rule adds nothing.
+        let too_large: Vec<_> = report
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, SkipReason::TooLarge { .. }))
+            .map(|s| to_slash(&s.path))
+            .collect();
+        assert_eq!(too_large, ["huge.txt", "big.pth"]);
+    }
+
+    #[test]
+    fn link_targets_are_resolved_as_text_the_way_either_system_reads_them() {
+        let inside = |link, target| resolve_link_text(link, target);
+        assert_eq!(inside("a/link", "b.txt").as_deref(), Some("a/b.txt"));
+        assert_eq!(inside("a/link", "../b.txt").as_deref(), Some("b.txt"));
+        assert_eq!(inside("a/link", "./c/../b").as_deref(), Some("a/b"));
+        // Inside both ways; the path returned is the one for this system.
+        let expected = if cfg!(windows) {
+            "b.txt"
+        } else {
+            "a/..\\b.txt"
+        };
+        assert_eq!(inside("a/link", "..\\b.txt").as_deref(), Some(expected));
+        assert_eq!(inside("link", ".").as_deref(), Some(""));
+        for outside in [
+            "../../x",
+            "/etc/passwd",
+            "\\Windows",
+            "C:\\Windows",
+            "c:relative",
+            "\\\\host.invalid\\share",
+            "\\\\?\\C:\\x",
+            "\\??\\C:\\x",
+            "..\\..\\x",
+        ] {
+            assert_eq!(inside("a/link", outside), None, "{outside}");
+        }
+        assert_eq!(inside("link", ".."), None);
+        // A Unix folder can be named `a\b\c`: read with `/` only, this climbs
+        // out three levels, so it is outside whatever the other reading says.
+        assert_eq!(inside("l2", "a\\b\\c/../../../etc/hostname"), None);
     }
 }
