@@ -97,6 +97,29 @@ Workflow for a new family:
 Fixtures live in `crates/repo-sniff-core/tests/fixtures/<family>/` with
 `positive/` and `negative/` subdirectories.
 
+What the rules must report on them goes in
+`crates/repo-sniff-core/tests/fixtures/<family>.expected.toml`, beside the
+folder (inside it, the file would be scanned like a fixture). The harness in
+`tests/fixture_expectations.rs` scans the folder as one repository with the
+built-in rules and fails on any finding that is not listed, on any listed one
+that is missing, on a positive fixture without a finding and on a negative
+fixture with one, so a new family needs that file and no test code of its own.
+The format is described at the top of the harness:
+
+```toml
+files_scanned = 7                        # optional
+
+[[finding]]
+file     = "positive/commenting_out.c"   # relative to the folder, with /
+line     = 3
+rule     = "deception.bidi-control"
+severity = "critical"
+explanation_contains = "Trojan Source"   # optional
+```
+
+The Python startup families scan each case on its own and keep their
+`expectations.tsv` inside the folder with their own tests.
+
 - **Every rule has both** positive fixtures (must match) and negative
   fixtures (look similar but must not match, e.g. a mention in a comment, an
   escaped form, a legitimate use).
