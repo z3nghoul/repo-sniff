@@ -7,7 +7,7 @@
 # negative/ because they are reported, which negative/ may not be, and are not
 # an attack, which positive/ is.
 
-files_scanned = 13
+files_scanned = 19
 
 [[finding]]
 file = "positive/commenting_out.c"
@@ -84,6 +84,49 @@ explanation_contains = "display unchanged"
 [[finding]]
 file = "unchanged/rtl_helper.js"
 line = 7
+rule = "deception.bidi-control"
+severity = "low"
+explanation_contains = "display unchanged"
+
+[[finding]]
+file = "positive/rtl_base_only.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/line_separator_inside_override.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/next_line_inside_override.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/trailing_space_in_override.py"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/invisible_padding.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/rlm_beside_controls.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "unchanged/lrm_beside_controls.js"
+line = 3
 rule = "deception.bidi-control"
 severity = "low"
 explanation_contains = "display unchanged"

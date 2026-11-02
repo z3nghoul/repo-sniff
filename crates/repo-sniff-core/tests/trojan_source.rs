@@ -43,8 +43,38 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
                 Severity::Critical
             ),
             (
+                "positive/invisible_padding.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
                 "positive/isolate_reorders_call.js".to_string(),
                 2,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/line_separator_inside_override.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/next_line_inside_override.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/rlm_beside_controls.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/rtl_base_only.js".to_string(),
+                3,
                 RULE_ID,
                 Severity::Critical
             ),
@@ -56,6 +86,12 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
             ),
             (
                 "positive/stretched_string.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/trailing_space_in_override.py".to_string(),
                 3,
                 RULE_ID,
                 Severity::Critical
@@ -75,6 +111,12 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
             (
                 "unchanged/arabic_label.py".to_string(),
                 4,
+                RULE_ID,
+                Severity::Low
+            ),
+            (
+                "unchanged/lrm_beside_controls.js".to_string(),
+                3,
                 RULE_ID,
                 Severity::Low
             ),
@@ -105,7 +147,7 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
         ]
     );
     assert_eq!(
-        report.files_scanned, 13,
+        report.files_scanned, 19,
         "every fixture should have been read"
     );
 }
