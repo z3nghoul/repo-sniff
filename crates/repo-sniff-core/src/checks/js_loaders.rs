@@ -1503,6 +1503,11 @@ impl<'a> Flow<'a> {
     }
 
     fn sink_pass(&mut self) {
+        // The earlier passes may have spent their budget; the sinks are always
+        // collected, with a budget of their own, so padding cannot hide one.
+        let exhausted = self.over_budget;
+        self.steps = 0;
+        self.over_budget = false;
         let mut function_vars: HashMap<String, usize> = HashMap::new();
         let mut uncertain: Option<(usize, String)> = None;
         let first_net = (0..self.n()).find_map(|k| self.net_head(k));
@@ -1603,7 +1608,8 @@ impl<'a> Flow<'a> {
                     break;
                 }
                 let Some(name) = self.name(k) else { continue };
-                let Some(&site) = function_vars.get(&*name) else {
+                let key = format!("{name}\u{0}{}", self.resolve(&name, k));
+                let Some(&site) = function_vars.get(&key) else {
                     continue;
                 };
                 if self.prev_dot(k) {
@@ -1654,18 +1660,20 @@ impl<'a> Flow<'a> {
                          calls ({net}); code after that point was not checked, so review it by hand"
                     ),
                 });
-            } else if self.lx.truncated || self.over_budget {
-                self.found.push(Found {
-                    kind: FoundKind::Uncertain,
-                    lowered: false,
-                    start: 0,
-                    end: 0,
-                    reason: format!(
-                        "the file is too large or too complex to follow completely and it makes \
-                         network calls ({net}); review it by hand"
-                    ),
-                });
             }
+        }
+        // A file cut short or too complex to follow is never called clean, with
+        // or without network calls: the sink may be in the part not read.
+        if self.lx.truncated || exhausted || self.over_budget {
+            self.found.push(Found {
+                kind: FoundKind::Uncertain,
+                lowered: false,
+                start: 0,
+                end: 0,
+                reason: "the file is too large or too complex to follow completely, so \
+                         a loader in it may have been missed; review it by hand"
+                    .to_string(),
+            });
         }
     }
 
@@ -1755,7 +1763,8 @@ impl<'a> Flow<'a> {
             && self.punct(before - 1, b'=')
             && let Some(name) = self.name(before - 2)
         {
-            vars.insert(name.into_owned(), i);
+            let scope = self.resolve(&name, before - 2);
+            vars.insert(format!("{name}\u{0}{scope}"), i);
         }
     }
 
@@ -2175,6 +2184,63 @@ mod tests {
             "const c = await fetch('https://a.example.invalid/a.js').then(r => r.text());\neval(c);",
         );
         assert!(!absolute[0].lowered);
+    }
+
+    #[test]
+    fn a_division_is_not_read_as_the_start_of_a_regular_expression() {
+        for body in [
+            "n++ / eval(r.data) / 1;",
+            "n-- / eval(r.data) / 1;",
+            "o.in / eval(r.data) / 1;",
+            "({}) / eval(r.data) / 1;",
+            "x = {} / eval(r.data) / 1;",
+        ] {
+            let text = format!("const r = await fetch('https://a.example.invalid/a');\n{body}");
+            assert_eq!(fetch_eval_count(&text), 1, "{body}");
+        }
+        let division = "a = b / c / d; x = y++ / 2;\neval('1');";
+        assert!(kinds(division).is_empty());
+    }
+
+    #[test]
+    fn padding_cannot_use_up_the_budget_before_a_sink() {
+        let padding = format!("{}1;\n", "z=".repeat(500)).repeat(20);
+        let text = format!("{padding}new Function('require', process.env.X)(require);");
+        let found = kinds(&text);
+        assert!(
+            found
+                .iter()
+                .any(|(k, _)| matches!(k, FoundKind::FunctionRequire | FoundKind::Uncertain)),
+            "{found:?}"
+        );
+        let text = format!(
+            "{}new Function('require', c)(require);",
+            ";\n".repeat(1_600_000)
+        );
+        let found = kinds(&text);
+        assert!(
+            found.iter().any(|(k, _)| *k == FoundKind::Uncertain),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_regular_expression_is_not_retried_at_every_slash() {
+        let text = format!("eval(x);\na = {}", "/\\".repeat(300_000));
+        let started = std::time::Instant::now();
+        let _ = flow(&text);
+        assert!(started.elapsed().as_secs() < 3, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn two_functions_with_the_same_variable_name_are_both_found() {
+        let text = "function a(s){ const h = new Function('require', s); h(require); }\n\
+                    function b(s){ const h = new Function('require', s); h(require); }";
+        let n = kinds(text)
+            .iter()
+            .filter(|(k, _)| *k == FoundKind::FunctionRequire)
+            .count();
+        assert_eq!(n, 2);
     }
 
     #[test]

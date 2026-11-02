@@ -1255,7 +1255,10 @@ fn scan_streamed(
         out.skipped.push(too_large);
     }
     if large_file_rule && !whole_file_rule {
-        match fs::read(&path) {
+        let mut bytes = Vec::new();
+        let read = File::open(&path)
+            .and_then(|file| file.take(LARGE_CHECK_LIMIT + 1).read_to_end(&mut bytes));
+        match read.map(|_| bytes) {
             Ok(bytes) => {
                 let class = classify(slash_path, &bytes);
                 let views = Views::new(&bytes, class.decode);

