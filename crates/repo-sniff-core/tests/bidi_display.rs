@@ -136,38 +136,6 @@ fn a_line_over_the_length_limit_stays_critical_with_the_reason() {
 }
 
 #[test]
-fn the_budget_of_a_scan_is_shared_and_what_is_left_over_is_critical() {
-    // Each line is just under the limit and harmless; 8 MiB of budget pays for
-    // fewer than 150 of them in all, however the files are split.
-    let line = format!("{LRE} {}\n", "a".repeat(60 * 1024));
-    let file = line.repeat(80).into_bytes();
-    let files = [
-        ("a.js", file.clone()),
-        ("b.js", file.clone()),
-        ("c.js", file),
-    ];
-
-    let report = scan_files(&files, Limits::default());
-
-    let in_file = |name: &str, severity: Severity| {
-        bidi(&report)
-            .iter()
-            .filter(|f| f.file == Path::new(name) && f.severity == severity)
-            .count()
-    };
-    // The files are read in sorted order, so a.js is paid for first.
-    assert_eq!(in_file("a.js", Severity::Low), 80);
-    assert_eq!(in_file("a.js", Severity::Critical), 0);
-    assert!(in_file("c.js", Severity::Critical) > 0);
-    let budget_lines: Vec<_> = bidi(&report)
-        .iter()
-        .filter(|f| f.severity == Severity::Critical)
-        .map(|f| f.explanation.contains("budget"))
-        .collect();
-    assert!(!budget_lines.is_empty() && budget_lines.iter().all(|&b| b));
-}
-
-#[test]
 fn a_streamed_file_is_judged_like_one_read_whole() {
     let text = [honest(), deceptive()].join("\n") + "\n";
     let limits = Limits {

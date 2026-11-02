@@ -153,6 +153,18 @@ pub fn scan_with_links(
     limits: Limits,
     links: &HashSet<PathBuf>,
 ) -> Report {
+    scan_with_budget(root, rules, limits, links, bidi::SCAN_BUDGET)
+}
+
+/// `scan_with_links` with the number of bytes of lines the bidi rule may lay
+/// out in the whole scan; tests lower it to reach the end of it cheaply.
+fn scan_with_budget(
+    root: &Path,
+    rules: &[Rule],
+    limits: Limits,
+    links: &HashSet<PathBuf>,
+    bidi_budget: usize,
+) -> Report {
     let walked = walk::walk_with_links(root, limits, links);
 
     // Where files are allowed to be looked up: everything the walk saw,
@@ -255,7 +267,7 @@ pub fn scan_with_links(
         })
         .collect();
     let env = Env {
-        bidi_budget: Cell::new(bidi::SCAN_BUDGET),
+        bidi_budget: Cell::new(bidi_budget),
         index: &index,
         truncated: walked.truncated,
         file_rules: &file_rules,
@@ -3937,6 +3949,59 @@ mod tests {
 
     fn some(text: &str) -> Option<String> {
         Some(text.to_string())
+    }
+
+    #[test]
+    fn the_bidi_budget_is_shared_by_the_files_of_a_scan_in_sorted_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // Each line is 1 KiB and harmless; the budget pays for 5 of them.
+        let line = format!("\u{202A} {}\n", "a".repeat(1019));
+        assert_eq!(line.len(), 1024);
+        for name in ["a.js", "b.js", "c.js"] {
+            write(dir.path(), name, line.repeat(3).as_bytes());
+        }
+        let rules = builtin_rules().unwrap();
+
+        let report = scan_with_budget(
+            dir.path(),
+            &rules,
+            Limits::default(),
+            &HashSet::new(),
+            5 * 1024,
+        );
+
+        let of = |name: &str| -> Vec<(usize, Severity, bool)> {
+            report
+                .findings
+                .iter()
+                .filter(|f| f.rule_id == "deception.bidi-control" && f.file == Path::new(name))
+                .map(|f| (f.line, f.severity, f.explanation.contains("budget")))
+                .collect()
+        };
+        assert_eq!(
+            of("a.js"),
+            [
+                (1, Severity::Low, false),
+                (2, Severity::Low, false),
+                (3, Severity::Low, false)
+            ]
+        );
+        assert_eq!(
+            of("b.js"),
+            [
+                (1, Severity::Low, false),
+                (2, Severity::Low, false),
+                (3, Severity::Critical, true)
+            ]
+        );
+        assert_eq!(
+            of("c.js"),
+            [
+                (1, Severity::Critical, true),
+                (2, Severity::Critical, true),
+                (3, Severity::Critical, true)
+            ]
+        );
     }
 
     #[test]

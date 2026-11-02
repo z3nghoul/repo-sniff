@@ -15,8 +15,6 @@ clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
 
-# The bidi rule lays out lines of up to 64 KiB; unoptimized, its tests take seconds.
+# The bidi rule lays out lines of up to 64 KiB; unoptimized, its tests that do so take seconds.
 [profile.dev.package.unicode-bidi]
 opt-level = 3
-[profile.dev.package.repo-sniff-core]
-opt-level = 1
