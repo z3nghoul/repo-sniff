@@ -48,6 +48,7 @@ pub(crate) enum Reason {
     TooLong,
     LineBreak,
     Budget,
+    InsideToken,
 }
 
 impl Reason {
@@ -58,6 +59,9 @@ impl Reason {
                 "the line holds a character that some viewers show as a line break"
             }
             Reason::Budget => "the budget for laying out lines in this scan is spent",
+            Reason::InsideToken => {
+                "a control sits next to a word or path character, so it can change what a name is"
+            }
         }
     }
 }
@@ -94,6 +98,31 @@ fn breaks_line(c: char) -> bool {
     )
 }
 
+/// Characters that make up a name, a path or a host: a control beside one is
+/// part of that name, invisible, and no layout shows it.
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.' | '/' | '\\' | '-')
+}
+
+/// Whether a control touches a name character, looking past other controls and
+/// the marks U+200E, U+200F and U+061C (`a<LRM><LRE>b` is `a` beside `b`).
+fn control_beside_name(line: &str) -> bool {
+    let skipped = |c: char| is_control(c) || matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}');
+    let chars: Vec<char> = line.chars().collect();
+    chars.iter().enumerate().any(|(at, &c)| {
+        is_control(c)
+            && (chars[..at]
+                .iter()
+                .rev()
+                .find(|&&c| !skipped(c))
+                .is_some_and(|&c| is_name_char(c))
+                || chars[at + 1..]
+                    .iter()
+                    .find(|&&c| !skipped(c))
+                    .is_some_and(|&c| is_name_char(c)))
+    })
+}
+
 /// Judges a line known to hold a control. `budget` is what the scan has left
 /// for laying out lines.
 pub(crate) fn judge(line: &str, budget: &Cell<usize>) -> Verdict {
@@ -103,11 +132,21 @@ pub(crate) fn judge(line: &str, budget: &Cell<usize>) -> Verdict {
     if line.len() > MAX_ANALYZED_LINE {
         return Verdict::NotAnalyzed(Reason::TooLong);
     }
+    // A layout compares the order of what is shown; a control inside a name
+    // changes the name and not the order (`./setup<LRI>.sh` is another file).
+    if control_beside_name(line) {
+        return Verdict::NotAnalyzed(Reason::InsideToken);
+    }
     let Some(left) = budget.get().checked_sub(line.len()) else {
         return Verdict::NotAnalyzed(Reason::Budget);
     };
     budget.set(left);
 
+    compare(line)
+}
+
+/// Lays the line out with and without its controls and compares.
+fn compare(line: &str) -> Verdict {
     let stripped: String = line.chars().filter(|&c| !is_control(c)).collect();
     for direction in [Some(Level::ltr()), None] {
         match (display(line, direction), display(&stripped, direction)) {
@@ -173,6 +212,11 @@ mod tests {
         judge(line, &Cell::new(SCAN_BUDGET))
     }
 
+    /// The layout alone, for lines a name check would catch first.
+    fn laid_out(line: &str) -> Verdict {
+        compare(line)
+    }
+
     #[test]
     fn the_first_control_is_found_by_its_bytes() {
         assert_eq!(first_control("abc"), None);
@@ -202,7 +246,33 @@ mod tests {
     fn a_control_alone_or_with_nothing_to_move_is_unchanged() {
         assert_eq!(judged(&RLO.to_string()), Verdict::Unchanged);
         assert_eq!(judged(&format!("{RLE}{PDF}")), Verdict::Unchanged);
-        assert_eq!(judged(&format!("before{LRE}after")), Verdict::Unchanged);
+        assert_eq!(judged(&format!("= {LRE} {PDF}")), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn a_control_inside_a_name_keeps_the_full_level() {
+        for line in [
+            format!("before{LRE}after"),
+            format!("bash ./setup{RLI}.sh"),
+            format!("require(\"./util{LRE}\")"),
+            format!("if host == \"example.com{PDF}\":"),
+            format!("run(\"a{LRM}{LRE}b\")"),
+            format!("run(\"a{LRE}{LRM}{PDF}b\")"),
+            format!("run(\"a\u{200F}\u{61C}{LRE}\")"),
+            format!("{LRE}name"),
+        ] {
+            assert_eq!(
+                judged(&line),
+                Verdict::NotAnalyzed(Reason::InsideToken),
+                "{line:?}"
+            );
+        }
+        // Quotes, spaces, bars and non-ASCII letters are not name characters.
+        assert_eq!(judged(&format!("a = \"{LRE}\" + b")), Verdict::Unchanged);
+        assert_eq!(
+            judged(&format!("\"{LRE}\u{645}{PDF}\"")),
+            Verdict::Unchanged
+        );
     }
 
     #[test]
@@ -214,7 +284,8 @@ mod tests {
             format!("x = \"{RLO}abc\""),
             format!("name = a{RLO} \u{5D1} "),
         ] {
-            assert_eq!(judged(&line), Verdict::Differs, "{line:?}");
+            assert_eq!(laid_out(&line), Verdict::Differs, "{line:?}");
+            assert_ne!(judged(&line), Verdict::Unchanged, "{line:?}");
         }
     }
 
@@ -231,7 +302,7 @@ mod tests {
             format!("{PDF}{RLI} 1b "),
             format!("\t){RLO} a "),
         ] {
-            assert_eq!(judged(&line), Verdict::Differs, "{line:?}");
+            assert_eq!(laid_out(&line), Verdict::Differs, "{line:?}");
         }
     }
 
@@ -280,7 +351,10 @@ mod tests {
 
     #[test]
     fn a_line_over_the_limit_is_not_laid_out_and_one_at_it_is() {
-        let at = format!("{LRE}{}", "a".repeat(MAX_ANALYZED_LINE - LRE.len_utf8()));
+        let at = format!(
+            "{LRE} {}",
+            "a".repeat(MAX_ANALYZED_LINE - LRE.len_utf8() - 1)
+        );
         assert_eq!(at.len(), MAX_ANALYZED_LINE);
         assert_eq!(judged(&at), Verdict::Unchanged);
         let over = format!("{at}a");
@@ -290,7 +364,7 @@ mod tests {
     #[test]
     fn lines_cost_budget_until_it_is_spent() {
         let budget = Cell::new(100);
-        let line = format!("{LRE}{}", "a".repeat(37)); // 40 bytes
+        let line = format!("{LRE} {}", "a".repeat(36)); // 40 bytes
         assert_eq!(judge(&line, &budget), Verdict::Unchanged);
         assert_eq!(judge(&line, &budget), Verdict::Unchanged);
         assert_eq!(budget.get(), 20);

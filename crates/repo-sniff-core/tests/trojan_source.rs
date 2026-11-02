@@ -37,6 +37,24 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
                 Severity::Critical
             ),
             (
+                "positive/control_after_word_in_string.py".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/control_in_path.sh".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/control_in_require.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
                 "positive/early_return.py".to_string(),
                 3,
                 RULE_ID,
@@ -56,6 +74,12 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
             ),
             (
                 "positive/line_separator_inside_override.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/mark_shields_control.js".to_string(),
                 3,
                 RULE_ID,
                 Severity::Critical
@@ -147,7 +171,7 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
         ]
     );
     assert_eq!(
-        report.files_scanned, 20,
+        report.files_scanned, 24,
         "every fixture should have been read"
     );
 }

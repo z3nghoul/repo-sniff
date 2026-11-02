@@ -7,7 +7,7 @@
 # negative/ because they are reported, which negative/ may not be, and are not
 # an attack, which positive/ is.
 
-files_scanned = 20
+files_scanned = 24
 
 [[finding]]
 file = "positive/commenting_out.c"
@@ -130,3 +130,27 @@ line = 3
 rule = "deception.bidi-control"
 severity = "low"
 explanation_contains = "display unchanged"
+
+[[finding]]
+file = "positive/control_after_word_in_string.py"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/control_in_path.sh"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/control_in_require.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/mark_shields_control.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
