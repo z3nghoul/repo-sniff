@@ -106,21 +106,28 @@ fn is_name_char(c: char) -> bool {
 
 /// Whether a control touches a name character, looking past other controls and
 /// the marks U+200E, U+200F and U+061C (`a<LRM><LRE>b` is `a` beside `b`).
+///
+/// One pass: `after_name` says the last character that is not skipped is a name
+/// character, `waiting` says a control has been seen since then and has not
+/// met its right-hand neighbour yet.
 fn control_beside_name(line: &str) -> bool {
-    let skipped = |c: char| is_control(c) || matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}');
-    let chars: Vec<char> = line.chars().collect();
-    chars.iter().enumerate().any(|(at, &c)| {
-        is_control(c)
-            && (chars[..at]
-                .iter()
-                .rev()
-                .find(|&&c| !skipped(c))
-                .is_some_and(|&c| is_name_char(c))
-                || chars[at + 1..]
-                    .iter()
-                    .find(|&&c| !skipped(c))
-                    .is_some_and(|&c| is_name_char(c)))
-    })
+    let mut after_name = false;
+    let mut waiting = false;
+    for c in line.chars() {
+        if is_control(c) {
+            if after_name {
+                return true;
+            }
+            waiting = true;
+        } else if !matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}') {
+            if waiting && is_name_char(c) {
+                return true;
+            }
+            after_name = is_name_char(c);
+            waiting = false;
+        }
+    }
+    false
 }
 
 /// Judges a line known to hold a control. `budget` is what the scan has left
@@ -247,6 +254,71 @@ mod tests {
         assert_eq!(judged(&RLO.to_string()), Verdict::Unchanged);
         assert_eq!(judged(&format!("{RLE}{PDF}")), Verdict::Unchanged);
         assert_eq!(judged(&format!("= {LRE} {PDF}")), Verdict::Unchanged);
+    }
+
+    /// The definition the one-pass version must agree with: for each control,
+    /// the nearest character on each side that is not skipped.
+    fn control_beside_name_by_definition(line: &str) -> bool {
+        let skipped = |c: char| is_control(c) || matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}');
+        let chars: Vec<char> = line.chars().collect();
+        chars.iter().enumerate().any(|(at, &c)| {
+            is_control(c)
+                && (chars[..at]
+                    .iter()
+                    .rev()
+                    .find(|&&c| !skipped(c))
+                    .is_some_and(|&c| is_name_char(c))
+                    || chars[at + 1..]
+                        .iter()
+                        .find(|&&c| !skipped(c))
+                        .is_some_and(|&c| is_name_char(c)))
+        })
+    }
+
+    #[test]
+    fn the_one_pass_name_check_agrees_with_its_definition_on_every_short_line() {
+        let alphabet = ['a', '.', ' ', '"', LRE, PDF, LRM, '\u{61C}', '\u{5D0}'];
+        let mut line = String::new();
+        fn walk(alphabet: &[char], line: &mut String, left: usize) {
+            assert_eq!(
+                control_beside_name(line),
+                control_beside_name_by_definition(line),
+                "{line:?}"
+            );
+            if left == 0 {
+                return;
+            }
+            for &c in alphabet {
+                line.push(c);
+                walk(alphabet, line, left - 1);
+                line.pop();
+            }
+        }
+        walk(&alphabet, &mut line, 6);
+    }
+
+    /// Time of the fastest of a few runs of `judge` on a line of `pairs` pairs
+    /// of a control and a mark, which no name check can stop early.
+    fn fastest_judge(pairs: usize) -> std::time::Duration {
+        let line = format!("{LRE}{LRM}").repeat(pairs);
+        (0..5)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                assert_eq!(judged(&line), Verdict::Unchanged);
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    }
+
+    #[test]
+    fn judging_a_line_of_controls_and_marks_scales_with_its_length() {
+        // A pair is 5 bytes: 2 500 and 10 000 pairs are 12.5 KB and 50 KB, both under
+        // the limit. Four times the line must
+        // not cost 16 times as much, which a quadratic check would.
+        let small = fastest_judge(2_500).as_secs_f64();
+        let large = fastest_judge(10_000).as_secs_f64();
+        assert!(large / small < 8.0, "{small} s then {large} s");
     }
 
     #[test]
