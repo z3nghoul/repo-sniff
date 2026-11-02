@@ -200,6 +200,8 @@ fn credentials_in_the_target_never_reach_stdout_or_stderr() {
             stderr.contains("git clone of https://***@example.invalid/owner/repo"),
             "{stderr}"
         );
+        // A name that does not resolve is not a credentials failure.
+        assert!(!stderr.contains("private or does not exist"), "{stderr}");
     }
 }
 
