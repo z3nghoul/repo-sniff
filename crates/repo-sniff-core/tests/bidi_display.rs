@@ -3,7 +3,6 @@
 //! cannot be known. Cases generated here; the fixture folder holds the rest.
 
 use std::fs;
-use std::path::Path;
 
 use repo_sniff_core::{Finding, Limits, Report, Severity, builtin_rules, scan};
 
