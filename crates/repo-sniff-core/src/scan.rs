@@ -214,6 +214,9 @@ fn scan_with_budget(
     // The `package.json` files, for the npm check to follow a script into
     // another manifest of the repository.
     let index = index.with_manifests(read_manifests(root, &walked.files, &link_paths));
+    // The files those scripts start, for the loader rules.
+    let run_files = crate::checks::npm_scripts::started_files(&index);
+    let index = index.with_run_files(run_files);
     // Links recorded by the caller whose files are scanned as content too.
     let recorded_links: HashSet<PathBuf> = walked
         .files

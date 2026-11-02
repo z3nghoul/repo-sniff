@@ -12,3 +12,32 @@ example     = 'lib/run.js:3 calls eval(atob(blob))'
 files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
 # A padded file past 5 MiB must not hide a loader, so a large file is read whole.
 reads_large_files = true
+
+[[rule]]
+id          = "obfuscation.obfuscator-io"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+# Baseline for source. The check raises it to critical when a tool runs the file
+# (a configuration file such as next.config.js, or a file an npm script starts)
+# and lowers it to medium in folders for built bundles.
+severity    = "high"
+attack      = ["T1027.013"]
+description = "A JavaScript file looks like the output of the obfuscator.io tool: many _0x names with a string array that a loop rotates. Honest source is not written this way, and when a tool runs the file the obfuscated code runs on every build or start"
+example     = 'next.config.js:1 has 3000 _0x names and a while(!![]) loop'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true
+
+[[rule]]
+id          = "obfuscation.minified-source"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+severity    = "medium"
+attack      = ["T1027"]
+description = "A JavaScript file has a line of 2000 or more characters of code with almost no whitespace. Source that people review is not written that way; minified code in a source folder can hold anything. Where built bundles belong (dist, build, public, vendor, *.min.js) the level is INFO, because that folder name is chosen by the repository"
+example     = 'src/lib/bundle.js:2 is 2656 characters long'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true

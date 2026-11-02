@@ -18,6 +18,7 @@
 
 pub mod js_lex;
 pub mod js_loaders;
+pub mod js_shape;
 pub mod npm_scripts;
 mod pylines;
 pub mod python_pth;
@@ -286,6 +287,8 @@ pub struct RepoIndex {
     /// `with_manifests`), by path, so a check can follow `cd a && npm install`
     /// into another manifest without touching the disk.
     manifests: HashMap<String, Vec<u8>>,
+    /// Files that a script of some `package.json` starts with `node`.
+    run_files: HashSet<String>,
 }
 
 impl RepoIndex {
@@ -310,6 +313,24 @@ impl RepoIndex {
     pub fn with_manifests(mut self, manifests: HashMap<String, Vec<u8>>) -> Self {
         self.manifests = manifests;
         self
+    }
+
+    /// Records the files that npm scripts start (see
+    /// `npm_scripts::started_files`).
+    pub fn with_run_files(mut self, files: HashSet<String>) -> Self {
+        self.run_files = files;
+        self
+    }
+
+    /// Whether a script of some `package.json` in the repository starts this
+    /// file with `node` or a similar program.
+    pub fn runs_file(&self, path: &str) -> bool {
+        self.run_files.contains(path)
+    }
+
+    /// The paths of the `package.json` files the scan read.
+    pub(crate) fn manifest_paths(&self) -> impl Iterator<Item = &String> {
+        self.manifests.keys()
     }
 
     /// The bytes of the `package.json` at this exact path, if the scan read it
@@ -366,6 +387,8 @@ const FILE_CHECKS: &[(&str, Check)] = &[
         "obfuscation.encoded-payload-sink",
         js_loaders::encoded_payload,
     ),
+    ("obfuscation.obfuscator-io", js_shape::obfuscator),
+    ("obfuscation.minified-source", js_shape::minified),
     ("deps.python-pth-exec", python_pth::check),
     ("deps.python-start-entrypoint", python_start::check),
 ];
