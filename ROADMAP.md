@@ -50,7 +50,7 @@ architecture early.
 - [x] Plain-text report showing severity, stage and ATT&CK ID per finding
 - [x] Report text from the scanned repository (file names, task labels) is cleaned of control, bidi and zero-width characters; paths are relative with `/` on every OS
 - [x] `--fail-on <severity>` sets the exit-code threshold (default: high) instead of a hard-coded one
-- [x] Rule: Trojan Source bidi characters
+- [x] Rule: Trojan Source bidi characters; a control that changes nothing about how the line is displayed is LOW, not CRITICAL ([#89](https://github.com/z3nghoul/repo-sniff/issues/89))
 - [x] Rule: `.vscode/tasks.json` / `*.code-workspace` with `runOn: folderOpen`: JSONC parser, `engine` field, `jsonc` checks
 - [x] End-to-end snapshot test with `insta`
 - [x] `--ref` option to scan a branch or tag
