@@ -141,6 +141,13 @@ static POWERSHELL_ENC: LazyLock<Regex> = LazyLock::new(|| {
         r#"\b(?:powershell|pwsh|powershell_ise)(?:\.exe)?\b.*?\s[-/]e(?:c|nc?o?d?e?d?c?o?m?m?a?n?d?)?\s+["']?[a-z0-9+/=]{40,}"#,
     )
 });
+/// The same switch, but the operand is a variable or an expansion, not text: the
+/// check cannot read what runs.
+static POWERSHELL_ENC_VARIABLE: LazyLock<Regex> = LazyLock::new(|| {
+    rx(
+        r#"\b(?:powershell|pwsh|powershell_ise)(?:\.exe)?\b.*?\s[-/]e(?:c|nc?o?d?e?d?c?o?m?m?a?n?d?)?\s+["']?[%$(@]"#,
+    )
+});
 static HIDDEN_WINDOW: LazyLock<Regex> = LazyLock::new(|| {
     rx(
         r"\s[-/]w(?:i|in|ind|indo|indow|indows|indowst|indowsty|indowstyl|indowstyle)?\s+h(?:i|id|idd|idde|idden)?\b",
@@ -535,6 +542,14 @@ fn judge(logical: &Logical, found: &mut Vec<WinFound>) {
             )
         };
         push(found, logical, WinKind::Encoded, severity, why);
+    } else if POWERSHELL_ENC_VARIABLE.is_match(text) {
+        push(
+            found,
+            logical,
+            WinKind::Encoded,
+            Severity::Medium,
+            "powershell -EncodedCommand is given a variable or an expansion, so the command that runs cannot be read in the file; review it by hand",
+        );
     }
     if CERTUTIL_DECODE.is_match(text) {
         push(
@@ -722,6 +737,21 @@ mod tests {
         assert!(ps("powershell -e hello").is_empty());
         assert!(ps(&format!("powershell -ExecutionPolicy Bypass -File {B64}")).is_empty());
         assert!(ps(&format!("echo -enc {B64}")).is_empty());
+    }
+
+    #[test]
+    fn an_encoded_command_with_a_variable_operand_is_reviewed_by_hand() {
+        for line in [
+            "powershell -enc $payload",
+            "powershell.exe -EncodedCommand %PAYLOAD%",
+            "pwsh -e (Get-Content a.txt)",
+        ] {
+            assert_eq!(
+                ps(line),
+                [(WinKind::Encoded, Severity::Medium, 1)],
+                "{line}"
+            );
+        }
     }
 
     #[test]

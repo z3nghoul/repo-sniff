@@ -389,6 +389,13 @@ severity = "high"
 explanation_contains = 'Exclusion'
 
 [[finding]]
+file = "positive/windows/loader.ps1"
+line = 7
+rule = "obfuscation.windows-encoded-payload"
+severity = "medium"
+explanation_contains = 'review it by hand'
+
+[[finding]]
 file = "positive/windows/lolbins.cmd"
 line = 1
 rule = "repo.windows-script"
