@@ -16,6 +16,7 @@
 //! large instead, and a link whose target is not a regular file in the
 //! repository as unreadable; both make the scan inconclusive.
 
+pub mod js_lex;
 pub mod npm_scripts;
 mod pylines;
 pub mod python_pth;
