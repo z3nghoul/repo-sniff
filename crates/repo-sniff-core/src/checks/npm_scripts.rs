@@ -247,7 +247,6 @@ const QUIET: &[&str] = &[
     "mv", "ls", "touch", "set", "export", "unset", "printf", "cat", "chmod", "ln", "type", "del",
     "copy", "move", "rd", "md", "fi", "done", "for", "esac", "case", "rem", "title", "pause",
     "cls", "clear", "which", "where", "date", "sleep", "read", "shift", "umask", "ulimit", "wait",
-    "trap",
 ];
 
 /// Wrappers that run the rest of the command line.
@@ -987,6 +986,16 @@ impl<'a> Resolver<'a> {
             let child = self.script(dir, &variant, depth, stack);
             out.absorb(child, &format!("script \"{variant}\""));
         }
+        if name == "restart"
+            && let Some(manifest) = self.manifest(dir)
+            && !manifest.scripts.contains_key("restart")
+        {
+            // Without a restart script npm runs stop and then start.
+            for part in ["stop", "start"] {
+                let child = self.run_named(dir, part, depth + 1, stack);
+                out.absorb(child, &format!("script \"{part}\""));
+            }
+        }
         if out.sev.is_none()
             && name == "start"
             && let Some(manifest) = self.manifest(dir)
@@ -1072,6 +1081,14 @@ impl<'a> Resolver<'a> {
             self.command(&mut cwd, words, depth, stack, &mut out);
         }
         for sub in subs {
+            if sub.split_whitespace().any(|word| word == "case") {
+                // `case a in a) cmd;; esac` has a `)` the substitution scan
+                // takes for its end, so the text cannot be split reliably.
+                out.raise(
+                    Severity::High,
+                    "a command substitution with a case statement, which is not read".to_string(),
+                );
+            }
             let child = self.text(&cwd, &sub, depth + 1, stack);
             out.absorb(child, "a command substitution");
         }
@@ -1219,6 +1236,13 @@ impl<'a> Resolver<'a> {
             "cmd" => self.cmd(cwd, args, depth, stack, out),
             "powershell" | "pwsh" | "powershell_ise" => {
                 self.powershell(cwd, args, depth, stack, out);
+            }
+            "trap" => {
+                // `trap 'cmd' EXIT`: the first argument is a command line.
+                if let Some(text) = args.iter().find(|a| !a.starts_with('-')) {
+                    let child = self.text(cwd, text, depth + 1, stack);
+                    out.absorb(child, "a trap handler");
+                }
             }
             "eval" | "base64" | "source" | "." => out.raise(
                 Severity::High,
@@ -1491,6 +1515,14 @@ impl<'a> Resolver<'a> {
                 self.inline(&format!("{name} {arg}"), code, out);
                 return;
             }
+            if let Some(code) = arg.strip_prefix(inline_flag)
+                && !code.starts_with('-')
+                && !code.is_empty()
+            {
+                // The code glued to the flag: `python -c'import x'`.
+                self.inline(&format!("{name} {inline_flag}"), code, out);
+                return;
+            }
             if arg == "-m" {
                 let module = args.get(i + 1).map_or("", String::as_str);
                 if matches!(
@@ -1748,6 +1780,12 @@ impl<'a> Resolver<'a> {
                             .and_then(|v| resolve(cwd, &v))
                             .unwrap_or_else(|| "?outside".to_string());
                     }
+                    "--script-shell" => {
+                        // npm runs every script through this program.
+                        if let Some(path) = value.as_deref().and_then(|v| resolve(cwd, v)) {
+                            self.local_file(&path, out, false);
+                        }
+                    }
                     "--ignore-scripts" => ignore_scripts = value.as_deref() != Some("false"),
                     "-g" | "--global" => global = true,
                     "--workspace" | "-w" | "--workspaces" | "-ws" | "--filter" | "-F" | "-r"
@@ -1928,6 +1966,10 @@ impl<'a> Resolver<'a> {
             _ => spec.as_str(),
         };
         let bare = tool_name(without_version);
+        if let Some(path) = self.committed_bin(dir, &bare) {
+            self.local_file(&path, out, false);
+            return;
+        }
         if FRONTEND.contains(&bare.as_str()) && out.frontend.is_none() {
             out.frontend = Some(bare.clone());
         }
@@ -2739,6 +2781,44 @@ mod tests {
     fn a_committed_bin_file_beats_the_honest_name() {
         let repo = RepoIndex::new(["package.json", "node_modules/.bin/husky"]);
         let text = r#"{"scripts": {"postinstall": "husky install"}}"#;
+        let views = Views::new(text.as_bytes(), Decode::Utf8WithoutNuls);
+        let hits = lifecycle_hook(&Ctx::new(
+            "package.json",
+            None,
+            &repo,
+            false,
+            Severity::Low,
+            &views,
+        ));
+        assert_eq!(hits[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn forms_found_in_the_second_review_are_not_missed() {
+        for script in [
+            "echo $(case a in a) node -e x;; esac)",
+            "trap 'node -e x' EXIT",
+            "python3 -c'import urllib.request'",
+            "node -e'1'",
+        ] {
+            let text = format!(
+                "{{\"scripts\": {{\"postinstall\": {}}}}}",
+                serde_like(script)
+            );
+            let hits = run(lifecycle_hook, "package.json", &text, &[]);
+            assert!(
+                hits.iter().map(|h| h.severity).max() >= Some(Severity::High),
+                "{script}"
+            );
+        }
+        let text = r#"{"scripts": {"postinstall": "npm restart", "start": "node setup.js"}}"#;
+        let hits = run(lifecycle_hook, "package.json", text, &["setup.js"]);
+        assert_eq!(hits[0].severity, Severity::Medium);
+        let text = r#"{"scripts": {"postinstall": "npm run noop --script-shell=./setup.sh"}}"#;
+        let hits = run(lifecycle_hook, "package.json", text, &["setup.sh"]);
+        assert_eq!(hits[0].severity, Severity::Medium);
+        let repo = RepoIndex::new(["package.json", "node_modules/.bin/husky"]);
+        let text = r#"{"scripts": {"prepare": "npx husky"}}"#;
         let views = Views::new(text.as_bytes(), Decode::Utf8WithoutNuls);
         let hits = lifecycle_hook(&Ctx::new(
             "package.json",
