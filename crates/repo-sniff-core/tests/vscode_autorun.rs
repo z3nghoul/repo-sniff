@@ -152,14 +152,16 @@ fn a_tasks_file_the_jsonc_rule_cannot_read_whole_is_listed_not_judged() {
     assert_eq!(reasons(&report), [SkipReason::TooLarge { size }]);
     assert!(!report.is_complete());
 
-    // An executable under that name: never parsed or counted, listed as an
+    // An executable under that name: never parsed, listed as an
     // executable, and reported as one disguised as a JSON file.
     let mut elf = b"\x7fELF\x02\x01\x01\0".to_vec();
     elf.extend_from_slice(autorun);
     let report = scan_tasks(&elf, Limits::default());
     let rules: Vec<_> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
     assert_eq!(rules, ["repo.disguised-executable"]);
-    assert_eq!(report.files_scanned, 0);
+    // Never parsed as JSON; but the Windows loader rules read the bytes of any
+    // file under this name, and a binary that a file rule examined counts.
+    assert_eq!(report.files_scanned, 1);
     assert_eq!(
         reasons(&report),
         [SkipReason::Executable {

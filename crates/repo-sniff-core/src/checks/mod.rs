@@ -301,6 +301,9 @@ pub struct RepoIndex {
     manifests: HashMap<String, Vec<u8>>,
     /// Files that a script of some `package.json` starts with `node`.
     run_files: HashSet<String>,
+    /// For some of those files, the worst finding a loader rule has for it,
+    /// with the rule's id (see `scan::loader_levels`).
+    loader_levels: HashMap<String, (Severity, String)>,
 }
 
 impl RepoIndex {
@@ -332,6 +335,28 @@ impl RepoIndex {
     pub fn with_run_files(mut self, files: HashSet<String>) -> Self {
         self.run_files = files;
         self
+    }
+
+    /// The files that scripts start, sorted so that a scan is repeatable.
+    pub(crate) fn run_file_paths(&self) -> Vec<&String> {
+        let mut paths: Vec<&String> = self.run_files.iter().collect();
+        paths.sort();
+        paths
+    }
+
+    /// Records the worst loader finding of the files npm scripts start.
+    pub fn with_loader_levels(mut self, levels: HashMap<String, (Severity, String)>) -> Self {
+        self.loader_levels = levels;
+        self
+    }
+
+    /// The worst loader finding of a file that an npm script starts, and the
+    /// id of the rule that reported it. `None` for a file without one, and for
+    /// a file the scan did not look at beforehand.
+    pub fn loader_level(&self, path: &str) -> Option<(Severity, &str)> {
+        self.loader_levels
+            .get(path)
+            .map(|(severity, rule)| (*severity, rule.as_str()))
     }
 
     /// Whether a script of some `package.json` in the repository starts this

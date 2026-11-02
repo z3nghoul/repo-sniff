@@ -217,6 +217,10 @@ fn scan_with_budget(
     // The files those scripts start, for the loader rules.
     let run_files = crate::checks::npm_scripts::started_files(&index);
     let index = index.with_run_files(run_files);
+    // What the loader rules say about those files, so that a script which runs
+    // one is judged by it (the other direction of the same fact).
+    let levels = loader_levels(root, rules, &index, &limits, &link_paths);
+    let index = index.with_loader_levels(levels);
     // Links recorded by the caller whose files are scanned as content too.
     let recorded_links: HashSet<PathBuf> = walked
         .files
@@ -594,6 +598,66 @@ fn scan_with_budget(
     }
     report.duration = started.elapsed();
     report
+}
+
+/// The family whose findings on a file that a script starts raise the finding
+/// of the script.
+const LOADER_FAMILY: &str = "loader-signatures";
+
+/// Runs the loader rules on each file an npm script starts, before the scan
+/// proper, and returns the worst level per file. Only regular files within the
+/// buffered size are looked at; the scan itself reads the rest.
+fn loader_levels(
+    root: &Path,
+    rules: &[Rule],
+    index: &RepoIndex,
+    limits: &Limits,
+    links: &HashSet<&PathBuf>,
+) -> HashMap<String, (Severity, String)> {
+    let loader_rules: Vec<(&Rule, Check)> = rules
+        .iter()
+        .filter(|rule| rule.family == LOADER_FAMILY)
+        .filter_map(|rule| match rule.matcher {
+            Matcher::File(check) => Some((rule, check)),
+            _ => None,
+        })
+        .collect();
+    let mut levels = HashMap::new();
+    if loader_rules.is_empty() {
+        return levels;
+    }
+    for path in index.run_file_paths() {
+        if !index.contains_path(path)
+            || links.contains(&PathBuf::from(path))
+            || !loader_rules.iter().any(|(rule, _)| rule.applies_to(path))
+        {
+            continue;
+        }
+        let full = root.join(path);
+        let size = fs::metadata(&full).map_or(u64::MAX, |metadata| metadata.len());
+        if size > limits.max_buffered_size {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&full) else {
+            continue;
+        };
+        let views = Views::new(&bytes, classify(path, &bytes).decode);
+        for (rule, check) in &loader_rules {
+            if !rule.applies_to(path) {
+                continue;
+            }
+            let ctx = Ctx::new(path, None, index, false, rule.severity, &views);
+            for hit in check(&ctx) {
+                let worse = levels
+                    .get(path.as_str())
+                    .is_none_or(|(known, _): &(Severity, String)| hit.severity > *known);
+                if worse {
+                    levels.insert(path.clone(), (hit.severity, rule.id.clone()));
+                }
+            }
+        }
+    }
+    levels
 }
 
 /// A `package.json` larger than this is not kept for other checks to follow.

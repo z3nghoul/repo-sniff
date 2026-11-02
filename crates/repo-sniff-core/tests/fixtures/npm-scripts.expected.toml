@@ -489,6 +489,13 @@ severity = "critical"
 
 [[finding]]
 file = "positive/network-forms/package.json"
+line = 7
+rule = "run.windows-remote-code"
+severity = "critical"
+explanation_contains = 'IEX'
+
+[[finding]]
+file = "positive/network-forms/package.json"
 line = 8
 rule = "deps.npm-lifecycle-hook"
 severity = "critical"

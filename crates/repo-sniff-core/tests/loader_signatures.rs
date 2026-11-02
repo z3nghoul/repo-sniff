@@ -165,3 +165,80 @@ fn only_the_scripts_of_a_package_json_are_read() {
         [("package.json".to_string(), 2, Severity::Critical)]
     );
 }
+
+fn rule_level(report: &Report, rule: &str, file: &str) -> Option<Severity> {
+    report
+        .findings
+        .iter()
+        .find(|f| f.rule_id == rule && f.file.to_string_lossy() == file)
+        .map(|f| f.severity)
+}
+
+#[test]
+fn a_hook_that_runs_a_loader_is_as_bad_as_the_loader() {
+    let manifest = br#"{"scripts": {"postinstall": "node setup.js"}}"#.to_vec();
+    let report = scan_files(
+        &[
+            ("package.json", manifest),
+            ("setup.js", LOADER.as_bytes().to_vec()),
+        ],
+        Limits::default(),
+    );
+
+    assert_eq!(
+        rule_level(&report, "deps.npm-lifecycle-hook", "package.json"),
+        Some(Severity::Critical)
+    );
+    let hook = report
+        .findings
+        .iter()
+        .find(|f| f.rule_id == "deps.npm-lifecycle-hook")
+        .unwrap();
+    assert!(
+        hook.explanation.contains("setup.js"),
+        "{}",
+        hook.explanation
+    );
+}
+
+#[test]
+fn a_minified_file_that_a_hook_starts_is_not_info_and_the_hook_follows_it() {
+    let manifest = br#"{"scripts": {"postinstall": "node dist/setup.js"}}"#.to_vec();
+    let minified = "function f(a){if(a>1){return a-1;}return a+1;}".repeat(60);
+    let report = scan_files(
+        &[
+            ("package.json", manifest),
+            ("dist/setup.js", format!("{minified}\n").into_bytes()),
+        ],
+        Limits::default(),
+    );
+
+    // The file is started by the script, so the minified line is HIGH, not
+    // INFO: a tool runs it. The hook follows it.
+    assert_eq!(
+        rule_level(&report, "obfuscation.minified-source", "dist/setup.js"),
+        Some(Severity::High)
+    );
+    assert_eq!(
+        rule_level(&report, "deps.npm-lifecycle-hook", "package.json"),
+        Some(Severity::High)
+    );
+}
+
+#[test]
+fn a_pack_hook_is_raised_one_level_less() {
+    let manifest = br#"{"scripts": {"prepack": "node setup.js"}}"#.to_vec();
+    let report = scan_files(
+        &[
+            ("package.json", manifest),
+            ("setup.js", LOADER.as_bytes().to_vec()),
+        ],
+        Limits::default(),
+    );
+
+    // npm runs a prepack hook on pack and publish, not on install.
+    assert_eq!(
+        rule_level(&report, "deps.npm-lifecycle-hook", "package.json"),
+        Some(Severity::High)
+    );
+}

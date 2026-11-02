@@ -2491,6 +2491,13 @@ pub fn lifecycle_hook(ctx: &Ctx<'_>) -> Vec<Hit> {
                 pack_hook_when(&name)
             )
         };
+        let sev = match loader_in_files(ctx, &outcome.node_files) {
+            Some((level, note)) => {
+                reason.push_str(&note);
+                sev.max(if install_time { level } else { demote(level) })
+            }
+            None => sev,
+        };
         if outcome.cycle {
             reason.push_str("; the chain contains a cycle of scripts that call each other");
         }
@@ -2604,6 +2611,28 @@ pub fn started_files(repo: &RepoIndex) -> HashSet<String> {
     files
 }
 
+/// The worst loader finding in the files a script starts, with the sentence
+/// that says so. A loader finding of MEDIUM or more in such a file raises the
+/// finding of the script to that level: the script is how the file runs.
+fn loader_in_files(ctx: &Ctx<'_>, files: &[String]) -> Option<(Severity, String)> {
+    let (file, level, rule) = files
+        .iter()
+        .filter_map(|file| {
+            ctx.repo
+                .loader_level(file)
+                .filter(|(level, _)| *level >= Severity::Medium)
+                .map(|(level, rule)| (file, level, rule))
+        })
+        .max_by_key(|(_, level, _)| *level)?;
+    Some((
+        level,
+        format!(
+            "; the file {} has a loader finding ({rule}, {level}), so the script runs it",
+            short(file)
+        ),
+    ))
+}
+
 /// Rule `run.npm-script-local-server`.
 pub fn run_script(ctx: &Ctx<'_>) -> Vec<Hit> {
     let mut hits = Vec::new();
@@ -2664,6 +2693,10 @@ pub fn run_script(ctx: &Ctx<'_>) -> Vec<Hit> {
         let mut severity = ctx.base;
         let mut reasons = Vec::new();
         reasons.extend(combination);
+        if let Some((level, note)) = loader_in_files(ctx, &outcome.node_files) {
+            severity = severity.max(level);
+            reasons.push(note.trim_start_matches("; ").to_string());
+        }
         if let Some(why) = problem {
             severity = severity.max(Severity::Medium);
             reasons.push(format!(
