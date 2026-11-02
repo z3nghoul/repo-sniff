@@ -1,8 +1,13 @@
 # What the built-in rules report when trojan-source/ is scanned as one
 # repository. Read by tests/fixture_expectations.rs; a finding not listed here
 # fails the test, so every file under negative/ must stay unreported.
+#
+# unchanged/ holds lines that carry bidi controls but are displayed the same
+# with and without them: LOW, not CRITICAL. They sit beside positive/ and
+# negative/ because they are reported, which negative/ may not be, and are not
+# an attack, which positive/ is.
 
-files_scanned = 7
+files_scanned = 13
 
 [[finding]]
 file = "positive/commenting_out.c"
@@ -22,3 +27,63 @@ file = "positive/stretched_string.js"
 line = 3
 rule = "deception.bidi-control"
 severity = "critical"
+
+[[finding]]
+file = "positive/isolate_reorders_call.js"
+line = 2
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/rtl_helper_longer.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/unclosed_embedding.js"
+line = 2
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "unchanged/arabic_label.py"
+line = 3
+rule = "deception.bidi-control"
+severity = "low"
+explanation_contains = "display unchanged"
+
+[[finding]]
+file = "unchanged/arabic_label.py"
+line = 4
+rule = "deception.bidi-control"
+severity = "low"
+explanation_contains = "display unchanged"
+
+[[finding]]
+file = "unchanged/rtl_helper.js"
+line = 3
+rule = "deception.bidi-control"
+severity = "low"
+explanation_contains = "display unchanged"
+
+[[finding]]
+file = "unchanged/rtl_helper.js"
+line = 5
+rule = "deception.bidi-control"
+severity = "low"
+explanation_contains = "display unchanged"
+
+[[finding]]
+file = "unchanged/rtl_helper.js"
+line = 6
+rule = "deception.bidi-control"
+severity = "low"
+explanation_contains = "display unchanged"
+
+[[finding]]
+file = "unchanged/rtl_helper.js"
+line = 7
+rule = "deception.bidi-control"
+severity = "low"
+explanation_contains = "display unchanged"

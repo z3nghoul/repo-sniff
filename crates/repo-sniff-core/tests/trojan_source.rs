@@ -17,7 +17,7 @@ fn slash(path: &Path) -> String {
 }
 
 #[test]
-fn only_the_positive_fixtures_are_flagged() {
+fn only_the_positive_and_unchanged_fixtures_are_flagged() {
     let rules = builtin_rules().unwrap();
 
     let report = scan(&fixtures(), &rules, Limits::default());
@@ -43,15 +43,69 @@ fn only_the_positive_fixtures_are_flagged() {
                 Severity::Critical
             ),
             (
+                "positive/isolate_reorders_call.js".to_string(),
+                2,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "positive/rtl_helper_longer.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
                 "positive/stretched_string.js".to_string(),
                 3,
                 RULE_ID,
                 Severity::Critical
             ),
+            (
+                "positive/unclosed_embedding.js".to_string(),
+                2,
+                RULE_ID,
+                Severity::Critical
+            ),
+            (
+                "unchanged/arabic_label.py".to_string(),
+                3,
+                RULE_ID,
+                Severity::Low
+            ),
+            (
+                "unchanged/arabic_label.py".to_string(),
+                4,
+                RULE_ID,
+                Severity::Low
+            ),
+            (
+                "unchanged/rtl_helper.js".to_string(),
+                3,
+                RULE_ID,
+                Severity::Low
+            ),
+            (
+                "unchanged/rtl_helper.js".to_string(),
+                5,
+                RULE_ID,
+                Severity::Low
+            ),
+            (
+                "unchanged/rtl_helper.js".to_string(),
+                6,
+                RULE_ID,
+                Severity::Low
+            ),
+            (
+                "unchanged/rtl_helper.js".to_string(),
+                7,
+                RULE_ID,
+                Severity::Low
+            ),
         ]
     );
     assert_eq!(
-        report.files_scanned, 7,
+        report.files_scanned, 13,
         "every fixture should have been read"
     );
 }
