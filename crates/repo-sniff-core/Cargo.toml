@@ -13,6 +13,8 @@ regex = "1.13.1"
 serde.workspace = true
 thiserror = "2.0.21"
 toml = "1.1.8"
+# Exact: the Unicode tables it carries decide what the bidi rule calls unchanged.
+unicode-bidi = { version = "=0.3.18", default-features = false, features = ["std", "hardcoded-data"] }
 
 [dev-dependencies]
 tempfile.workspace = true
