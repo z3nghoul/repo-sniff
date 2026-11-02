@@ -1,0 +1,389 @@
+# What the built-in rules report when loader-signatures/ is scanned as one
+# repository. Read by tests/fixture_expectations.rs; a finding not listed here
+# fails the test, so every file under negative/ must stay unreported.
+# The marker is line 1 of a script or the `//` key of a package.json (line 2).
+#
+# Levels that need a reason, in the order of the fixtures:
+# - fetch-eval and function-require are CRITICAL; a call the check cannot follow
+#   (a computed name on the global object) and a file it cannot read to the end
+#   (an unterminated template) are MEDIUM and say "review it by hand".
+# - obfuscator.io output is CRITICAL when a tool runs the file (a configuration
+#   file such as next.config.js or .eslintrc.js, or a file an npm script starts),
+#   HIGH in other source and MEDIUM under dist/, build/ or public/.
+# - a minified line in source is MEDIUM; under dist/ it is INFO, not silence.
+# - the Windows lines are judged by the rules in the issue; the .bat, .cmd, .ps1,
+#   .vbs, .wsf and .hta findings of repo.windows-script and repo.windows-dropper
+#   are the ones that already existed.
+
+files_scanned = 45
+unflagged = ["positive/obfuscator/npm-start/package.json"]
+
+[[finding]]
+file = "positive/encoded/eval-atob/atob.js"
+line = 3
+rule = "obfuscation.encoded-payload-sink"
+severity = "high"
+
+[[finding]]
+file = "positive/encoded/exec-base64/exec.js"
+line = 4
+rule = "obfuscation.encoded-payload-sink"
+severity = "high"
+
+[[finding]]
+file = "positive/encoded/hex-function/hex.js"
+line = 2
+rule = "obfuscation.encoded-payload-sink"
+severity = "high"
+
+[[finding]]
+file = "positive/failclosed/computed-callee/call.js"
+line = 5
+rule = "run.js-fetch-eval"
+severity = "medium"
+explanation_contains = 'review it by hand'
+
+[[finding]]
+file = "positive/failclosed/unterminated-template/broken.js"
+line = 5
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/failclosed/unterminated-template/broken.js"
+line = 8
+rule = "run.js-fetch-eval"
+severity = "medium"
+explanation_contains = 'review it by hand'
+
+[[finding]]
+file = "positive/fetch-eval/catch-eval/server/config/getContract.js"
+line = 10
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/constructor-chain/chain.js"
+line = 5
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/controller-await/server/controllers/userController.js"
+line = 7
+rule = "run.js-fetch-eval"
+severity = "critical"
+explanation_contains = 'axios'
+
+[[finding]]
+file = "positive/fetch-eval/controller-await/server/controllers/userController.js"
+line = 8
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/function-forms/forms.js"
+line = 7
+rule = "run.js-fetch-eval"
+severity = "critical"
+explanation_contains = 'Function'
+
+[[finding]]
+file = "positive/fetch-eval/function-forms/forms.js"
+line = 13
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/function-forms/forms.js"
+line = 23
+rule = "run.js-fetch-eval"
+severity = "critical"
+explanation_contains = 'vm.'
+
+[[finding]]
+file = "positive/fetch-eval/indirect/indirect.js"
+line = 6
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/indirect/indirect.js"
+line = 7
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/indirect/indirect.js"
+line = 8
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/indirect/indirect.js"
+line = 9
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/then-eval/lib/remote.js"
+line = 5
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/try-eval/backend/controller.js"
+line = 8
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/function-require/direct.js"
+line = 2
+rule = "run.js-function-require"
+severity = "critical"
+
+[[finding]]
+file = "positive/function-require/loader.js"
+line = 3
+rule = "run.js-function-require"
+severity = "critical"
+explanation_contains = 'require'
+
+[[finding]]
+file = "positive/minified/dist/dist/app.min.js"
+line = 2
+rule = "obfuscation.minified-source"
+severity = "info"
+explanation_contains = 'expected'
+
+[[finding]]
+file = "positive/minified/src/lib/bundle.js"
+line = 2
+rule = "obfuscation.minified-source"
+severity = "medium"
+
+[[finding]]
+file = "positive/npm-chain/hook/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+explanation_contains = 'setup.js'
+
+[[finding]]
+file = "positive/npm-chain/hook/setup.js"
+line = 5
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/npm-chain/run/package.json"
+line = 6
+rule = "run.npm-script-local-server"
+severity = "critical"
+explanation_contains = 'server/server.js'
+
+[[finding]]
+file = "positive/npm-chain/run/server/server.js"
+line = 5
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/obfuscator/dist/dist/app.js"
+line = 2
+rule = "obfuscation.obfuscator-io"
+severity = "medium"
+explanation_contains = 'dist'
+
+[[finding]]
+file = "positive/obfuscator/eslintrc/.eslintrc.js"
+line = 2
+rule = "obfuscation.obfuscator-io"
+severity = "critical"
+
+[[finding]]
+file = "positive/obfuscator/next-config/next.config.js"
+line = 2
+rule = "obfuscation.obfuscator-io"
+severity = "critical"
+explanation_contains = 'configuration'
+
+[[finding]]
+file = "positive/obfuscator/npm-start/server/index.js"
+line = 2
+rule = "obfuscation.obfuscator-io"
+severity = "critical"
+explanation_contains = 'npm script'
+
+[[finding]]
+file = "positive/obfuscator/source/server/middlewares/helpers/error.js"
+line = 2
+rule = "obfuscation.obfuscator-io"
+severity = "high"
+
+[[finding]]
+file = "positive/windows-honest/build.bat"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/windows-honest/build.ps1"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/windows/app.hta"
+line = 1
+rule = "repo.windows-dropper"
+severity = "high"
+
+[[finding]]
+file = "positive/windows/app.hta"
+line = 3
+rule = "run.windows-remote-code"
+severity = "critical"
+
+[[finding]]
+file = "positive/windows/dropper.bat"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/windows/dropper.bat"
+line = 3
+rule = "run.windows-remote-code"
+severity = "critical"
+explanation_contains = 'certutil'
+
+[[finding]]
+file = "positive/windows/dropper.bat"
+line = 4
+rule = "run.windows-remote-code"
+severity = "critical"
+
+[[finding]]
+file = "positive/windows/dropper.bat"
+line = 5
+rule = "obfuscation.windows-encoded-payload"
+severity = "high"
+explanation_contains = 'decode'
+
+[[finding]]
+file = "positive/windows/dropper.bat"
+line = 6
+rule = "run.windows-remote-code"
+severity = "critical"
+explanation_contains = 'bitsadmin'
+
+[[finding]]
+file = "positive/windows/job.wsf"
+line = 1
+rule = "repo.windows-script"
+severity = "medium"
+
+[[finding]]
+file = "positive/windows/job.wsf"
+line = 3
+rule = "run.windows-remote-code"
+severity = "critical"
+
+[[finding]]
+file = "positive/windows/json/.vscode/tasks.json"
+line = 8
+rule = "obfuscation.windows-encoded-payload"
+severity = "critical"
+
+[[finding]]
+file = "positive/windows/json/package.json"
+line = 5
+rule = "obfuscation.windows-encoded-payload"
+severity = "high"
+
+[[finding]]
+file = "positive/windows/json/package.json"
+line = 6
+rule = "run.windows-remote-code"
+severity = "critical"
+
+[[finding]]
+file = "positive/windows/launch.vbs"
+line = 1
+rule = "repo.windows-script"
+severity = "medium"
+
+[[finding]]
+file = "positive/windows/launch.vbs"
+line = 3
+rule = "obfuscation.windows-encoded-payload"
+severity = "critical"
+
+[[finding]]
+file = "positive/windows/loader.ps1"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/windows/loader.ps1"
+line = 2
+rule = "run.windows-remote-code"
+severity = "critical"
+explanation_contains = 'DownloadString'
+
+[[finding]]
+file = "positive/windows/loader.ps1"
+line = 3
+rule = "obfuscation.windows-encoded-payload"
+severity = "critical"
+explanation_contains = 'hidden'
+
+[[finding]]
+file = "positive/windows/loader.ps1"
+line = 4
+rule = "run.windows-remote-code"
+severity = "critical"
+
+[[finding]]
+file = "positive/windows/loader.ps1"
+line = 5
+rule = "obfuscation.windows-encoded-payload"
+severity = "high"
+explanation_contains = 'EncodedCommand'
+
+[[finding]]
+file = "positive/windows/loader.ps1"
+line = 6
+rule = "run.windows-defender-exclusion"
+severity = "high"
+explanation_contains = 'exclusion'
+
+[[finding]]
+file = "positive/windows/lolbins.cmd"
+line = 1
+rule = "repo.windows-script"
+severity = "low"
+
+[[finding]]
+file = "positive/windows/lolbins.cmd"
+line = 3
+rule = "run.windows-remote-code"
+severity = "critical"
+explanation_contains = 'mshta'
+
+[[finding]]
+file = "positive/windows/lolbins.cmd"
+line = 4
+rule = "run.windows-remote-code"
+severity = "critical"
+explanation_contains = 'regsvr32'
+
+[[finding]]
+file = "positive/windows/lolbins.cmd"
+line = 5
+rule = "run.windows-remote-code"
+severity = "critical"
+explanation_contains = 'rundll32'
