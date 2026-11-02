@@ -15,7 +15,7 @@
 #   .vbs, .wsf and .hta findings of repo.windows-script and repo.windows-dropper
 #   are the ones that already existed.
 
-files_scanned = 48
+files_scanned = 49
 unflagged = ["positive/obfuscator/npm-start/package.json"]
 
 [[finding]]
@@ -149,6 +149,19 @@ severity = "critical"
 file = "positive/fetch-eval/try-eval/backend/controller.js"
 line = 8
 rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/function-require/constructor/userController.js"
+line = 7
+rule = "run.js-fetch-eval"
+severity = "high"
+explanation_contains = 'Function.constructor'
+
+[[finding]]
+file = "positive/function-require/constructor/userController.js"
+line = 7
+rule = "run.js-function-require"
 severity = "critical"
 
 [[finding]]

@@ -1408,6 +1408,22 @@ impl<'a> Flow<'a> {
                 }
                 None
             }
+            // `Function.constructor` is `Function` itself: `new Function.constructor(code)`
+            // and `new (Function.constructor)(code)`.
+            "Function"
+                if reference
+                    && self.punct(next, b'.')
+                    && self.is_id(next + 1, "constructor")
+                    && (self.punct(next + 2, b'(')
+                        || (self.punct(next + 2, b')') && self.punct(next + 3, b'('))) =>
+            {
+                let open = if self.punct(next + 2, b'(') {
+                    next + 2
+                } else {
+                    next + 3
+                };
+                Some((SinkClass::Code, "Function.constructor".into(), open))
+            }
             "Function" if reference && global_call(next) => {
                 let label = if i > 0 && self.is_id(i - 1, "new") {
                     "new Function"
@@ -1537,7 +1553,12 @@ impl<'a> Flow<'a> {
             };
             let taint = self.range_taint(open + 1, code_end);
             // `Function("require", ...)` called with `require`.
-            if class == SinkClass::Code && matches!(label.as_str(), "new Function" | "Function") {
+            if class == SinkClass::Code
+                && matches!(
+                    label.as_str(),
+                    "new Function" | "Function" | "Function.constructor"
+                )
+            {
                 self.function_require(i, open, close, &mut function_vars);
             }
             if class == SinkClass::Code && taint.bits & NET != 0 {
@@ -1722,11 +1743,14 @@ impl<'a> Flow<'a> {
             return;
         }
         // Kept in a variable: `const make = new Function("require", body);`
-        let before = if i > 0 && self.is_id(i - 1, "new") {
-            i - 1
-        } else {
-            i
-        };
+        // (the constructor may be in parentheses: `new (Function.constructor)(...)`).
+        let mut before = i;
+        if before > 0 && self.punct(before - 1, b'(') {
+            before -= 1;
+        }
+        if before > 0 && self.is_id(before - 1, "new") {
+            before -= 1;
+        }
         if before >= 2
             && self.punct(before - 1, b'=')
             && let Some(name) = self.name(before - 2)
@@ -2035,6 +2059,25 @@ mod tests {
         );
         assert!(kinds("const m = new Function('x', body)(require);").is_empty());
         assert!(kinds("const m = new Function('require', body);").is_empty());
+    }
+
+    #[test]
+    fn function_constructor_is_the_function_constructor() {
+        for text in [
+            "const s = (await axios.get(u)).data.cookie;\nconst h = new (Function.constructor)('require', s);\nh(require);",
+            "const s = (await axios.get(u)).data.cookie;\nconst h = new Function.constructor('require', s);\nh(require);",
+        ] {
+            let found = kinds(text);
+            assert!(
+                found.iter().any(|(k, _)| *k == FoundKind::FetchEval),
+                "{found:?}"
+            );
+            assert!(
+                found.iter().any(|(k, _)| *k == FoundKind::FunctionRequire),
+                "{found:?}"
+            );
+        }
+        assert!(kinds("const h = new Function.constructor('x', 'return 1');").is_empty());
     }
 
     #[test]
