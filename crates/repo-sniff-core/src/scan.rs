@@ -884,8 +884,6 @@ fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<St
     Some(parts.join("/"))
 }
 
-/// Runs the line-regex rules over lines fed one at a time, keeping at most
-/// `MAX_LINE_FINDINGS_PER_RULE` findings per rule and counting the rest.
 /// How a line rule looks at a line.
 enum LineRule<'a> {
     Regex(&'a Regex),
@@ -895,6 +893,9 @@ enum LineRule<'a> {
 /// What the bidi rule says about a line whose controls change nothing.
 const BIDI_UNCHANGED: &str = "bidi controls present, display unchanged";
 
+/// Runs the line rules over lines fed one at a time, keeping at most
+/// `MAX_LINE_FINDINGS_PER_RULE` findings per rule and level and counting the
+/// rest.
 struct LineScanner<'a> {
     rules: Vec<(&'a Rule, LineRule<'a>)>,
     /// Findings listed so far, per rule: at the rule's own level and at LOW.

@@ -126,7 +126,7 @@ fn a_line_that_may_be_shown_on_two_lines_stays_critical_with_the_reason() {
 
 #[test]
 fn a_line_over_the_length_limit_stays_critical_with_the_reason() {
-    let long = format!("{LRE}{}", "a".repeat(64 * 1024));
+    let long = format!("{LRE} {}", "a".repeat(64 * 1024));
 
     let report = scan_text("min.js", &[long]);
 
@@ -139,7 +139,7 @@ fn a_line_over_the_length_limit_stays_critical_with_the_reason() {
 fn the_budget_of_a_scan_is_shared_and_what_is_left_over_is_critical() {
     // Each line is just under the limit and harmless; 8 MiB of budget pays for
     // fewer than 150 of them in all, however the files are split.
-    let line = format!("{LRE}{}\n", "a".repeat(60 * 1024));
+    let line = format!("{LRE} {}\n", "a".repeat(60 * 1024));
     let file = line.repeat(80).into_bytes();
     let files = [
         ("a.js", file.clone()),
@@ -226,4 +226,44 @@ fn an_invalid_byte_does_not_change_the_judgement() {
         levels(&report),
         [(1, Severity::Low), (2, Severity::Critical)]
     );
+}
+
+#[test]
+fn a_control_inside_a_name_stays_critical_whatever_the_layout() {
+    // The display does not change, but the name does: another file, another
+    // module, a comparison that never matches.
+    let lines = [
+        "bash ./setup\u{2066}.sh".to_string(),
+        format!("const util = require(\"./util{LRE}\");"),
+        format!("if host == \"example.com{PDF}\":"),
+        format!("run(\"a\u{200E}{LRE}b\");"),
+    ];
+
+    let report = scan_text("a.js", &lines);
+
+    assert_eq!(
+        levels(&report),
+        [
+            (1, Severity::Critical),
+            (2, Severity::Critical),
+            (3, Severity::Critical),
+            (4, Severity::Critical)
+        ]
+    );
+    assert!(bidi(&report)[0].explanation.contains("what a name is"));
+}
+
+#[test]
+fn crlf_endings_do_not_turn_a_harmless_line_critical() {
+    let text = [honest(), honest()].join("\r\n") + "\r\n";
+    let streamed = Limits {
+        max_buffered_size: 16,
+        ..Limits::default()
+    };
+
+    for limits in [Limits::default(), streamed] {
+        let report = scan_files(&[("a.js", text.clone().into_bytes())], limits);
+
+        assert_eq!(levels(&report), [(1, Severity::Low), (2, Severity::Low)]);
+    }
 }
