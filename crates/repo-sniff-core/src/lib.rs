@@ -4,6 +4,7 @@
 //! and has no terminal or UI dependencies. The CLI, the TUI and the GitHub
 //! Action all build on top of it.
 
+mod bidi;
 pub mod checks;
 pub mod finding;
 pub mod jsonc;

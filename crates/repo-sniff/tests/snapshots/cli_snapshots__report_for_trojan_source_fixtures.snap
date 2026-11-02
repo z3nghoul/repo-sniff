@@ -2,7 +2,7 @@
 source: crates/repo-sniff/tests/cli_snapshots.rs
 expression: "scan_dot(&core_fixtures(\"trojan-source\"))"
 ---
-Scanned 7 files in .
+Scanned 20 files in .
 
 CRITICAL  positive/commenting_out.c:3  deception.bidi-control  [deception]
           Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
@@ -10,8 +10,56 @@ CRITICAL  positive/commenting_out.c:3  deception.bidi-control  [deception]
 CRITICAL  positive/early_return.py:3  deception.bidi-control  [deception]
           Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
 
+CRITICAL  positive/invisible_padding.js:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+CRITICAL  positive/isolate_reorders_call.js:2  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+CRITICAL  positive/line_separator_inside_override.js:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574) (not laid out: the line holds a character that some viewers show as a line break)
+
+CRITICAL  positive/next_line_inside_override.js:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574) (not laid out: the line holds a character that some viewers show as a line break)
+
+CRITICAL  positive/rlm_beside_controls.js:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+CRITICAL  positive/rtl_base_only.js:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+CRITICAL  positive/rtl_helper_longer.js:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
 CRITICAL  positive/stretched_string.js:3  deception.bidi-control  [deception]
           Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
 
-Summary: 3 critical, 0 high, 0 medium, 0 low, 0 info
+CRITICAL  positive/trailing_space_in_override.py:3  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+CRITICAL  positive/unclosed_embedding.js:2  deception.bidi-control  [deception]
+          Unicode bidirectional control characters change how code is displayed without changing how it is compiled or run, so what a reviewer reads can differ from what executes (Trojan Source, CVE-2021-42574)
+
+LOW       unchanged/arabic_label.py:3  deception.bidi-control  [deception]
+          bidi controls present, display unchanged
+
+LOW       unchanged/arabic_label.py:4  deception.bidi-control  [deception]
+          bidi controls present, display unchanged
+
+LOW       unchanged/lrm_beside_controls.js:3  deception.bidi-control  [deception]
+          bidi controls present, display unchanged
+
+LOW       unchanged/rtl_helper.js:3  deception.bidi-control  [deception]
+          bidi controls present, display unchanged
+
+LOW       unchanged/rtl_helper.js:5  deception.bidi-control  [deception]
+          bidi controls present, display unchanged
+
+LOW       unchanged/rtl_helper.js:6  deception.bidi-control  [deception]
+          bidi controls present, display unchanged
+
+LOW       unchanged/rtl_helper.js:7  deception.bidi-control  [deception]
+          bidi controls present, display unchanged
+
+Summary: 12 critical, 0 high, 0 medium, 7 low, 0 info
 Scan: complete (every file was read)

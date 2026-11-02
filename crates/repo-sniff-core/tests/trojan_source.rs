@@ -147,7 +147,7 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
         ]
     );
     assert_eq!(
-        report.files_scanned, 19,
+        report.files_scanned, 20,
         "every fixture should have been read"
     );
 }
