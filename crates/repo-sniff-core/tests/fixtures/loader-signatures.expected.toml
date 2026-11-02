@@ -15,7 +15,7 @@
 #   .vbs, .wsf and .hta findings of repo.windows-script and repo.windows-dropper
 #   are the ones that already existed.
 
-files_scanned = 45
+files_scanned = 47
 unflagged = ["positive/obfuscator/npm-start/package.json"]
 
 [[finding]]
@@ -124,6 +124,13 @@ file = "positive/fetch-eval/indirect/indirect.js"
 line = 9
 rule = "run.js-fetch-eval"
 severity = "critical"
+
+[[finding]]
+file = "positive/fetch-eval/relative-url/App.js"
+line = 7
+rule = "run.js-fetch-eval"
+severity = "high"
+explanation_contains = 'writes no URL'
 
 [[finding]]
 file = "positive/fetch-eval/then-eval/lib/remote.js"

