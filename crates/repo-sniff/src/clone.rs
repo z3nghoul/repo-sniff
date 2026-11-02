@@ -210,14 +210,41 @@ fn path_from_git(bytes: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
+/// Whether git's text says the clone needed credentials. Git gives no exit
+/// code for it, and a private repository on a public host often answers 404
+/// (or "Repository not found") on purpose, so the text is all there is. The
+/// match is case-insensitive and covers the messages of git and of the hosts.
+fn needs_credentials(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    [
+        "terminal prompts disabled",
+        "could not read username",
+        "could not read password",
+        "authentication failed",
+        "repository not found",
+        "returned error: 401",
+        "returned error: 403",
+        "returned error: 404",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 /// The error for a failed clone. Both the URL and git's text are cleaned:
 /// git repeats the URL it was given, user information included.
 fn clone_failure(url: &str, stderr: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "git clone of {} failed: {}",
-        redact_credentials(url),
-        display_safe(&redact_credentials(stderr.trim()), MAX_GIT_ERROR_CHARS)
-    )
+    let shown = redact_credentials(url);
+    let git_text = display_safe(&redact_credentials(stderr.trim()), MAX_GIT_ERROR_CHARS);
+    if needs_credentials(stderr) {
+        return anyhow::anyhow!(
+            "git clone of {shown} failed: the repository is private or does not exist.\n\
+             repo-sniff deliberately does not use your git credentials. To scan a private \
+             repository, clone it yourself and scan the folder:\n  \
+             git clone <url> some-folder\n  repo-sniff scan some-folder\n\
+             git said: {git_text}"
+        );
+    }
+    anyhow::anyhow!("git clone of {shown} failed: {git_text}")
 }
 
 /// The environment git runs in: the allowed variables from `source`, plus the
@@ -704,6 +731,42 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("Could not resolve host"), "{message}");
+    }
+
+    #[test]
+    fn git_text_that_needs_credentials_gets_the_private_repository_message() {
+        for git_text in [
+            "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled",
+            "fatal: could not read Password for 'https://TOKEN@example.invalid': terminal prompts disabled",
+            "remote: Invalid username or password.\nfatal: Authentication failed for 'https://example.invalid/o/r/'",
+            "fatal: unable to access 'https://example.invalid/o/r/': The requested URL returned error: 403",
+            "fatal: unable to access 'https://example.invalid/o/r/': The requested URL returned error: 401",
+            "fatal: repository 'https://example.invalid/o/r/' not found\nremote: Repository not found.",
+            "fatal: unable to access 'https://example.invalid/o/r/': The requested URL returned error: 404",
+        ] {
+            let message = clone_failure("https://TOKEN@example.invalid/o/r", git_text).to_string();
+            assert!(message.contains("private or does not exist"), "{message}");
+            assert!(
+                message.contains("does not use your git credentials"),
+                "{message}"
+            );
+            assert!(message.contains("repo-sniff scan some-folder"), "{message}");
+            assert!(!message.contains("TOKEN"), "{message}");
+        }
+    }
+
+    #[test]
+    fn other_git_failures_keep_git_text_without_the_credentials_message() {
+        for git_text in [
+            "fatal: unable to access 'https://example.invalid/o/r/': Could not resolve host: example.invalid",
+            "fatal: unable to access 'https://example.invalid/o/r/': SSL certificate problem",
+            "fatal: Remote branch nope not found in upstream origin",
+            "fatal: unable to access 'https://example.invalid/o/r/': The requested URL returned error: 500",
+        ] {
+            let message = clone_failure("https://example.invalid/o/r", git_text).to_string();
+            assert!(!message.contains("private or does not exist"), "{message}");
+            assert!(message.contains("fatal:"), "{message}");
+        }
     }
 
     #[test]
