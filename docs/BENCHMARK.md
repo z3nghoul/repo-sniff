@@ -73,6 +73,108 @@ CRITICAL to INFO.
   packages whose `scripts/*.sh` are not published, so the finding says the file
   is not in the repository.
 
+## Loader signatures family (run of 2026-11-03)
+
+The rules `run.js-fetch-eval`, `run.js-function-require`,
+`obfuscation.encoded-payload-sink`, `obfuscation.obfuscator-io`,
+`obfuscation.minified-source`, `run.windows-remote-code`,
+`obfuscation.windows-encoded-payload` and `run.windows-defender-exclusion` (#96)
+were added. The ten repositories above were scanned again from shallow clones
+(the "Before" column is the build of `main` with the npm scripts family, the
+"After" column the build with this family; both on the same clone). The target
+holds: **0 CRITICAL and no INCONCLUSIVE** in all ten. The two repositories whose
+counts changed:
+
+| Repository (head) | Before (C H M L I) | After (C H M L I) | Scan time before / after |
+|---|---|---|---|
+| microsoft/vscode (`763ca42b86dc`) | 0 8 6 52 1 | 0 9 13 52 1 | 1.9 s / 6.4 s |
+| python/cpython (`3945eaf2fcd9`) | 0 2 1 28 0 | 0 2 1 28 3 | 0.6 s / 0.7 s |
+
+- vscode, 1 HIGH: `src/vs/workbench/api/worker/extHostExtensionService.ts:87`
+  builds a function with `new Function` from a source it fetched (it loads an
+  extension into a web worker). True detection, benign; HIGH and not CRITICAL
+  because the file writes no URL.
+- vscode, 7 MEDIUM: `obfuscation.minified-source` on generated TypeScript with
+  lines of 2000 to 17000 characters (protocol type unions, `semver.js`) and on
+  two test files. True detections (the lines are long, with little whitespace),
+  benign.
+- cpython, 3 INFO: `Lib/profiling/sampling/_vendor/d3*/**/*.min.js`, vendored
+  minified bundles. They are INFO because of the `.min.` in the name, not
+  silent.
+
+The other eight repositories are unchanged. The rules read every JavaScript
+and Windows script file, so scans of repositories with much JavaScript are
+slower (vscode 1.9 s to 6.4 s, the clone not counted); the others are within
+10 %.
+
+### Honest JavaScript repositories
+
+The same four repositories as for the npm scripts family (shallow clones in a
+temporary folder, deleted after the run). nodejs/node has moved since the
+earlier table (`a1e1a743`), so its Before column is a new run of the build
+before this family on the same clone.
+
+| Repository (head) | Before (C H M L I) | After (C H M L I) | Scan time before / after |
+|---|---|---|---|
+| vitejs/vite (`b3cb0575`) | 0 0 9 4 1 | 0 0 9 4 1 | 0.2 s / 0.5 s |
+| vuejs/core (`68f25a4a`) | 0 0 0 1 1 | 0 0 0 1 1 | 0.05 s / 0.2 s |
+| facebook/react (`76baa3b5`) | 0 1 3 7 3 | 0 2 4 7 3 | 0.4 s / 1.9 s |
+| nodejs/node (`a1e1a743`) | 1 3 126 68 47 | 1 8 141 68 60 | 3.9 s / 11.9 s |
+
+The one CRITICAL in nodejs/node is the same `deception.bidi-control` in a Web
+Platform Tests data file as before
+([#106](https://github.com/z3nghoul/repo-sniff/issues/106)). **The loader family
+gives no CRITICAL on any of the four.** No scan is INCONCLUSIVE. What the family
+reports there:
+
+| Repository | File | Rule | Level | Verdict | Why |
+|---|---|---|---|---|---|
+| facebook/react | `fixtures/attribute-behavior/src/App.js:842` | `run.js-fetch-eval` | HIGH | True detection, benign | A test page fetches the React builds from a CDN and `eval`s them. Browser code (`window`, `document`, no Node.js feature), so one level below the rule |
+| facebook/react | `packages/react-dom-bindings/.../ReactDOMFizzInstructionSetInlineCodeStrings.js:11` | `obfuscation.minified-source` | MEDIUM | True detection, benign | A line of 2705 characters of inline script held as a string |
+| nodejs/node | `test/fixtures/wpt/common/dispatcher/dispatcher.js:241` | `run.js-fetch-eval` | HIGH | True detection, benign | The Web Platform Tests dispatcher evaluates a function it receives from the test server; the file writes no URL |
+| nodejs/node | `deps/amaro/dist/index.js:370` | `obfuscation.encoded-payload-sink` | HIGH | True detection, benign | wasm-bindgen glue builds a function from a string in wasm memory |
+| nodejs/node | `deps/v8/test/mjsunit/regress/regress-559266116.js:11`, `:19`, `deps/v8/tools/clusterfuzz/js_fuzzer/test_data/mutate_unicode_string_literal_expected.js:19` | `obfuscation.encoded-payload-sink` | HIGH (3) | True detection, benign | Engine tests that `eval` a string made of character codes or `\x` escapes |
+| nodejs/node | `tools/msvs/install_tools/install_tools.bat:55` | `run.windows-remote-code` | MEDIUM | True detection, benign | The Chocolatey installer, run with `iex` and `DownloadString` as its documentation says: the address is on the list of known installers |
+| nodejs/node | `deps/corepack/dist/lib/corepack.cjs:5207`, `deps/undici/undici.js:910`, `deps/npm/node_modules/glob/dist/{commonjs,esm}/index.min.js:3`, `test/fixtures/wpt/resources/idlharness.js:1762` | `run.js-fetch-eval` | MEDIUM (5) | Review by hand, benign | A function is looked up on `globalThis` or `this` by a name that is a variable, in a file that also calls `fetch`: the call the check cannot follow |
+| nodejs/node | 10 files under `deps/v8/test/`, `test/fixtures/source-map/` | `obfuscation.minified-source` | MEDIUM (10) | True detection, benign | Lines of 2000 to 14000 characters in test data (regular expression tables, inline source maps) |
+
+### What the first runs changed
+
+The first run of the family on these four repositories gave five CRITICAL
+findings on honest code. All five were read, and each led to a change that is
+tested by a fixture or a unit test:
+
+- `deps/corepack/dist/lib/corepack.cjs`: `new vm.Script(wrapper, { cachedData })`
+  was CRITICAL. Taint was kept per name for the whole file (a bundle holds
+  thousands of functions with a parameter called `content`), and `obj.prop =
+  tainted` tainted `obj`. Now declarations and parameters give names a scope,
+  taint is kept per path (`this.body`), and only the first argument of `eval`,
+  `vm.*` and `_compile` is code.
+- `test/fixtures/postject-copy/node_modules/postject/dist/api.js`: the same
+  scope problem (`new Function("body", ...)(body)` with a `name` tainted in
+  another function).
+- `test/fixtures/wpt/common/dispatcher/dispatcher.js` and React's
+  `attribute-behavior/App.js` are true flows. A file that writes no URL, or that
+  is browser code, is held one level below the rule (HIGH); a file that writes
+  the address of a remote host and has any Node.js feature stays CRITICAL, as
+  every sample in the corpus does.
+- `tools/msvs/install_tools/install_tools.bat`: the Chocolatey installer. A
+  short list of known installer addresses lowers an `iex` line to MEDIUM when
+  every URL on it is, as a whole, on the list.
+- Also: 8 `obfuscation.encoded-payload-sink` findings from `String.fromCharCode`
+  with one code and `\u` escapes in text (now 8 codes, 16 `\x` or 32 `\u`
+  escapes), `vm.Script(code, { cachedData: Buffer.from(b64, "base64") })` (the
+  options are not code), and two React components reported as unreadable
+  because JSX text has apostrophes and closing tags (only a problem that can hide
+  a later line is reported).
+
+The scan of the corpus `rubenmarcus/malicious-repositories` at `dc82f33` (not
+committed anywhere): 15 folders. After the npm scripts family one folder was
+MEDIUM and none was above it; after this family 8 folders are CRITICAL and 1 is
+HIGH (its address is not written in the file). Five folders stay LOW or MEDIUM:
+two of them carry their payload in the names of dependencies (milestone 9), the
+others have no JavaScript loader. The table of folders is in the pull request.
+
 ## Results
 
 | Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Seconds |
