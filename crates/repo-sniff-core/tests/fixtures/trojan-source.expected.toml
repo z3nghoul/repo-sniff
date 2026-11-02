@@ -7,7 +7,7 @@
 # negative/ because they are reported, which negative/ may not be, and are not
 # an attack, which positive/ is.
 
-files_scanned = 19
+files_scanned = 20
 
 [[finding]]
 file = "positive/commenting_out.c"

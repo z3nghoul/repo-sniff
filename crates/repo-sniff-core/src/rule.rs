@@ -48,6 +48,10 @@ pub enum Engine {
     /// the rest of the repository. Looked up by the rule's id like `Jsonc`;
     /// `files` is required and selects the candidate files.
     File,
+    /// Reports bidirectional control characters on a line, at the rule's level
+    /// when they change how the line is displayed and at LOW when they do
+    /// not (see `bidi.rs`). The scanner itself runs it line by line.
+    BidiDisplay,
     /// Reports a NUL byte inside a file that is meant to be read as a script
     /// (by extension or shebang). The scanner itself decides what a script is.
     NulByte,
@@ -92,6 +96,7 @@ pub enum Matcher {
     LineRegex(Regex),
     Jsonc(Check),
     File(Check),
+    BidiDisplay,
     NulByte,
     Head(Check),
 }
@@ -219,6 +224,12 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
             let check = checks::jsonc_check(&raw.id)
                 .ok_or_else(|| RuleError::UnknownCheck { id: raw.id.clone() })?;
             Matcher::Jsonc(check)
+        }
+        Engine::BidiDisplay => {
+            if raw.pattern.is_some() {
+                return Err(RuleError::UnexpectedPattern { id: raw.id });
+            }
+            Matcher::BidiDisplay
         }
         Engine::NulByte => {
             if raw.pattern.is_some() {
@@ -476,6 +487,28 @@ mod tests {
         "#;
         let rules = parse_rules(source, "test.toml").unwrap();
         assert!(matches!(rules[0].matcher, Matcher::NulByte));
+
+        let with_pattern = format!("{source}\npattern = 'x'");
+        assert!(matches!(
+            parse_rules(&with_pattern, "test.toml"),
+            Err(RuleError::UnexpectedPattern { .. })
+        ));
+    }
+
+    #[test]
+    fn bidi_display_rule_needs_no_pattern() {
+        let source = r#"
+            [[rule]]
+            id = "test.bidi"
+            engine = "bidi-display"
+            family = "test"
+            stage = "deception"
+            severity = "critical"
+            description = "Example"
+            example = "a.js:1"
+        "#;
+        let rules = parse_rules(source, "test.toml").unwrap();
+        assert!(matches!(rules[0].matcher, Matcher::BidiDisplay));
 
         let with_pattern = format!("{source}\npattern = 'x'");
         assert!(matches!(
