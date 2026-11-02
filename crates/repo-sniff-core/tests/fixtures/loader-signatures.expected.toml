@@ -15,7 +15,7 @@
 #   .vbs, .wsf and .hta findings of repo.windows-script and repo.windows-dropper
 #   are the ones that already existed.
 
-files_scanned = 47
+files_scanned = 48
 unflagged = ["positive/obfuscator/npm-start/package.json"]
 
 [[finding]]
@@ -55,6 +55,13 @@ line = 8
 rule = "run.js-fetch-eval"
 severity = "medium"
 explanation_contains = 'review it by hand'
+
+[[finding]]
+file = "positive/fetch-eval/browser-page/page.js"
+line = 5
+rule = "run.js-fetch-eval"
+severity = "high"
+explanation_contains = 'browser code'
 
 [[finding]]
 file = "positive/fetch-eval/catch-eval/server/config/getContract.js"
