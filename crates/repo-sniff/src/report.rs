@@ -1,6 +1,7 @@
 //! Plain-text report for the terminal and CI logs.
 
 use std::fmt::Write;
+use std::time::Duration;
 
 use repo_sniff_core::{Report, Severity, SkipReason, display_path, display_safe};
 
@@ -132,8 +133,24 @@ pub fn render(report: &Report, target: &str) -> String {
         })
         .collect();
     let _ = writeln!(out, "Summary: {}", counts.join(", "));
+    let _ = writeln!(out, "Scan time: {}", format_duration(report.duration));
     let _ = writeln!(out, "{}", completeness(report));
     out
+}
+
+/// A duration for people: milliseconds below one second ("850 ms"), seconds
+/// with two decimals below a minute ("1.24 s"), then minutes and seconds
+/// ("2 min 5 s").
+pub fn format_duration(duration: Duration) -> String {
+    if duration < Duration::from_secs(1) {
+        return format!("{} ms", duration.as_millis());
+    }
+    let hundredths = (duration.as_secs_f64() * 100.0).round() as u64;
+    if hundredths < 6000 {
+        return format!("{}.{:02} s", hundredths / 100, hundredths % 100);
+    }
+    let seconds = duration.as_secs_f64().round() as u64;
+    format!("{} min {} s", seconds / 60, seconds % 60)
 }
 
 /// Sort key for the list of skipped files: the reasons that make the scan
@@ -466,6 +483,41 @@ mod tests {
         };
 
         assert!(render(&report, "repo").contains("Scan: complete"));
+    }
+
+    #[test]
+    fn durations_are_shown_in_milliseconds_seconds_and_minutes() {
+        let shown = |millis: u64| format_duration(Duration::from_millis(millis));
+        assert_eq!(shown(0), "0 ms");
+        assert_eq!(shown(850), "850 ms");
+        assert_eq!(shown(999), "999 ms");
+        assert_eq!(shown(1_000), "1.00 s");
+        assert_eq!(shown(1_240), "1.24 s");
+        assert_eq!(shown(1_244), "1.24 s");
+        assert_eq!(shown(1_245), "1.25 s");
+        assert_eq!(shown(59_990), "59.99 s");
+        // Rounds up into a minute instead of showing "60.00 s".
+        assert_eq!(shown(59_996), "1 min 0 s");
+        assert_eq!(shown(60_000), "1 min 0 s");
+        assert_eq!(shown(125_400), "2 min 5 s");
+        assert_eq!(shown(3_725_000), "62 min 5 s");
+    }
+
+    #[test]
+    fn the_report_shows_the_scan_time_after_the_summary() {
+        let report = Report {
+            duration: Duration::from_millis(1_240),
+            ..Report::default()
+        };
+
+        let text = render(&report, "repo");
+
+        let lines: Vec<_> = text.lines().collect();
+        let summary = lines
+            .iter()
+            .position(|l| l.starts_with("Summary:"))
+            .unwrap();
+        assert_eq!(lines[summary + 1], "Scan time: 1.24 s");
     }
 
     #[test]
