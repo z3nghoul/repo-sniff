@@ -3,8 +3,8 @@
 # fails the test, so every file under negative/ must stay unreported.
 # The marker is the `//` key of each package.json (line 2) or line 1 of a script.
 
-files_scanned = 53
-unflagged = ["positive/chain/cycle/setup.js", "positive/chain/install-cd/a/setup.js", "positive/chain/npm-start-default/server.js", "positive/chain/operators/scripts/a.js", "positive/chain/prepare-start/server/server.js", "positive/chain/yarn-pnpm/scripts/gen.js", "positive/levels/scripts/deps.js", "positive/levels/scripts/release.js", "positive/levels/scripts/setup.js", "positive/nested/package.json", "positive/run/build-starts-server/api/app.js", "positive/run/concurrently/server/index.js", "positive/run/npm-run-all/server.js", "positive/run/test-pipe/server/server.js"]
+files_scanned = 58
+unflagged = ["positive/chain/cycle/setup.js", "positive/chain/install-cd/a/setup.js", "positive/chain/npm-start-default/server.js", "positive/chain/operators/scripts/a.js", "positive/chain/prepare-start/server/server.js", "positive/chain/subfolder-install/backend/package.json", "positive/chain/subfolder-install/frontend/package.json", "positive/chain/yarn-pnpm/scripts/gen.js", "positive/levels/scripts/deps.js", "positive/levels/scripts/release.js", "positive/levels/scripts/setup.js", "positive/nested/package.json", "positive/run/build-starts-server/api/app.js", "positive/run/concurrently/server/index.js", "positive/run/npm-run-all/server.js", "positive/run/test-pipe/server/server.js"]
 
 [[finding]]
 file = "positive/chain/cycle/package.json"
@@ -12,6 +12,13 @@ line = 5
 rule = "deps.npm-lifecycle-hook"
 severity = "medium"
 explanation_contains = 'cycle'
+
+[[finding]]
+file = "positive/chain/dev-server/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'dev server'
 
 [[finding]]
 file = "positive/chain/honest-laundering/package.json"
@@ -66,6 +73,13 @@ line = 5
 rule = "deps.npm-lifecycle-hook"
 severity = "medium"
 explanation_contains = 'server/server.js'
+
+[[finding]]
+file = "positive/chain/subfolder-install/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+explanation_contains = 'frontend'
 
 [[finding]]
 file = "positive/chain/too-deep/package.json"
@@ -126,6 +140,13 @@ severity = "low"
 explanation_contains = 'download'
 
 [[finding]]
+file = "positive/honest/vite-build/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'configuration file'
+
+[[finding]]
 file = "positive/inline-forms/package.json"
 line = 5
 rule = "deps.npm-lifecycle-hook"
@@ -161,7 +182,7 @@ severity = "high"
 
 [[finding]]
 file = "positive/json/comment/package.json"
-line = 6
+line = 4
 rule = "deps.npm-lifecycle-hook"
 severity = "low"
 explanation_contains = 'will not run it'
@@ -189,7 +210,7 @@ explanation_contains = 'last'
 
 [[finding]]
 file = "positive/json/trailing-comma/package.json"
-line = 5
+line = 6
 rule = "deps.npm-lifecycle-hook"
 severity = "low"
 explanation_contains = 'will not run it'

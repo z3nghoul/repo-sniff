@@ -29,3 +29,20 @@ attack      = ["T1546.018"]
 description = "A Python .start file lists an entry point (package.module:callable). Python 3.15 and later calls it every time the interpreter starts, so a .start file is code that runs without being imported"
 example     = 'site-packages/evil.start:2 lists the entry point "evil.mod:run"'
 files       = ["**/*.start"]
+
+[[rule]]
+id          = "deps.npm-lifecycle-hook"
+engine      = "file"
+family      = "npm-scripts"
+stage       = "deps"
+# Baseline for an install hook that runs a local file. The check follows the
+# script through `npm run`, `yarn`, `pnpm`, `npm-run-all`, `concurrently` and
+# `cd dir && npm install`, takes the highest level in the chain, and sets it:
+# CRITICAL for network or a shell download, HIGH for inline code, MEDIUM for a
+# local file, LOW or INFO for known honest tools. Hooks npm runs only on pack
+# and publish are one level lower; a package.json npm cannot parse is LOW.
+severity    = "medium"
+attack      = ["T1195.001", "T1059.007"]
+description = "A package.json defines a script that npm runs automatically on npm install (preinstall, install, postinstall, prepublish, prepare, dependencies), so the code runs before the user has run anything themselves"
+example     = 'package.json:5 sets "postinstall" to "node scripts/setup.js"'
+files       = ["**/package.json"]

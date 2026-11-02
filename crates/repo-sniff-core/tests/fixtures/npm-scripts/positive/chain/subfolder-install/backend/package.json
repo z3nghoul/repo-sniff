@@ -1,0 +1,7 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "backend",
+  "scripts": {
+    "start": "nodemon index.js"
+  }
+}

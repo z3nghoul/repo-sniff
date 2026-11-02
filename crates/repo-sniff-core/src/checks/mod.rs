@@ -16,6 +16,7 @@
 //! large instead, and a link whose target is not a regular file in the
 //! repository as unreadable; both make the scan inconclusive.
 
+pub mod npm_scripts;
 mod pylines;
 pub mod python_pth;
 pub mod python_start;
@@ -24,7 +25,7 @@ pub mod vscode_autorun;
 
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 use crate::finding::Severity;
@@ -265,6 +266,10 @@ impl std::fmt::Debug for Ctx<'_> {
 pub struct RepoIndex {
     paths: BTreeSet<String>,
     names: HashSet<String>,
+    /// The bytes of every `package.json` the scan read (see
+    /// `with_manifests`), by path, so a check can follow `cd a && npm install`
+    /// into another manifest without touching the disk.
+    manifests: HashMap<String, Vec<u8>>,
 }
 
 impl RepoIndex {
@@ -283,6 +288,18 @@ impl RepoIndex {
             index.paths.insert(path.to_string());
         }
         index
+    }
+
+    /// Records the contents of the `package.json` files, by repository path.
+    pub fn with_manifests(mut self, manifests: HashMap<String, Vec<u8>>) -> Self {
+        self.manifests = manifests;
+        self
+    }
+
+    /// The bytes of the `package.json` at this exact path, if the scan read it
+    /// (a regular file within the size limit).
+    pub fn manifest(&self, path: &str) -> Option<&[u8]> {
+        self.manifests.get(path).map(Vec::as_slice)
     }
 
     /// Whether this exact path exists in the repository.
@@ -325,6 +342,8 @@ pub const HEAD_LEN: usize = 8 * 1024;
 
 /// Every file check, keyed by the id of the rule it implements.
 const FILE_CHECKS: &[(&str, Check)] = &[
+    ("deps.npm-lifecycle-hook", npm_scripts::lifecycle_hook),
+    ("run.npm-script-local-server", npm_scripts::run_script),
     ("deps.python-pth-exec", python_pth::check),
     ("deps.python-start-entrypoint", python_start::check),
 ];

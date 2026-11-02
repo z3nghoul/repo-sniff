@@ -33,6 +33,7 @@ const BUILTIN_RULE_FILES: &[(&str, &str)] = &[
     ("ide.toml", include_str!("../rules/ide.toml")),
     ("deps.toml", include_str!("../rules/deps.toml")),
     ("repo.toml", include_str!("../rules/repo.toml")),
+    ("run.toml", include_str!("../rules/run.toml")),
 ];
 
 /// How a rule looks for its target. Every rule names its engine explicitly.

@@ -19,6 +19,24 @@ from the clone's index (#76), so cargo lists 121 links, cpython 4, git 3,
 requests 2, ripgrep and vscode 1 each. None of them points outside its
 repository, and none is a VS Code tasks file.
 
+## npm scripts family (run of 2026-11-02)
+
+The rules `deps.npm-lifecycle-hook` and `run.npm-script-local-server` (#95) were
+added and the same ten repositories were scanned again (heads in the table
+below; the other columns of the Results table above did not change except for
+vscode). The target holds: **0 CRITICAL and no INCONCLUSIVE** in all ten. Only
+vscode has npm hooks that run files; it is the one honest repository that
+reaches MEDIUM, as expected. Its totals (medium, low, info) go from 0 / 50 / 0
+to 6 / 52 / 1: the new rules add 6 MEDIUM, 1 LOW and 1 INFO, and the head
+moved since the table below (one more `repo.windows-script` LOW). The run scripts
+rule found nothing in the ten repositories.
+
+| Repository | File | Rule | Level | Verdict | Why |
+|---|---|---|---|---|---|
+| microsoft/vscode | `package.json:24`, `:25`, `extensions/package.json:10`, `extensions/copilot/package.json:6777`, `extensions/copilot/chat-lib/package.json:69`, one test fixture under `extensions/copilot/test/` | `deps.npm-lifecycle-hook` | MEDIUM (6) | True detection, benign | `preinstall` and `postinstall` that run `build/npm/preinstall.ts`, `build/npm/postinstall.ts` and similar local files: exactly the shape of the rule, and honest here |
+| microsoft/vscode | `test/automation/package.json:18` | `deps.npm-lifecycle-hook` | LOW | True detection, benign | `prepublishOnly` (npm pack and publish, not install) that runs a local copy script |
+| microsoft/vscode | `extensions/json-language-features/server/package.json:26` | `deps.npm-lifecycle-hook` | INFO | True detection, benign | `prepublishOnly` that runs `rimraf` |
+
 ## Results
 
 | Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Seconds |
