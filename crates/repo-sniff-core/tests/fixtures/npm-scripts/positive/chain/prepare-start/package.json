@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "prepare": "npm run start",
+    "start": "node server/server.js"
+  }
+}

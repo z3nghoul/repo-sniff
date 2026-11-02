@@ -1,0 +1,10 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "preinstall": "bash -c \"echo hello\"",
+    "install": "python3 -c \"print('hello')\"",
+    "postinstall": "node -e \"console.log('hello')\"",
+    "prepare": "sh -c 'true'"
+  }
+}

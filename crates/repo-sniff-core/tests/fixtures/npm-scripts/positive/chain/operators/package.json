@@ -1,0 +1,7 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "postinstall": "echo start ; true || node ./scripts/a.js & echo done"
+  }
+}

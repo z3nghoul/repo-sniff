@@ -1,0 +1,302 @@
+# What the built-in rules report when npm-scripts/ is scanned as one
+# repository. Read by tests/fixture_expectations.rs; a finding not listed here
+# fails the test, so every file under negative/ must stay unreported.
+# The marker is the `//` key of each package.json (line 2) or line 1 of a script.
+
+files_scanned = 53
+unflagged = ["positive/chain/cycle/setup.js", "positive/chain/install-cd/a/setup.js", "positive/chain/npm-start-default/server.js", "positive/chain/operators/scripts/a.js", "positive/chain/prepare-start/server/server.js", "positive/chain/yarn-pnpm/scripts/gen.js", "positive/levels/scripts/deps.js", "positive/levels/scripts/release.js", "positive/levels/scripts/setup.js", "positive/nested/package.json", "positive/run/build-starts-server/api/app.js", "positive/run/concurrently/server/index.js", "positive/run/npm-run-all/server.js", "positive/run/test-pipe/server/server.js"]
+
+[[finding]]
+file = "positive/chain/cycle/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'cycle'
+
+[[finding]]
+file = "positive/chain/honest-laundering/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/chain/install-cd/a/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'setup.js'
+
+[[finding]]
+file = "positive/chain/install-cd/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'a/setup.js'
+
+[[finding]]
+file = "positive/chain/npm-start-default/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'server.js'
+
+[[finding]]
+file = "positive/chain/npx-unknown/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'package'
+
+[[finding]]
+file = "positive/chain/npx-unknown/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/chain/operators/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'scripts/a.js'
+
+[[finding]]
+file = "positive/chain/prepare-start/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'server/server.js'
+
+[[finding]]
+file = "positive/chain/too-deep/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'too deep'
+
+[[finding]]
+file = "positive/chain/yarn-pnpm/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'scripts/gen.js'
+
+[[finding]]
+file = "positive/honest/build-chain/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+
+[[finding]]
+file = "positive/honest/electron-builder/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+
+[[finding]]
+file = "positive/honest/husky/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+explanation_contains = 'husky'
+
+[[finding]]
+file = "positive/honest/ngcc/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+
+[[finding]]
+file = "positive/honest/node-gyp/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+
+[[finding]]
+file = "positive/honest/patch-package/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+
+[[finding]]
+file = "positive/honest/prebuild-install/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'download'
+
+[[finding]]
+file = "positive/inline-forms/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'inline'
+
+[[finding]]
+file = "positive/inline-forms/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'inline'
+
+[[finding]]
+file = "positive/inline-forms/package.json"
+line = 7
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'inline'
+
+[[finding]]
+file = "positive/inline-forms/package.json"
+line = 8
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'inline'
+
+[[finding]]
+file = "positive/json/bom/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/json/comment/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'will not run it'
+
+[[finding]]
+file = "positive/json/duplicate-hook/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'ignored'
+
+[[finding]]
+file = "positive/json/duplicate-hook/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+explanation_contains = 'husky'
+
+[[finding]]
+file = "positive/json/duplicate-scripts/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'last'
+
+[[finding]]
+file = "positive/json/trailing-comma/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'will not run it'
+
+[[finding]]
+file = "positive/levels/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+explanation_contains = 'downloads'
+
+[[finding]]
+file = "positive/levels/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'inline'
+
+[[finding]]
+file = "positive/levels/package.json"
+line = 7
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'scripts/setup.js'
+
+[[finding]]
+file = "positive/levels/package.json"
+line = 8
+rule = "deps.npm-lifecycle-hook"
+severity = "info"
+explanation_contains = 'husky'
+
+[[finding]]
+file = "positive/levels/package.json"
+line = 9
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'not run by npm install'
+
+[[finding]]
+file = "positive/levels/package.json"
+line = 10
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'not run by npm install'
+
+[[finding]]
+file = "positive/levels/package.json"
+line = 11
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'scripts/deps.js'
+
+[[finding]]
+file = "positive/nested/packages/app/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/network-forms/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/network-forms/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/network-forms/package.json"
+line = 7
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/network-forms/package.json"
+line = 8
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/run/build-starts-server/package.json"
+line = 5
+rule = "run.npm-script-local-server"
+severity = "low"
+explanation_contains = 'starts a server'
+
+[[finding]]
+file = "positive/run/concurrently/package.json"
+line = 5
+rule = "run.npm-script-local-server"
+severity = "low"
+explanation_contains = 'server/index.js'
+
+[[finding]]
+file = "positive/run/npm-run-all/package.json"
+line = 5
+rule = "run.npm-script-local-server"
+severity = "low"
+explanation_contains = 'server.js'
+
+[[finding]]
+file = "positive/run/test-pipe/package.json"
+line = 6
+rule = "run.npm-script-local-server"
+severity = "low"
+explanation_contains = 'starts a server'

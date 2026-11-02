@@ -1,0 +1,9 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "prepare": "yarn build",
+    "build": "pnpm run gen",
+    "gen": "node scripts/gen.js"
+  }
+}

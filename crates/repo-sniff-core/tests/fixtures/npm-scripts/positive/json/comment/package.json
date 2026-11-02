@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "c",
+  // npm rejects comments
+  "scripts": {
+    "postinstall": "node -e \"console.log(1)\""
+  }
+}

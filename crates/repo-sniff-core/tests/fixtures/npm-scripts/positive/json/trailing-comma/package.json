@@ -1,0 +1,7 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "t",
+  "scripts": {
+    "postinstall": "node -e \"console.log(1)\"",
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "a",
+  "scripts": {
+    "postinstall": "node setup.js"
+  }
+}
