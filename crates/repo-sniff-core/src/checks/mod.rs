@@ -25,6 +25,7 @@ pub mod python_pth;
 pub mod python_start;
 pub mod repo_contents;
 pub mod vscode_autorun;
+pub mod win_loaders;
 
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell};
@@ -89,6 +90,8 @@ pub(crate) struct Views<'a> {
     jsonc: OnceCell<Result<Node, ParseError>>,
     /// What the JavaScript loader flow analysis found in `text`.
     js_flow: OnceCell<Vec<js_loaders::Found>>,
+    /// What the Windows loader signatures found in the file.
+    win_flow: OnceCell<Vec<win_loaders::WinFound>>,
     /// The last `line_of` answer, `(offset, line)`, to count on from.
     line_cursor: Cell<(usize, usize)>,
 }
@@ -103,6 +106,7 @@ impl<'a> Views<'a> {
             text: OnceCell::new(),
             jsonc: OnceCell::new(),
             js_flow: OnceCell::new(),
+            win_flow: OnceCell::new(),
             line_cursor: Cell::new((0, 1)),
         }
     }
@@ -255,6 +259,14 @@ impl<'a> Ctx<'a> {
         self.views.line_of(offset)
     }
 
+    /// What the Windows loader signatures found in the file, computed once
+    /// for the three rules.
+    pub(crate) fn win_flow(&self) -> &'a [win_loaders::WinFound] {
+        self.views
+            .win_flow
+            .get_or_init(|| win_loaders::analyze(self))
+    }
+
     /// What the JavaScript loader analysis found in the file's text.
     pub(crate) fn js_flow(&self) -> &'a [js_loaders::Found] {
         self.views.js_flow()
@@ -389,6 +401,15 @@ const FILE_CHECKS: &[(&str, Check)] = &[
     ),
     ("obfuscation.obfuscator-io", js_shape::obfuscator),
     ("obfuscation.minified-source", js_shape::minified),
+    ("run.windows-remote-code", win_loaders::remote_code),
+    (
+        "obfuscation.windows-encoded-payload",
+        win_loaders::encoded_payload,
+    ),
+    (
+        "run.windows-defender-exclusion",
+        win_loaders::defender_exclusion,
+    ),
     ("deps.python-pth-exec", python_pth::check),
     ("deps.python-start-entrypoint", python_start::check),
 ];

@@ -332,7 +332,7 @@ file = "positive/windows/loader.ps1"
 line = 2
 rule = "run.windows-remote-code"
 severity = "critical"
-explanation_contains = 'DownloadString'
+explanation_contains = 'IEX'
 
 [[finding]]
 file = "positive/windows/loader.ps1"
@@ -359,7 +359,7 @@ file = "positive/windows/loader.ps1"
 line = 6
 rule = "run.windows-defender-exclusion"
 severity = "high"
-explanation_contains = 'exclusion'
+explanation_contains = 'Exclusion'
 
 [[finding]]
 file = "positive/windows/lolbins.cmd"

@@ -41,3 +41,18 @@ example     = 'src/lib/bundle.js:2 is 2656 characters long'
 files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
 # A padded file past 5 MiB must not hide a loader, so a large file is read whole.
 reads_large_files = true
+
+[[rule]]
+id          = "obfuscation.windows-encoded-payload"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+# Baseline for an encoded command or a decode step. The check raises an encoded
+# powershell command to critical when it hides the window or sits next to a
+# download.
+severity    = "high"
+attack      = ["T1027.010", "T1140"]
+description = "A command line runs powershell -EncodedCommand (or any prefix down to -e) with a long base64 operand, decodes a file with certutil -decode, or runs a FromBase64String result with IEX. The command is hidden from a reader of the file"
+example     = 'setup.bat:3 runs powershell -enc with a base64 string'
+files       = ["**/*.ps1", "**/*.psm1", "**/*.bat", "**/*.cmd", "**/*.vbs", "**/*.hta", "**/*.wsf", "**/package.json", "**/.vscode/tasks.json", "**/*.code-workspace"]
+reads_large_files = true
