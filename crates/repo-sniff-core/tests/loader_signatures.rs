@@ -25,7 +25,13 @@ fn rows(report: &Report, rule: &str) -> Vec<(String, usize, Severity)> {
         .findings
         .iter()
         .filter(|f| f.rule_id == rule)
-        .map(|f| (f.file.to_string_lossy().into_owned(), f.line, f.severity))
+        .map(|f| {
+            (
+                f.file.to_string_lossy().replace('\\', "/"),
+                f.line,
+                f.severity,
+            )
+        })
         .collect()
 }
 
@@ -102,7 +108,13 @@ fn windows_rows(report: &Report) -> Vec<(String, usize, Severity)> {
                     | "run.windows-defender-exclusion"
             )
         })
-        .map(|f| (f.file.to_string_lossy().into_owned(), f.line, f.severity))
+        .map(|f| {
+            (
+                f.file.to_string_lossy().replace('\\', "/"),
+                f.line,
+                f.severity,
+            )
+        })
         .collect()
 }
 
@@ -170,7 +182,7 @@ fn rule_level(report: &Report, rule: &str, file: &str) -> Option<Severity> {
     report
         .findings
         .iter()
-        .find(|f| f.rule_id == rule && f.file.to_string_lossy() == file)
+        .find(|f| f.rule_id == rule && f.file.to_string_lossy().replace('\\', "/") == file)
         .map(|f| f.severity)
 }
 
