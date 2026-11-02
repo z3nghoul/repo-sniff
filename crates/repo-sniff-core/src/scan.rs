@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::bidi;
 use crate::checks::{Check, Ctx, Decode, FileIssue, HEAD_LEN, Hit, RepoIndex, TextSpan, Views};
@@ -101,6 +102,9 @@ pub struct Report {
     pub skipped: Vec<Skipped>,
     /// True if the file-count limit cut the scan short.
     pub truncated: bool,
+    /// How long the scan took, from the start of the walk to the end of the
+    /// last rule. A clone made before the scan is not part of it.
+    pub duration: Duration,
 }
 
 /// Findings of one rule in one file that were counted but not listed.
@@ -165,6 +169,7 @@ fn scan_with_budget(
     links: &HashSet<PathBuf>,
     bidi_budget: usize,
 ) -> Report {
+    let started = Instant::now();
     let walked = walk::walk_with_links(root, limits, links);
 
     // Where files are allowed to be looked up: everything the walk saw,
@@ -577,6 +582,7 @@ fn scan_with_budget(
         }
         report.findings = kept;
     }
+    report.duration = started.elapsed();
     report
 }
 
@@ -3949,6 +3955,21 @@ mod tests {
 
     fn some(text: &str) -> Option<String> {
         Some(text.to_string())
+    }
+
+    #[test]
+    fn a_report_says_how_long_the_scan_took() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..50 {
+            write(dir.path(), &format!("f{index}.txt"), b"TODO\n");
+        }
+        let rules = parse_rules(RULES, "test.toml").unwrap();
+
+        let report = scan(dir.path(), &rules, Limits::default());
+
+        // Not a number to compare: only that it was measured, and is sane.
+        assert!(report.duration > Duration::ZERO);
+        assert!(report.duration < Duration::from_secs(60));
     }
 
     #[test]

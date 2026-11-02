@@ -7,6 +7,7 @@ mod target;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -118,7 +119,9 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
             eprintln!("Cloning {}", redact_credentials(&url));
             // `checkout` must stay alive until the scan ends: dropping it
             // deletes the cloned files.
+            let cloning = Instant::now();
             let checkout = clone::shallow_clone(&url, git_ref)?;
+            eprintln!("Cloned in {}", report::format_duration(cloning.elapsed()));
             let label = match git_ref {
                 Some(git_ref) => format!("{} (ref {git_ref})", redact_credentials(raw_target)),
                 None => redact_credentials(raw_target),
