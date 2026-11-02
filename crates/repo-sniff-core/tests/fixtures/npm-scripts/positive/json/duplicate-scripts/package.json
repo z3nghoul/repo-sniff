@@ -1,0 +1,6 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "dup",
+  "scripts": { "test": "jest" },
+  "scripts": { "postinstall": "node -e \"console.log(1)\"" }
+}

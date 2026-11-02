@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "prepare": "if true; then node -e \"x\"; fi",
+    "preprepare": "for i in 1; do node -e x; done"
+  }
+}

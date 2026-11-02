@@ -206,6 +206,9 @@ fn scan_with_budget(
         .filter(|path| !link_paths.contains(path))
         .map(|path| to_slash(path))
         .collect();
+    // The `package.json` files, for the npm check to follow a script into
+    // another manifest of the repository.
+    let index = index.with_manifests(read_manifests(root, &walked.files, &link_paths));
     // Links recorded by the caller whose files are scanned as content too.
     let recorded_links: HashSet<PathBuf> = walked
         .files
@@ -584,6 +587,42 @@ fn scan_with_budget(
     }
     report.duration = started.elapsed();
     report
+}
+
+/// A `package.json` larger than this is not kept for other checks to follow.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+/// All manifests together are kept up to this many bytes.
+const MAX_MANIFESTS_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Reads the regular `package.json` files of the walk (any letter case, as on
+/// Windows and macOS) for `RepoIndex::manifest`. Links are not followed.
+fn read_manifests(
+    root: &Path,
+    files: &[PathBuf],
+    links: &HashSet<&PathBuf>,
+) -> HashMap<String, Vec<u8>> {
+    let mut manifests = HashMap::new();
+    let mut total = 0u64;
+    for path in files {
+        let is_manifest = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("package.json"));
+        if !is_manifest || links.contains(path) {
+            continue;
+        }
+        let full = root.join(path);
+        let size = fs::metadata(&full).map_or(u64::MAX, |metadata| metadata.len());
+        if size > MAX_MANIFEST_BYTES || total + size > MAX_MANIFESTS_TOTAL_BYTES {
+            continue;
+        }
+        if let Ok(bytes) = fs::read(&full) {
+            total += bytes.len() as u64;
+            manifests.insert(to_slash(path), bytes);
+        }
+    }
+    manifests
 }
 
 /// What a scan shares between files.

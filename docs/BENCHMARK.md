@@ -19,6 +19,60 @@ from the clone's index (#76), so cargo lists 121 links, cpython 4, git 3,
 requests 2, ripgrep and vscode 1 each. None of them points outside its
 repository, and none is a VS Code tasks file.
 
+## npm scripts family (run of 2026-11-02)
+
+The rules `deps.npm-lifecycle-hook` and `run.npm-script-local-server` (#95) were
+added and the same ten repositories were scanned again (heads in the table
+below; the other columns of the Results table above did not change except for
+vscode). The target holds: **0 CRITICAL and no INCONCLUSIVE** in all ten. Only
+vscode has npm hooks that run files; it is the one honest repository that
+reaches MEDIUM, as expected. Its totals (medium, low, info) go from 0 / 50 / 0
+to 6 / 52 / 1: the new rules add 6 MEDIUM, 1 LOW and 1 INFO, and the head
+moved since the table below (one more `repo.windows-script` LOW). The run scripts
+rule found nothing in the ten repositories.
+
+| Repository | File | Rule | Level | Verdict | Why |
+|---|---|---|---|---|---|
+| microsoft/vscode | `package.json:24`, `:25`, `extensions/package.json:10`, `extensions/copilot/package.json:6777`, `extensions/copilot/chat-lib/package.json:69`, one test fixture under `extensions/copilot/test/` | `deps.npm-lifecycle-hook` | MEDIUM (6) | True detection, benign | `preinstall` and `postinstall` that run `build/npm/preinstall.ts`, `build/npm/postinstall.ts` and similar local files: exactly the shape of the rule, and honest here |
+| microsoft/vscode | `test/automation/package.json:18` | `deps.npm-lifecycle-hook` | LOW | True detection, benign | `prepublishOnly` (npm pack and publish, not install) that runs a local copy script |
+| microsoft/vscode | `extensions/json-language-features/server/package.json:26` | `deps.npm-lifecycle-hook` | INFO | True detection, benign | `prepublishOnly` that runs `rimraf` |
+
+### Honest JavaScript repositories, and the fail-closed change
+
+The npm rules were also run on four large honest JavaScript repositories
+(shallow clones, deleted after the run) with three builds: `107c7b3` (before
+the second-review fixes), `ea40370` (after them) and the build with the
+fail-closed change and the honest `npx` forms. "Family" counts only
+`deps.npm-lifecycle-hook` and `run.npm-script-local-server`; C, H, M, L, I are
+CRITICAL to INFO.
+
+| Repository (head) | Before `ea40370`, family / all | After `ea40370`, family / all | After fail-closed, family / all |
+|---|---|---|---|
+| vitejs/vite (`b3cb057`) | L3 I2 / M9 L3 I2 | L3 I2 / M9 L3 I2 | L4 I1 / M9 L4 I1 |
+| vuejs/core (`68f25a4`) | I2 / I2 | I2 / I2 | L1 I1 / L1 I1 |
+| facebook/react (`76baa3b`) | H1 M2 L7 I3 / H1 M3 L7 I3 | H1 M2 L7 I3 / H1 M3 L7 I3 | H1 M2 L7 I3 / H1 M3 L7 I3 |
+| nodejs/node (`76e8b64e`) | H1 M8 L26 I33 / C1 H3 M126 L82 I33 | H1 M8 L26 I33 / C1 H3 M126 L82 I33 | H1 M8 L12 I47 / C1 H3 M126 L68 I47 |
+
+- The only CRITICAL, in nodejs/node, is `deception.bidi-control` in a Web
+  Platform Tests data file (`test/fixtures/wpt/url/resources/urltestdata.json`).
+  It is the same on `main` and is not caused by the npm rules
+  ([#106](https://github.com/z3nghoul/repo-sniff/issues/106)). No scan is
+  INCONCLUSIVE.
+- Fail-closed adds no finding on these four repositories: no honest script is
+  left unread. The changes are the honest forms: `npx only-allow pnpm` (vite,
+  vue/core) goes from INFO to LOW, and `tshy` (14 vendored libraries in
+  nodejs/node) from LOW to INFO.
+- The two HIGH findings of the family are true detections of inline code in an
+  install hook, and benign: nodejs/node `deps/npm/node_modules/postcss-selector-parser`
+  runs `prepare` -> `build` -> `clean`, which is `node -e "require('fs').rmSync('dist', ...)"`;
+  facebook/react `compiler/packages/snap` runs `perl -p -i -e` in `postinstall` to
+  patch a dependency in `node_modules`. They are what the table says (inline
+  code is HIGH), not noise from a parsing gap.
+- The MEDIUM findings are install hooks that run a local file (for example
+  react's `scripts/flow/createFlowConfigs.js`); many in nodejs/node are vendored
+  packages whose `scripts/*.sh` are not published, so the finding says the file
+  is not in the repository.
+
 ## Results
 
 | Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Seconds |

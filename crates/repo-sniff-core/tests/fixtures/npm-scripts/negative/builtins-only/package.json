@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "prepare": "echo done",
+    "postinstall": "exit 0"
+  }
+}

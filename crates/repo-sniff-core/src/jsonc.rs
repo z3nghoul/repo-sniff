@@ -76,10 +76,25 @@ impl Node {
 
 /// Parses a whole JSONC document.
 pub fn parse(text: &str) -> Result<Node, ParseError> {
+    parse_with(text, false)
+}
+
+/// Parses a document the way `JSON.parse` does, which is how npm reads a
+/// `package.json`: no comments, no trailing commas, numbers in the JSON
+/// grammar, no raw control characters in strings, and a lone surrogate escape
+/// is accepted (it becomes U+FFFD here). A leading byte order mark is dropped,
+/// as npm does. Duplicate keys are kept; `Node::get` returns the last one,
+/// which is the one `JSON.parse` keeps.
+pub fn parse_json(text: &str) -> Result<Node, ParseError> {
+    parse_with(text, true)
+}
+
+fn parse_with(text: &str, strict: bool) -> Result<Node, ParseError> {
     let mut parser = Parser {
         bytes: text.as_bytes(),
         text,
         pos: 0,
+        strict,
     };
     // A UTF-8 byte order mark is allowed at the very start.
     if text.starts_with('\u{feff}') {
@@ -108,6 +123,8 @@ struct Parser<'a> {
     bytes: &'a [u8],
     text: &'a str,
     pos: usize,
+    /// `JSON.parse` rules instead of the JSONC dialect.
+    strict: bool,
 }
 
 impl Parser<'_> {
@@ -127,6 +144,7 @@ impl Parser<'_> {
         loop {
             match self.peek() {
                 Some(b' ' | b'\t' | b'\n' | b'\r') => self.pos += 1,
+                Some(b'/') if self.strict => return Err(self.error("comments are not JSON")),
                 Some(b'/') => match self.bytes.get(self.pos + 1) {
                     Some(b'/') => {
                         while let Some(b) = self.peek() {
@@ -169,6 +187,10 @@ impl Parser<'_> {
             Some(b'{') => self.object(depth)?,
             Some(b'[') => self.array(depth)?,
             Some(b'"') => Value::String(self.string()?),
+            Some(b'-' | b'0'..=b'9') if self.strict => {
+                self.number()?;
+                Value::Other
+            }
             Some(b'-' | b'0'..=b'9') => {
                 while matches!(
                     self.peek(),
@@ -190,6 +212,43 @@ impl Parser<'_> {
         })
     }
 
+    /// A number in the JSON grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
+    fn number(&mut self) -> Result<(), ParseError> {
+        let digits = |p: &mut Self| {
+            let start = p.pos;
+            while matches!(p.peek(), Some(b'0'..=b'9')) {
+                p.pos += 1;
+            }
+            p.pos > start
+        };
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                digits(self);
+            }
+            _ => return Err(self.error("bad number")),
+        }
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            if !digits(self) {
+                return Err(self.error("bad number"));
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            if !digits(self) {
+                return Err(self.error("bad number"));
+            }
+        }
+        Ok(())
+    }
+
     fn literal(&mut self, word: &'static str) -> Result<Value, ParseError> {
         if self.text[self.pos..].starts_with(word) {
             self.pos += word.len();
@@ -202,9 +261,13 @@ impl Parser<'_> {
     fn object(&mut self, depth: usize) -> Result<Value, ParseError> {
         self.pos += 1; // '{'
         let mut members = Vec::new();
+        let mut trailing = false;
         loop {
             self.skip_trivia()?;
             match self.peek() {
+                Some(b'}') if self.strict && trailing => {
+                    return Err(self.error("trailing comma"));
+                }
                 Some(b'}') => {
                     self.pos += 1;
                     return Ok(Value::Object(members));
@@ -222,10 +285,14 @@ impl Parser<'_> {
             let value = self.value(depth + 1)?;
             members.push(Member { key, value });
             self.skip_trivia()?;
+            trailing = false;
             match self.peek() {
                 // A trailing comma before '}' is fine in JSONC: the next loop
                 // iteration sees '}' and returns.
-                Some(b',') => self.pos += 1,
+                Some(b',') => {
+                    self.pos += 1;
+                    trailing = true;
+                }
                 Some(b'}') => {}
                 _ => return Err(self.error("expected ',' or '}'")),
             }
@@ -235,16 +302,24 @@ impl Parser<'_> {
     fn array(&mut self, depth: usize) -> Result<Value, ParseError> {
         self.pos += 1; // '['
         let mut items = Vec::new();
+        let mut trailing = false;
         loop {
             self.skip_trivia()?;
             if self.peek() == Some(b']') {
+                if self.strict && trailing {
+                    return Err(self.error("trailing comma"));
+                }
                 self.pos += 1;
                 return Ok(Value::Array(items));
             }
             items.push(self.value(depth + 1)?);
             self.skip_trivia()?;
+            trailing = false;
             match self.peek() {
-                Some(b',') => self.pos += 1,
+                Some(b',') => {
+                    self.pos += 1;
+                    trailing = true;
+                }
                 Some(b']') => {}
                 _ => return Err(self.error("expected ',' or ']'")),
             }
@@ -283,24 +358,39 @@ impl Parser<'_> {
                             let first = self.hex4()?;
                             let ch = if (0xD800..0xDC00).contains(&first) {
                                 // High surrogate: a low one must follow.
-                                if !self.text[self.pos..].starts_with("\\u") {
+                                if self.text[self.pos..].starts_with("\\u") {
+                                    self.pos += 2;
+                                    let second = self.hex4()?;
+                                    if (0xDC00..0xE000).contains(&second) {
+                                        0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)
+                                    } else if self.strict {
+                                        0xFFFD
+                                    } else {
+                                        return Err(self.error("lone surrogate"));
+                                    }
+                                } else if self.strict {
+                                    0xFFFD
+                                } else {
                                     return Err(self.error("lone surrogate"));
                                 }
-                                self.pos += 2;
-                                let second = self.hex4()?;
-                                if !(0xDC00..0xE000).contains(&second) {
-                                    return Err(self.error("lone surrogate"));
-                                }
-                                0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)
                             } else {
                                 first
                             };
-                            out.push(
-                                char::from_u32(ch).ok_or_else(|| self.error("bad \\u escape"))?,
-                            );
+                            let lone_low = (0xDC00..0xE000).contains(&ch);
+                            if lone_low && self.strict {
+                                out.push('\u{FFFD}');
+                            } else {
+                                out.push(
+                                    char::from_u32(ch)
+                                        .ok_or_else(|| self.error("bad \\u escape"))?,
+                                );
+                            }
                         }
                         _ => return Err(self.error("bad escape")),
                     }
+                }
+                0x00..=0x1f if self.strict => {
+                    return Err(self.error("raw control character in a string"));
                 }
                 _ => {
                     // Copy one whole UTF-8 character.
@@ -441,5 +531,49 @@ mod tests {
     fn deep_nesting_is_rejected_without_stack_overflow() {
         let text = "[".repeat(100_000);
         assert!(parse(&text).is_err());
+    }
+
+    #[test]
+    fn json_mode_rejects_what_json_parse_rejects() {
+        for bad in [
+            "{\"a\": 1, }",
+            "[1, 2, ]",
+            "{\"a\": 1} // c",
+            "/* c */ {}",
+            "{\"a\": 01}",
+            "{\"a\": 1.}",
+            "{\"a\": .5}",
+            "{\"a\": +1}",
+            "{\"a\": -}",
+            "{\"a\": 1e}",
+            "{\"a\": \"x\ty\"}",
+            "{'a': 1}",
+            "{\"a\": 1}\0",
+        ] {
+            assert!(parse_json(bad).is_err(), "accepted {bad:?}");
+        }
+        // The dialect VS Code reads still takes the comments and commas.
+        assert!(parse("{\"a\": 1, } // c").is_ok());
+    }
+
+    #[test]
+    fn json_mode_accepts_what_json_parse_accepts() {
+        for good in [
+            "{}",
+            "\u{feff}{\"a\": [1, -2.5e+3, 0, true, false, null, \"\\u00e9\"]}",
+            " \r\n\t{\"a\": {\"b\": []}}\n",
+            "{\"a\": \"\\ud800\"}",
+            "{\"a\": \"\\udc00\"}",
+            "{\"a\": \"\\ud83d\\ude00\"}",
+        ] {
+            assert!(parse_json(good).is_ok(), "rejected {good:?}");
+        }
+    }
+
+    #[test]
+    fn json_mode_keeps_duplicates_and_the_last_one_wins() {
+        let root = parse_json(r#"{"a": "first", "a": "last"}"#).unwrap();
+        assert_eq!(keys(&root), vec!["a", "a"]);
+        assert_eq!(root.get("a").and_then(Node::as_str), Some("last"));
     }
 }

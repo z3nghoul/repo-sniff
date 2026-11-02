@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "dev": "concurrently \"npm:server\" \"react-scripts start\"",
+    "server": "node server/index.js"
+  }
+}

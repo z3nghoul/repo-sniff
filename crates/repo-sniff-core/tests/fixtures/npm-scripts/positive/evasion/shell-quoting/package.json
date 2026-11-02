@@ -1,0 +1,9 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "preinstall": "echo \\' ; node -e x",
+    "install": "echo \"a\\\\\" ; node -e x ; echo \"b\"",
+    "postinstall": "echo $(echo \")\" ; node -e x)"
+  }
+}
