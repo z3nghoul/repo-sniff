@@ -18,6 +18,22 @@ fn core_fixtures(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Replaces the scan time, which differs on every run, with a fixed text.
+fn without_time(report: String) -> String {
+    report
+        .lines()
+        .map(|line| {
+            if line.starts_with("Scan time: ") {
+                "Scan time: [TIME]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 /// Runs `repo-sniff scan .` inside `dir` and returns what it printed.
 fn scan_dot(dir: &Path) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_repo-sniff"))
@@ -30,7 +46,9 @@ fn scan_dot(dir: &Path) -> String {
         "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("report is valid UTF-8")
+    let report = String::from_utf8(output.stdout).expect("report is valid UTF-8");
+    assert!(report.contains("\nScan time: "), "{report}");
+    without_time(report)
 }
 
 #[test]
