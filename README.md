@@ -38,8 +38,9 @@ What it does to protect you:
   your own or the system's git configuration runs, hooks and templates are
   off, symlinks are written as plain files (the scanner then reads them as links
   from the clone's own index), and submodules are not fetched.
-  There are no interactive prompts. For a private repository, clone it
-  yourself and scan the folder.
+  There are no interactive prompts. Your git credentials are never used: a
+  private repository fails with a message saying so (see
+  [Private repositories](#private-repositories)).
 - **Secrets.** A token pasted into a URL (`https://TOKEN@host/...`) is hidden
   in the notice, the report and error messages. A URL whose password holds
   an unescaped `/`, `?` or `#` is refused before anything is sent (curl would
@@ -152,6 +153,27 @@ Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
 Scan time: 3 ms
 Scan: complete (every file was read)
 ```
+
+### Private repositories
+
+`repo-sniff` never uses your git credentials: git runs with an empty home
+directory and no credential helper, and it cannot ask for a password. Scanning
+a private repository, or one that does not exist, fails with exit status 2 and
+a message that says so. To scan a private repository, clone it yourself and
+scan the folder:
+
+```sh
+git clone git@github.com:owner/private-repo.git some-folder
+repo-sniff scan some-folder
+```
+
+### Scanning repo-sniff itself
+
+`repo-sniff scan .` in this repository reports findings under
+`tests/fixtures/*/positive`. They are intentional: those folders hold
+synthetic payloads that the rules must catch. The fixture paths are not
+excluded from a scan, because an attacker can name a payload folder the same
+way, and a scanner that skipped such paths would be blind to it.
 
 ### Options
 
