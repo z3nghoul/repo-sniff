@@ -29,7 +29,7 @@ cargo build --release -q || exit 1
 BIN="$PWD/target/release/repo-sniff"
 mkdir -p "$OUT"
 
-printf 'repo\thead\tresult\texit\tcritical\thigh\tmedium\tlow\tinfo\tskipped\tseconds\n' >"$OUT/results.tsv"
+printf 'repo\thead\tresult\texit\tcritical\thigh\tmedium\tlow\tinfo\tskipped\tseconds\tscan\n' >"$OUT/results.tsv"
 
 for repo in "${REPOS[@]}"; do
   name="${repo//\//__}"
@@ -55,14 +55,15 @@ for repo in "${REPOS[@]}"; do
   summary="$(grep '^Summary:' "$OUT/$name.txt" | tail -1)"
   count() { echo "$summary" | sed -n "s/.* \([0-9]*\) $1.*/\1/p"; }
   skipped="$(sed -n 's/^Not fully analyzed ([0-9]*): //p' "$OUT/$name.txt" | head -1)"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  scan_time="$(sed -n 's/^Scan time: //p' "$OUT/$name.txt" | tail -1)"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$repo" "$head" "$result" "$code" \
     "$(count critical)" "$(count high)" "$(count medium)" "$(count low)" "$(count info)" \
-    "${skipped:--}" "$secs" >>"$OUT/results.tsv"
+    "${skipped:--}" "$secs" "${scan_time:--}" >>"$OUT/results.tsv"
 done
 
 # The summary as a table of fixed widths (no `column`, which is not everywhere).
-while IFS="$(printf '\t')" read -r repo head result code critical high medium low info skipped secs; do
-  printf '%-22s %-13s %-13s %-5s %-9s %-5s %-7s %-4s %-5s %-52s %s\n' \
-    "$repo" "$head" "$result" "$code" "$critical" "$high" "$medium" "$low" "$info" "$skipped" "$secs"
+while IFS="$(printf '\t')" read -r repo head result code critical high medium low info skipped secs scan; do
+  printf '%-22s %-13s %-13s %-5s %-9s %-5s %-7s %-4s %-5s %-52s %-6s %s\n' \
+    "$repo" "$head" "$result" "$code" "$critical" "$high" "$medium" "$low" "$info" "$skipped" "$secs" "$scan"
 done <"$OUT/results.tsv"
