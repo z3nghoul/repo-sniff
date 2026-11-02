@@ -3,8 +3,8 @@
 # fails the test, so every file under negative/ must stay unreported.
 # The marker is the `//` key of each package.json (line 2) or line 1 of a script.
 
-files_scanned = 58
-unflagged = ["positive/chain/cycle/setup.js", "positive/chain/install-cd/a/setup.js", "positive/chain/npm-start-default/server.js", "positive/chain/operators/scripts/a.js", "positive/chain/prepare-start/server/server.js", "positive/chain/subfolder-install/backend/package.json", "positive/chain/subfolder-install/frontend/package.json", "positive/chain/yarn-pnpm/scripts/gen.js", "positive/levels/scripts/deps.js", "positive/levels/scripts/release.js", "positive/levels/scripts/setup.js", "positive/nested/package.json", "positive/run/build-starts-server/api/app.js", "positive/run/concurrently/server/index.js", "positive/run/npm-run-all/server.js", "positive/run/test-pipe/server/server.js"]
+files_scanned = 69
+unflagged = ["positive/chain/cycle/setup.js", "positive/chain/install-cd/a/setup.js", "positive/chain/npm-start-default/server.js", "positive/chain/operators/scripts/a.js", "positive/chain/prepare-start/server/server.js", "positive/chain/subfolder-install/backend/package.json", "positive/chain/subfolder-install/frontend/package.json", "positive/chain/yarn-pnpm/scripts/gen.js", "positive/evasion/committed-bin/node_modules/.bin/husky", "positive/evasion/node-forms/build.js", "positive/evasion/node-forms/preload.js", "positive/levels/scripts/deps.js", "positive/levels/scripts/release.js", "positive/levels/scripts/setup.js", "positive/nested/package.json", "positive/run/build-starts-server/api/app.js", "positive/run/concurrently/server/index.js", "positive/run/npm-run-all/server.js", "positive/run/test-pipe/server/server.js"]
 
 [[finding]]
 file = "positive/chain/cycle/package.json"
@@ -94,6 +94,94 @@ line = 5
 rule = "deps.npm-lifecycle-hook"
 severity = "medium"
 explanation_contains = 'scripts/gen.js'
+
+[[finding]]
+file = "positive/evasion/cmd/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/evasion/committed-bin/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'node_modules/.bin/husky'
+
+[[finding]]
+file = "positive/evasion/install-spec/github/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/evasion/install-spec/registry/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'not a dependency'
+
+[[finding]]
+file = "positive/evasion/install-spec/url/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "critical"
+
+[[finding]]
+file = "positive/evasion/keywords/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/evasion/keywords/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/evasion/node-forms/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/evasion/node-forms/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+explanation_contains = 'pipe'
+
+[[finding]]
+file = "positive/evasion/node-forms/package.json"
+line = 7
+rule = "deps.npm-lifecycle-hook"
+severity = "medium"
+explanation_contains = 'preload.js'
+
+[[finding]]
+file = "positive/evasion/node-forms/package.json"
+line = 8
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/evasion/shell-quoting/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/evasion/shell-quoting/package.json"
+line = 6
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
+
+[[finding]]
+file = "positive/evasion/shell-quoting/package.json"
+line = 7
+rule = "deps.npm-lifecycle-hook"
+severity = "high"
 
 [[finding]]
 file = "positive/honest/build-chain/package.json"

@@ -39,8 +39,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use regex::Regex;
-
 use super::{Ctx, FileIssue, Hit, RepoIndex, TextSpan};
 use crate::finding::Severity;
 use crate::jsonc::{self, Node, Value};
@@ -247,9 +245,9 @@ const NETWORK: &[&str] = &[
 const QUIET: &[&str] = &[
     "echo", "exit", "true", "false", ":", "test", "[", "[[", "pwd", "mkdir", "rm", "rmdir", "cp",
     "mv", "ls", "touch", "set", "export", "unset", "printf", "cat", "chmod", "ln", "type", "del",
-    "copy", "move", "rd", "md", "if", "then", "fi", "else", "do", "done", "for", "while", "rem",
-    "title", "pause", "cls", "clear", "which", "where", "date", "sleep", "read", "shift", "umask",
-    "ulimit", "wait", "trap",
+    "copy", "move", "rd", "md", "fi", "done", "for", "esac", "case", "rem", "title", "pause",
+    "cls", "clear", "which", "where", "date", "sleep", "read", "shift", "umask", "ulimit", "wait",
+    "trap",
 ];
 
 /// Wrappers that run the rest of the command line.
@@ -596,22 +594,7 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
             continue;
         }
         if c == '$' && chars.get(i + 1) == Some(&'(') {
-            let mut depth = 0usize;
-            let mut j = i + 1;
-            while j < chars.len() {
-                match chars[j] {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                j += 1;
-            }
-            let end = j.min(chars.len() - 1);
+            let end = sub_end(&chars, i + 1, 0);
             subs.push(chars[i + 2..end.max(i + 2)].iter().collect());
             st.word.extend(&chars[i..=end]);
             st.in_word = true;
@@ -632,14 +615,40 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
         if double {
             if c == '"' {
                 double = false;
-            } else if c == '\\' && chars.get(i + 1) == Some(&'"') {
-                st.word.push('"');
+            } else if c == '\\'
+                && let Some(&next) = chars.get(i + 1)
+                && matches!(next, '\\' | '"' | '$' | '`')
+            {
+                // In double quotes a backslash escapes only these four.
+                st.word.push(next);
                 i += 1;
             } else {
                 st.word.push(c);
             }
             i += 1;
             continue;
+        }
+        if c == '\\' {
+            // Outside quotes a backslash escapes the next character, except
+            // where it is a Windows path separator (`.\scripts\x.bat`).
+            match chars.get(i + 1) {
+                Some('\n') => {
+                    i += 2;
+                    continue;
+                }
+                Some(&next)
+                    if matches!(
+                        next,
+                        '\'' | '"' | ' ' | ';' | '&' | '|' | '$' | '`' | '(' | ')' | '<' | '>'
+                    ) =>
+                {
+                    st.word.push(next);
+                    st.in_word = true;
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
         }
         match c {
             '\'' => {
@@ -671,6 +680,54 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
     }
     st.segment_end();
     (st.segments, subs)
+}
+
+/// How deep `sub_end` follows `$(` inside `$(`; deeper text is read as a single
+/// substitution up to the end, so a hostile script cannot overflow the stack.
+const MAX_SUBSTITUTION_DEPTH: usize = 32;
+
+/// The index of the `)` that closes the `(` at `open`, reading quotes, escapes
+/// and nested `$(...)` the way the shell does; the last index when there is
+/// none.
+fn sub_end(chars: &[char], open: usize, nesting: usize) -> usize {
+    let last = chars.len().saturating_sub(1);
+    if nesting > MAX_SUBSTITUTION_DEPTH {
+        return last;
+    }
+    let mut depth = 0usize;
+    let mut j = open;
+    while j < chars.len() {
+        match chars[j] {
+            '\\' => j += 1,
+            '\'' => {
+                j += 1;
+                while j < chars.len() && chars[j] != '\'' {
+                    j += 1;
+                }
+            }
+            '"' => {
+                j += 1;
+                while j < chars.len() && chars[j] != '"' {
+                    if chars[j] == '\\' {
+                        j += 1;
+                    } else if chars[j] == '$' && chars.get(j + 1) == Some(&'(') {
+                        j = sub_end(chars, j + 1, nesting + 1);
+                    }
+                    j += 1;
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return j;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    last
 }
 
 fn is_env_assignment(word: &str) -> bool {
@@ -713,30 +770,102 @@ fn has_network_marker(code: &str) -> bool {
     NETWORK_MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// Patterns and names longer than this are not matched with wildcards: they are
+/// not real script names, and the match costs the product of the lengths.
+const MAX_GLOB_CHARS: usize = 256;
+
 /// Whether `pattern` (`*` stays inside one `:` segment, `**` crosses them)
-/// matches a script name, as `npm-run-all` and `concurrently` read it.
+/// matches a script name, as `npm-run-all` and `concurrently` read it. It
+/// compiles nothing and allocates in proportion to the name.
 fn glob_matches(pattern: &str, name: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == name;
     }
-    let mut regex = String::from("^");
+    if pattern.len() > MAX_GLOB_CHARS || name.len() > MAX_GLOB_CHARS {
+        return false;
+    }
+    enum Token {
+        Literal(char),
+        Star,
+        Deep,
+    }
+    let mut tokens = Vec::new();
     let mut rest = pattern;
     while !rest.is_empty() {
         if let Some(tail) = rest.strip_prefix("**") {
-            regex.push_str(".*");
+            tokens.push(Token::Deep);
             rest = tail;
         } else if let Some(tail) = rest.strip_prefix('*') {
-            regex.push_str("[^:]*");
+            tokens.push(Token::Star);
             rest = tail;
         } else {
             let mut chars = rest.chars();
-            let c = chars.next().unwrap_or_default();
-            regex.push_str(&regex::escape(&c.to_string()));
+            tokens.push(Token::Literal(chars.next().unwrap_or_default()));
             rest = chars.as_str();
         }
     }
-    regex.push('$');
-    Regex::new(&regex).is_ok_and(|re| re.is_match(name))
+    let name: Vec<char> = name.chars().collect();
+    // matched[j]: the tokens so far match the first j characters of the name.
+    let mut matched = vec![false; name.len() + 1];
+    matched[0] = true;
+    for token in tokens {
+        let mut next = vec![false; name.len() + 1];
+        match token {
+            Token::Literal(c) => {
+                for j in 0..name.len() {
+                    next[j + 1] = matched[j] && name[j] == c;
+                }
+            }
+            Token::Deep => {
+                let mut any = false;
+                for j in 0..=name.len() {
+                    any |= matched[j];
+                    next[j] = any;
+                }
+            }
+            Token::Star => {
+                let mut any = false;
+                for j in 0..=name.len() {
+                    any = matched[j] || (any && j > 0 && name[j - 1] != ':');
+                    next[j] = any;
+                }
+            }
+        }
+        matched = next;
+    }
+    matched[name.len()]
+}
+
+/// Whether a package spec points outside the registry.
+fn is_remote_spec(spec: &str) -> bool {
+    spec.contains("://")
+        || ["git+", "git@", "github:", "gitlab:", "bitbucket:", "gist:"]
+            .iter()
+            .any(|prefix| spec.starts_with(prefix))
+}
+
+/// The package specs of `npm install a b` (what follows the command).
+fn install_specs(positionals: &[String]) -> Vec<String> {
+    let adds = matches!(
+        positionals.first().map(String::as_str),
+        Some(
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isntall"
+                | "add"
+        )
+    );
+    if adds {
+        positionals[1..].to_vec()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Whether a front-end tool called with these arguments starts a server that
@@ -806,7 +935,8 @@ type Stack = Vec<(String, String)>;
 /// What a package manager command line asks for.
 enum Action {
     Run(String),
-    Install,
+    /// The package specs named on the command line.
+    Install(Vec<String>),
     Pack,
     Publish,
     Exec(Vec<String>),
@@ -956,9 +1086,20 @@ impl<'a> Resolver<'a> {
         stack: &mut Stack,
         out: &mut Outcome,
     ) {
+        // Assignments and the keywords that only introduce the real command
+        // (`then node x.js`, `! cmd`, `do cmd`) come first.
         let mut start = 0;
-        while words.get(start).is_some_and(|w| is_env_assignment(w)) {
-            start += 1;
+        while let Some(word) = words.get(start) {
+            if is_env_assignment(word)
+                || matches!(
+                    word.as_str(),
+                    "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!" | "{" | "}"
+                )
+            {
+                start += 1;
+            } else {
+                break;
+            }
         }
         let words = &words[start..];
         let Some(first) = words.first() else {
@@ -979,6 +1120,14 @@ impl<'a> Resolver<'a> {
             return;
         }
         if QUIET.contains(&name.as_str()) {
+            return;
+        }
+        if !first.contains(['/', '\\'])
+            && let Some(path) = self.committed_bin(cwd, &name)
+        {
+            // npm puts node_modules/.bin on the PATH, so a file committed there
+            // is what the name runs, whatever the name says.
+            self.local_file(&path, out, false);
             return;
         }
         if first.contains(['/', '\\']) && !first.starts_with(['$', '%']) {
@@ -1079,6 +1228,23 @@ impl<'a> Resolver<'a> {
                 ),
             ),
             _ => self.other(cwd, first, name, args, out),
+        }
+    }
+
+    /// A file committed as `node_modules/.bin/<name>` in the folder or above.
+    fn committed_bin(&self, cwd: &str, name: &str) -> Option<String> {
+        let mut dir = cwd;
+        loop {
+            for candidate in [name.to_string(), format!("{name}.cmd")] {
+                let path = join(dir, &format!("node_modules/.bin/{candidate}"));
+                if self.exists(&path) {
+                    return Some(path);
+                }
+            }
+            if dir.is_empty() {
+                return None;
+            }
+            dir = dir_of(dir);
         }
     }
 
@@ -1196,6 +1362,30 @@ impl<'a> Resolver<'a> {
         while i < args.len() {
             let arg = args[i].as_str();
             let flag = arg.split('=').next().unwrap_or(arg);
+            if name != "nodemon"
+                && let Some(code) = arg
+                    .strip_prefix("--eval=")
+                    .or_else(|| arg.strip_prefix("--print="))
+            {
+                self.inline(&format!("{name} {flag}"), code, out);
+                return;
+            }
+            // A preloaded module runs before the script, or without one.
+            if matches!(
+                flag,
+                "-r" | "--require" | "--import" | "--loader" | "--experimental-loader"
+            ) {
+                let value = match arg.split_once('=') {
+                    Some((_, value)) => Some(value),
+                    None => args.get(i + 1).map(String::as_str),
+                };
+                if let Some(value) = value
+                    && (value.starts_with('.') || looks_like_file(value))
+                    && let Some(path) = resolve(cwd, value)
+                {
+                    self.local_file(&path, out, true);
+                }
+            }
             match arg {
                 "-e" | "--eval" | "-p" | "--print" if name != "nodemon" => {
                     if let Some(code) = args.get(i + 1) {
@@ -1233,7 +1423,29 @@ impl<'a> Resolver<'a> {
                 break;
             }
         }
-        let Some(target) = args.get(i) else { return };
+        let Some(target) = args.get(i) else {
+            // No script: node reads the program from its standard input.
+            let informational = args.iter().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "-v" | "--version" | "-h" | "--help" | "-c" | "--check"
+                )
+            });
+            if !informational && matches!(name, "node" | "nodejs" | "ts-node" | "tsx") {
+                out.raise(
+                    Severity::High,
+                    format!("runs {name} on a program it reads from a pipe"),
+                );
+            }
+            return;
+        };
+        if target == "-" {
+            out.raise(
+                Severity::High,
+                format!("runs {name} on a program it reads from a pipe"),
+            );
+            return;
+        }
         if target.contains("://") {
             out.raise(
                 Severity::Critical,
@@ -1366,12 +1578,19 @@ impl<'a> Resolver<'a> {
         stack: &mut Stack,
         out: &mut Outcome,
     ) {
-        let at = args
-            .iter()
-            .position(|a| a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("/k"));
+        // `/c` may be glued to the command: `cmd /c"node -e x"`.
+        let at = args.iter().position(|a| {
+            let lower = a.to_ascii_lowercase();
+            lower.starts_with("/c") || lower.starts_with("/k")
+        });
         match at {
             Some(at) => {
-                let text = args[at + 1..].join(" ");
+                let glued = args[at].get(2..).unwrap_or_default();
+                let text = [glued]
+                    .into_iter()
+                    .chain(args[at + 1..].iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 out.raise(Severity::High, "runs inline code (cmd /c)".to_string());
                 let child = self.text(cwd, &text, depth + 1, stack);
                 out.absorb(child, "the cmd /c string");
@@ -1533,7 +1752,13 @@ impl<'a> Resolver<'a> {
                     "-g" | "--global" => global = true,
                     "--workspace" | "-w" | "--workspaces" | "-ws" | "--filter" | "-F" | "-r"
                     | "--recursive" => workspaces = true,
-                    "-c" | "--call" if matches!(tool, "npx" | "pnpx" | "bunx") => {
+                    "-c" | "--call"
+                        if matches!(tool, "npx" | "pnpx" | "bunx")
+                            || matches!(
+                                positionals.first().map(String::as_str),
+                                Some("exec" | "x" | "dlx")
+                            ) =>
+                    {
                         if let Some(text) = value {
                             let child = self.text(&dir, &text, depth + 1, stack);
                             out.absorb(child, "npx -c");
@@ -1567,7 +1792,7 @@ impl<'a> Resolver<'a> {
                     | "isntall" | "add" | "ci" | "clean-install" | "install-clean" | "rebuild"
                     | "rb" | "link" | "ln" | "update" | "up" | "upgrade" | "install-test" | "it"
                     | "install-ci-test" | "cit",
-                ) => Action::Install,
+                ) => Action::Install(install_specs(&positionals)),
                 Some("pack") => Action::Pack,
                 Some("publish") => Action::Publish,
                 Some("exec" | "x") => Action::Exec([positionals[1..].to_vec(), rest].concat()),
@@ -1576,12 +1801,12 @@ impl<'a> Resolver<'a> {
             _ => {
                 // yarn, pnpm, bun
                 match positionals.first().map(String::as_str) {
-                    None if tool == "yarn" => Action::Install,
+                    None if tool == "yarn" => Action::Install(Vec::new()),
                     None => Action::Nothing,
                     Some(
                         "install" | "i" | "add" | "up" | "update" | "upgrade" | "ci" | "fetch"
                         | "rebuild" | "rb",
-                    ) => Action::Install,
+                    ) => Action::Install(install_specs(&positionals)),
                     Some("run" | "run-script") => positionals
                         .get(1)
                         .map_or(Action::Nothing, |n| Action::Run(n.clone())),
@@ -1617,8 +1842,11 @@ impl<'a> Resolver<'a> {
                 let child = self.run_named(&dir, &name, depth + 1, stack);
                 out.absorb(child, &format!("{tool} run {}", short(&name)));
             }
-            Action::Install if ignore_scripts || global => {}
-            Action::Install => {
+            Action::Install(_) if ignore_scripts || global => {}
+            Action::Install(specs) => {
+                for spec in &specs {
+                    self.install_spec(&dir, spec, out);
+                }
                 let child = self.hooks(&dir, INSTALL_HOOKS, "install", depth + 1, stack);
                 out.absorb(child, &format!("{tool} install in {place}"));
                 if dir != self.home {
@@ -1652,16 +1880,40 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// A package named in `npm install <spec>`: fetched, and its install hooks
+    /// run.
+    fn install_spec(&mut self, dir: &str, spec: &str, out: &mut Outcome) {
+        if is_remote_spec(spec) {
+            out.raise(
+                Severity::Critical,
+                format!(
+                    "installs {} from outside the registry, and its install hooks run",
+                    short(spec)
+                ),
+            );
+            return;
+        }
+        let name = match spec.rfind('@') {
+            Some(at) if at > 0 => &spec[..at],
+            _ => spec,
+        };
+        if self.manifest(dir).is_some_and(|m| m.deps.contains(name)) {
+            return;
+        }
+        out.raise(
+            Severity::High,
+            format!(
+                "installs the package {}, which is not a dependency of this project, and its \
+                 install hooks run",
+                short(spec)
+            ),
+        );
+    }
+
     /// `npx <package>`: a package fetched from a registry (or worse) and run.
     fn dlx(&mut self, dir: &str, words: &[String], out: &mut Outcome) {
         let Some(spec) = words.first() else { return };
-        if spec.contains("://")
-            || spec.starts_with("git+")
-            || spec.starts_with("git@")
-            || spec.starts_with("github:")
-            || spec.starts_with("gitlab:")
-            || spec.starts_with("bitbucket:")
-        {
+        if is_remote_spec(spec) {
             out.raise(
                 Severity::Critical,
                 format!(
@@ -1760,9 +2012,19 @@ impl<'a> Resolver<'a> {
             .map(|m| m.scripts.keys().cloned().collect())
             .unwrap_or_default();
         for pattern in patterns {
-            for name in names.iter().filter(|n| glob_matches(pattern, n)) {
-                let child = self.run_named(dir, name, depth + 1, stack);
-                out.absorb(child, &format!("script \"{}\"", short(name)));
+            for name in &names {
+                // Every comparison counts against the budget, so a file of
+                // thousands of scripts and patterns ends early and is reported
+                // as not fully followed.
+                self.steps += 1;
+                if self.steps > MAX_STEPS {
+                    out.truncated = true;
+                    return;
+                }
+                if glob_matches(pattern, name) {
+                    let child = self.run_named(dir, name, depth + 1, stack);
+                    out.absorb(child, &format!("script \"{}\"", short(name)));
+                }
             }
         }
     }
@@ -2414,5 +2676,78 @@ mod tests {
         assert_eq!(resolve("", "/etc/x"), None);
         assert_eq!(resolve("a", r"b\c.js").as_deref(), Some("a/b/c.js"));
         assert_eq!(resolve("", "$HOME/x"), None);
+    }
+
+    #[test]
+    fn quoting_cannot_hide_a_command_from_the_splitter() {
+        for script in [
+            r#"echo \' ; node -e x"#,
+            r#"echo "a\\" ; node -e x ; echo "b""#,
+            r#"echo $(echo ")" ; node -e x)"#,
+            r#"echo "$(echo ")" ; node -e x)""#,
+            "if true; then node -e x; fi",
+            "for i in 1; do node -e x; done",
+            "! node -e x",
+        ] {
+            let text = format!(
+                "{{\"scripts\": {{\"postinstall\": {}}}}}",
+                serde_like(script)
+            );
+            let hits = run(lifecycle_hook, "package.json", &text, &[]);
+            assert_eq!(
+                hits.iter().map(|h| h.severity).max(),
+                Some(Severity::High),
+                "{script}"
+            );
+        }
+    }
+
+    /// A JSON string literal for a script, without a JSON crate.
+    fn serde_like(script: &str) -> String {
+        format!("\"{}\"", script.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    #[test]
+    fn nested_substitutions_do_not_overflow_the_stack() {
+        let script = "$(\"".repeat(200_000);
+        let (segments, _) = split_shell(&script);
+        assert!(segments.len() <= 1);
+    }
+
+    #[test]
+    fn node_without_a_script_is_a_pipe_unless_it_only_prints_a_version() {
+        assert_eq!(
+            level(r#""postinstall": "cat x.js | node""#),
+            Some(Severity::High)
+        );
+        assert_eq!(level(r#""postinstall": "node --version""#), None);
+    }
+
+    #[test]
+    fn many_scripts_and_patterns_end_early_and_are_not_called_clean() {
+        let mut scripts: Vec<String> = (0..3000).map(|i| format!(r#""x{i}": "echo""#)).collect();
+        let patterns: Vec<String> = (0..300).map(|i| format!("y{i}*")).collect();
+        scripts.push(format!(r#""postinstall": "run-p {}""#, patterns.join(" ")));
+        let started = std::time::Instant::now();
+        let hits = hook(&scripts.join(","));
+        assert!(started.elapsed().as_secs() < 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn a_committed_bin_file_beats_the_honest_name() {
+        let repo = RepoIndex::new(["package.json", "node_modules/.bin/husky"]);
+        let text = r#"{"scripts": {"postinstall": "husky install"}}"#;
+        let views = Views::new(text.as_bytes(), Decode::Utf8WithoutNuls);
+        let hits = lifecycle_hook(&Ctx::new(
+            "package.json",
+            None,
+            &repo,
+            false,
+            Severity::Low,
+            &views,
+        ));
+        assert_eq!(hits[0].severity, Severity::Medium);
     }
 }
