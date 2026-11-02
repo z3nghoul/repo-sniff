@@ -149,6 +149,7 @@ CRITICAL  .vscode/tasks.json:6  ide.vscode-folder-open-task  [ide]
           task "setup" runs automatically when the folder is opened, and its command contains "curl"
 
 Summary: 1 critical, 0 high, 0 medium, 0 low, 0 info
+Scan time: 3 ms
 Scan: complete (every file was read)
 ```
 
