@@ -2363,6 +2363,19 @@ fn line_of(text: &str, offset: usize) -> usize {
     jsonc::line_of(text, offset)
 }
 
+/// When npm runs a hook that a plain `npm install` of the root does not.
+fn pack_hook_when(name: &str) -> &'static str {
+    match name {
+        "prepack" | "preprepack" => {
+            "npm runs it on npm pack and npm publish, and when the repository is installed as \
+             a git dependency"
+        }
+        "postpack" => "npm runs it on npm pack and npm publish",
+        // prepublishOnly, publish, postpublish
+        _ => "npm runs it only on npm publish",
+    }
+}
+
 fn demote(sev: Severity) -> Severity {
     match sev {
         Severity::Critical => Severity::High,
@@ -2474,8 +2487,8 @@ pub fn lifecycle_hook(ctx: &Ctx<'_>) -> Vec<Hit> {
             format!("npm runs \"{name}\" on npm install: {what}")
         } else {
             format!(
-                "\"{name}\" is not run by npm install (npm runs it on pack, publish, or when \
-                 the repository is installed as a git dependency): {what}"
+                "\"{name}\" is not run by npm install ({}): {what}",
+                pack_hook_when(&name)
             )
         };
         if outcome.cycle {

@@ -447,14 +447,14 @@ file = "positive/levels/package.json"
 line = 9
 rule = "deps.npm-lifecycle-hook"
 severity = "high"
-explanation_contains = 'not run by npm install'
+explanation_contains = 'git dependency'
 
 [[finding]]
 file = "positive/levels/package.json"
 line = 10
 rule = "deps.npm-lifecycle-hook"
 severity = "low"
-explanation_contains = 'not run by npm install'
+explanation_contains = 'only on npm publish'
 
 [[finding]]
 file = "positive/levels/package.json"
