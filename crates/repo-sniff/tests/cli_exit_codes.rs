@@ -455,3 +455,33 @@ fn a_complete_scan_says_so_and_exits_zero() {
     assert_eq!(code(&output), 0);
     assert!(String::from_utf8_lossy(&output.stdout).contains("Scan: complete"));
 }
+
+#[test]
+fn bidi_controls_that_change_nothing_are_low_and_do_not_fail_the_default_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let helper = "function a(e){return\"\u{202A}\"+e+\"\u{202C}\"}\n";
+    fs::write(dir.path().join("rtl.js"), helper).unwrap();
+
+    let output = run(dir.path(), &["scan", "."]);
+
+    assert_eq!(code(&output), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("bidi controls present, display unchanged"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("INCONCLUSIVE"), "{stdout}");
+    assert_eq!(
+        code(&run(dir.path(), &["scan", ".", "--fail-on", "low"])),
+        1
+    );
+}
+
+#[test]
+fn bidi_controls_that_reorder_the_line_still_fail_the_default_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = "function a(e){return\"\u{202B}\"+e.trim()+\"\u{202C}\"}\n";
+    fs::write(dir.path().join("rtl.js"), line).unwrap();
+
+    assert_eq!(code(&run(dir.path(), &["scan", "."])), 1);
+}

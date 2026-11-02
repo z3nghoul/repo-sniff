@@ -1,12 +1,14 @@
 //! Running rules over a repository.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::bidi;
 use crate::checks::{Check, Ctx, Decode, FileIssue, HEAD_LEN, Hit, RepoIndex, TextSpan, Views};
 use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
@@ -151,6 +153,18 @@ pub fn scan_with_links(
     limits: Limits,
     links: &HashSet<PathBuf>,
 ) -> Report {
+    scan_with_budget(root, rules, limits, links, bidi::SCAN_BUDGET)
+}
+
+/// `scan_with_links` with the number of bytes of lines the bidi rule may lay
+/// out in the whole scan; tests lower it to reach the end of it cheaply.
+fn scan_with_budget(
+    root: &Path,
+    rules: &[Rule],
+    limits: Limits,
+    links: &HashSet<PathBuf>,
+    bidi_budget: usize,
+) -> Report {
     let walked = walk::walk_with_links(root, limits, links);
 
     // Where files are allowed to be looked up: everything the walk saw,
@@ -253,6 +267,7 @@ pub fn scan_with_links(
         })
         .collect();
     let env = Env {
+        bidi_budget: Cell::new(bidi_budget),
         index: &index,
         truncated: walked.truncated,
         file_rules: &file_rules,
@@ -567,6 +582,8 @@ pub fn scan_with_links(
 
 /// What a scan shares between files.
 struct Env<'a> {
+    /// Bytes of lines the bidi rule may still lay out in this scan.
+    bidi_budget: Cell<usize>,
     index: &'a RepoIndex,
     truncated: bool,
     file_rules: &'a [(&'a Rule, Check)],
@@ -879,29 +896,46 @@ fn resolve_link_with(link: &str, target: &str, separators: &[char]) -> Option<St
     Some(parts.join("/"))
 }
 
-/// Runs the line-regex rules over lines fed one at a time, keeping at most
-/// `MAX_LINE_FINDINGS_PER_RULE` findings per rule and counting the rest.
+/// How a line rule looks at a line.
+enum LineRule<'a> {
+    Regex(&'a Regex),
+    BidiDisplay,
+}
+
+/// What the bidi rule says about a line whose controls change nothing.
+const BIDI_UNCHANGED: &str = "bidi controls present, display unchanged";
+
+/// Runs the line rules over lines fed one at a time, keeping at most
+/// `MAX_LINE_FINDINGS_PER_RULE` findings per rule and level and counting the
+/// rest.
 struct LineScanner<'a> {
-    rules: Vec<(&'a Rule, &'a Regex)>,
-    listed: Vec<usize>,
-    hidden: Vec<usize>,
+    rules: Vec<(&'a Rule, LineRule<'a>)>,
+    /// Findings listed so far, per rule: at the rule's own level and at LOW.
+    /// Only the bidi rule has LOW findings. They count apart, so a flood of
+    /// harmless lines cannot push a deceptive one out of the list.
+    listed: Vec<[usize; 2]>,
+    hidden: Vec<[usize; 2]>,
     findings: Vec<Finding>,
+    /// What this scan has left for laying out lines of the bidi rule.
+    bidi_budget: &'a Cell<usize>,
 }
 
 impl<'a> LineScanner<'a> {
-    fn new(rules: &[&'a Rule]) -> Self {
+    fn new(rules: &[&'a Rule], bidi_budget: &'a Cell<usize>) -> Self {
         let rules: Vec<_> = rules
             .iter()
             .filter_map(|&rule| match &rule.matcher {
-                Matcher::LineRegex(pattern) => Some((rule, pattern)),
+                Matcher::LineRegex(pattern) => Some((rule, LineRule::Regex(pattern))),
+                Matcher::BidiDisplay => Some((rule, LineRule::BidiDisplay)),
                 _ => None,
             })
             .collect();
         LineScanner {
-            listed: vec![0; rules.len()],
-            hidden: vec![0; rules.len()],
+            listed: vec![[0; 2]; rules.len()],
+            hidden: vec![[0; 2]; rules.len()],
             rules,
             findings: Vec::new(),
+            bidi_budget,
         }
     }
 
@@ -921,24 +955,60 @@ impl<'a> LineScanner<'a> {
         file_offset: Option<usize>,
         column_exact: bool,
     ) {
-        for (index, (rule, pattern)) in self.rules.iter().enumerate() {
-            if self.listed[index] == MAX_LINE_FINDINGS_PER_RULE {
-                if pattern.is_match(line) {
-                    self.hidden[index] += 1;
+        for (index, (rule, line_rule)) in self.rules.iter().enumerate() {
+            // The slot of the level a finding is listed at, its severity, its
+            // explanation and where it starts.
+            let (found, slot, severity, explanation) = match line_rule {
+                LineRule::Regex(pattern) => {
+                    if self.listed[index][0] == MAX_LINE_FINDINGS_PER_RULE {
+                        if pattern.is_match(line) {
+                            self.hidden[index][0] += 1;
+                        }
+                        continue;
+                    }
+                    // `find` matches exactly when `is_match` does, and says where.
+                    let Some(found) = pattern.find(line) else {
+                        continue;
+                    };
+                    (found.range(), 0, rule.severity, rule.description.clone())
                 }
+                LineRule::BidiDisplay => {
+                    let Some(found) = bidi::first_control(line) else {
+                        continue;
+                    };
+                    // With the list of the rule's own level full, nothing more
+                    // is laid out: such a line counts as that level.
+                    if self.listed[index][0] == MAX_LINE_FINDINGS_PER_RULE {
+                        self.hidden[index][0] += 1;
+                        continue;
+                    }
+                    match bidi::judge(line, self.bidi_budget) {
+                        bidi::Verdict::Unchanged => {
+                            (found, 1, Severity::Low, BIDI_UNCHANGED.to_string())
+                        }
+                        bidi::Verdict::Differs => {
+                            (found, 0, rule.severity, rule.description.clone())
+                        }
+                        bidi::Verdict::NotAnalyzed(reason) => (
+                            found,
+                            0,
+                            rule.severity,
+                            format!("{} (not laid out: {})", rule.description, reason.text()),
+                        ),
+                    }
+                }
+            };
+            if self.listed[index][slot] == MAX_LINE_FINDINGS_PER_RULE {
+                self.hidden[index][slot] += 1;
                 continue;
             }
-            // `find` matches exactly when `is_match` does, and says where.
-            let Some(found) = pattern.find(line) else {
-                continue;
-            };
-            self.listed[index] += 1;
-            let span = file_offset.map(|start| start + found.start()..start + found.end());
+            self.listed[index][slot] += 1;
+            let span = file_offset.map(|start| start + found.start..start + found.end);
             let location =
-                Location::in_line(line, found.start(), line_number == 1, column_exact, span);
+                Location::in_line(line, found.start, line_number == 1, column_exact, span);
             self.findings.push(Finding {
                 rule_id: rule.id.clone(),
-                severity: rule.severity,
+                severity,
                 stage: rule.stage,
                 attack: rule.attack.clone(),
                 file: relative.to_path_buf(),
@@ -946,20 +1016,22 @@ impl<'a> LineScanner<'a> {
                 column: location.column,
                 span: location.span,
                 snippet: location.snippet,
-                explanation: rule.description.clone(),
+                explanation,
             });
         }
     }
 
     fn finish(self, relative: &Path, unlisted: &mut Vec<Unlisted>) -> Vec<Finding> {
         for ((rule, _), hidden) in self.rules.iter().zip(&self.hidden) {
-            if *hidden > 0 {
-                unlisted.push(Unlisted {
-                    file: relative.to_path_buf(),
-                    rule_id: rule.id.clone(),
-                    severity: rule.severity,
-                    count: *hidden,
-                });
+            for (slot, severity) in [(0, rule.severity), (1, Severity::Low)] {
+                if hidden[slot] > 0 {
+                    unlisted.push(Unlisted {
+                        file: relative.to_path_buf(),
+                        rule_id: rule.id.clone(),
+                        severity,
+                        count: hidden[slot],
+                    });
+                }
             }
         }
         self.findings
@@ -1061,7 +1133,7 @@ fn scan_streamed(
         // Decoded as it is read, as for a file read whole (`Decode::Utf16Bom`).
         // Not a script for the NUL rule, and the text is never the file byte
         // for byte, so no spans; columns are exact.
-        let mut lines = LineScanner::new(&applicable);
+        let mut lines = LineScanner::new(&applicable, &env.bidi_budget);
         if !lines.is_empty() {
             let file = match File::open(&path) {
                 Ok(file) => file,
@@ -1138,7 +1210,7 @@ fn scan_streamed(
     }
 
     // Second pass: the line rules.
-    let mut lines = LineScanner::new(&applicable);
+    let mut lines = LineScanner::new(&applicable, &env.bidi_budget);
     if !lines.is_empty() {
         let file = match File::open(&path) {
             Ok(file) => file,
@@ -1362,7 +1434,7 @@ fn scan_text<'v>(
     let identical = views.text_is_bytes();
     let column_exact = views.columns_are_exact();
     let mut findings = Vec::new();
-    let mut lines = LineScanner::new(&applicable);
+    let mut lines = LineScanner::new(&applicable, &env.bidi_budget);
     for (index, line) in text.lines().enumerate() {
         // `lines` hands out slices of `text`, so the distance between the
         // pointers is where the line starts.
@@ -1375,7 +1447,7 @@ fn scan_text<'v>(
     for rule in applicable {
         match &rule.matcher {
             // Done above, in one pass over the lines.
-            Matcher::LineRegex(_) => {}
+            Matcher::LineRegex(_) | Matcher::BidiDisplay => {}
             Matcher::Jsonc(check) => {
                 let ctx = Ctx::new(
                     slash_path,
@@ -3877,6 +3949,59 @@ mod tests {
 
     fn some(text: &str) -> Option<String> {
         Some(text.to_string())
+    }
+
+    #[test]
+    fn the_bidi_budget_is_shared_by_the_files_of_a_scan_in_sorted_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // Each line is 1 KiB and harmless; the budget pays for 5 of them.
+        let line = format!("\u{202A} {}\n", "a".repeat(1019));
+        assert_eq!(line.len(), 1024);
+        for name in ["a.js", "b.js", "c.js"] {
+            write(dir.path(), name, line.repeat(3).as_bytes());
+        }
+        let rules = builtin_rules().unwrap();
+
+        let report = scan_with_budget(
+            dir.path(),
+            &rules,
+            Limits::default(),
+            &HashSet::new(),
+            5 * 1024,
+        );
+
+        let of = |name: &str| -> Vec<(usize, Severity, bool)> {
+            report
+                .findings
+                .iter()
+                .filter(|f| f.rule_id == "deception.bidi-control" && f.file == Path::new(name))
+                .map(|f| (f.line, f.severity, f.explanation.contains("budget")))
+                .collect()
+        };
+        assert_eq!(
+            of("a.js"),
+            [
+                (1, Severity::Low, false),
+                (2, Severity::Low, false),
+                (3, Severity::Low, false)
+            ]
+        );
+        assert_eq!(
+            of("b.js"),
+            [
+                (1, Severity::Low, false),
+                (2, Severity::Low, false),
+                (3, Severity::Critical, true)
+            ]
+        );
+        assert_eq!(
+            of("c.js"),
+            [
+                (1, Severity::Critical, true),
+                (2, Severity::Critical, true),
+                (3, Severity::Critical, true)
+            ]
+        );
     }
 
     #[test]

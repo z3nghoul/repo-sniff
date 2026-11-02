@@ -67,7 +67,7 @@ What it does to protect you:
 
 | Rule | Level | What it catches |
 |---|---|---|
-| `deception.bidi-control` | CRITICAL | Unicode bidirectional control characters that make code look different from what it does (Trojan Source, CVE-2021-42574) |
+| `deception.bidi-control` | LOW to CRITICAL | Unicode bidirectional control characters that make code look different from what it does (Trojan Source, CVE-2021-42574). A line is laid out with and without them; CRITICAL if the display differs or cannot be judged, LOW ("display unchanged") if it does not, as in the direction helpers of a vendored UI bundle |
 | `ide.vscode-folder-open-task` | MEDIUM to CRITICAL | VS Code tasks that run when a folder is opened, in `.vscode/tasks.json` and `*.code-workspace`; CRITICAL if the command downloads or runs code from a string; a file that cannot be parsed is reported for a manual look, HIGH if it mentions `runOn` and `folderOpen`, MEDIUM otherwise |
 | `deception.nul-byte-in-script` | HIGH | A NUL byte inside a script (by extension or shebang). The script is still scanned as text, because shells and interpreters run it. A script with a UTF-16 byte order mark is decoded first, so its NUL bytes are not a finding and the line rules see its real text, except `.bat`, `.cmd`, shell and PHP scripts, which run the bytes after the mark and are read as bytes. Not decoded: UTF-16 without a byte order mark, and UTF-16 in files that are not scripts |
 | `deps.python-pth-exec` | INFO to CRITICAL | Python `.pth` files with a line that starts with `import`, which Python runs every time it starts. Judged the way every supported Python version would read it; known honest forms (setuptools, virtualenv, editable installs, pytest-cov) are lowered |
