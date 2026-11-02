@@ -3,7 +3,7 @@
 # fails the test, so every file under negative/ must stay unreported.
 # The marker is the `//` key of each package.json (line 2) or line 1 of a script.
 
-files_scanned = 77
+files_scanned = 79
 unflagged = ["positive/chain/cycle/setup.js", "positive/chain/install-cd/a/setup.js", "positive/chain/npm-start-default/server.js", "positive/chain/operators/scripts/a.js", "positive/chain/prepare-start/server/server.js", "positive/chain/subfolder-install/backend/package.json", "positive/chain/subfolder-install/frontend/package.json", "positive/chain/yarn-pnpm/scripts/gen.js", "positive/evasion/committed-bin/node_modules/.bin/husky", "positive/evasion/node-forms/build.js", "positive/evasion/node-forms/preload.js", "positive/failclosed/restart/setup.js", "positive/levels/scripts/deps.js", "positive/levels/scripts/release.js", "positive/levels/scripts/setup.js", "positive/nested/package.json", "positive/run/build-starts-server/api/app.js", "positive/run/concurrently/server/index.js", "positive/run/npm-run-all/server.js", "positive/run/test-pipe/server/server.js"]
 
 [[finding]]
@@ -310,6 +310,20 @@ file = "positive/honest/node-gyp/package.json"
 line = 5
 rule = "deps.npm-lifecycle-hook"
 severity = "info"
+
+[[finding]]
+file = "positive/honest/only-allow-dlx/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'only-allow'
+
+[[finding]]
+file = "positive/honest/only-allow/package.json"
+line = 5
+rule = "deps.npm-lifecycle-hook"
+severity = "low"
+explanation_contains = 'only-allow'
 
 [[finding]]
 file = "positive/honest/patch-package/package.json"

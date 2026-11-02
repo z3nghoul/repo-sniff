@@ -148,6 +148,9 @@ const FRONTEND: &[&str] = &[
 /// the list is explicit and short.
 const HONEST: &[&str] = &[
     "husky",
+    // `"prepare": "tshy"`: isaacs/tshy, a build tool used by many libraries
+    // vendored in nodejs/node.
+    "tshy",
     "lefthook",
     "simple-git-hooks",
     "patch-package",
@@ -172,7 +175,6 @@ const HONEST: &[&str] = &[
     "copyfiles",
     "ncp",
     "del-cli",
-    "only-allow",
     "opencollective-postinstall",
     "is-ci",
     "prisma",
@@ -203,6 +205,20 @@ const HONEST: &[&str] = &[
     "yarn-deduplicate",
     "syncpack",
     "cross-env",
+];
+
+/// Packages that ordinary projects fetch with `npx` (or `pnpm dlx`) from an
+/// install hook: the package, and a real repository that uses the form. They
+/// are LOW, not INFO, because `npx` downloads and runs a package.
+const NPX_HONEST: &[(&str, &str)] = &[
+    // `"preinstall": "npx only-allow pnpm"`: vitejs/vite and vuejs/core, and the
+    // README of the package.
+    ("only-allow", "https://github.com/pnpm/only-allow"),
+    // `"preinstall": "npx npm-force-resolutions"`, from the package's README.
+    (
+        "npm-force-resolutions",
+        "https://github.com/rogeriochaves/npm-force-resolutions",
+    ),
 ];
 
 /// Honest tools that download binaries when they run: LOW, not INFO.
@@ -1411,6 +1427,16 @@ impl<'a> Resolver<'a> {
 
     /// A program with no special handling: honest, or unknown.
     fn other(&mut self, _cwd: &str, first: &str, name: &str, args: &[String], out: &mut Outcome) {
+        if NPX_HONEST.iter().any(|(package, _)| *package == name) {
+            out.raise(
+                Severity::Low,
+                format!(
+                    "runs {}, a package ordinary projects fetch from an install hook",
+                    short(name)
+                ),
+            );
+            return;
+        }
         if HONEST_DOWNLOAD.contains(&name) {
             out.raise(
                 Severity::Low,
@@ -2130,7 +2156,15 @@ impl<'a> Resolver<'a> {
         if FRONTEND.contains(&bare.as_str()) && out.frontend.is_none() {
             out.frontend = Some(bare.clone());
         }
-        if HONEST_DOWNLOAD.contains(&bare.as_str()) {
+        if NPX_HONEST.iter().any(|(package, _)| *package == bare) {
+            out.raise(
+                Severity::Low,
+                format!(
+                    "runs {} through npx, a package ordinary projects fetch from an install hook",
+                    short(&bare)
+                ),
+            );
+        } else if HONEST_DOWNLOAD.contains(&bare.as_str()) {
             out.raise(
                 Severity::Low,
                 format!(
