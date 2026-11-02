@@ -1306,7 +1306,12 @@ impl<'a> Flow<'a> {
                     ),
                 );
             }
-            let cut = self.lx.problems.first().map(|p| (p.offset, p.what));
+            let cut = self
+                .lx
+                .problems
+                .iter()
+                .find(|p| p.swallows)
+                .map(|p| (p.offset, p.what));
             if let Some((offset, what)) = cut {
                 self.found.push(Found {
                     kind: FoundKind::Uncertain,
@@ -1612,6 +1617,13 @@ mod tests {
         );
         let alone = "global['ev' + 'al'](x);";
         assert!(kinds(alone).is_empty());
+    }
+
+    #[test]
+    fn a_string_or_slash_the_lexer_does_not_understand_is_not_reported() {
+        // JSX text has apostrophes and closing tags; they end at the line.
+        let text = "axios.get(u);\nconst a = <p>don't</p>;\neval(x);";
+        assert!(kinds(text).is_empty(), "{:?}", kinds(text));
     }
 
     #[test]

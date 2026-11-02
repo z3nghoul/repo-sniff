@@ -52,6 +52,12 @@ pub struct Token {
 pub struct Problem {
     pub offset: usize,
     pub what: &'static str,
+    /// The problem can hide code that follows it: an unclosed comment or
+    /// template literal swallows the rest of the file, and brackets that do not
+    /// pair up break the structure. A string or a `/` that is not understood
+    /// ends at the line break, where reading resumes, so it hides no later line
+    /// (and in JSX text an apostrophe or a closing tag causes them all the time).
+    pub swallows: bool,
 }
 
 #[derive(Debug, Default)]
@@ -258,9 +264,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn problem(&mut self, offset: usize, what: &'static str) {
+    fn problem(&mut self, offset: usize, what: &'static str, swallows: bool) {
         if self.out.problems.len() < MAX_PROBLEMS {
-            self.out.problems.push(Problem { offset, what });
+            self.out.problems.push(Problem {
+                offset,
+                what,
+                swallows,
+            });
         }
     }
 
@@ -356,12 +366,13 @@ impl<'a> Lexer<'a> {
         }
         for open in std::mem::take(&mut self.stack) {
             let offset = self.out.tokens[open as usize].start as usize;
-            self.problem(offset, "a bracket that is never closed");
+            self.problem(offset, "a bracket that is never closed", true);
         }
         if !self.templates.is_empty() {
             self.problem(
                 self.text.len(),
                 "a template literal expression that is never closed",
+                true,
             );
         }
         self.out
@@ -395,7 +406,7 @@ impl<'a> Lexer<'a> {
                 self.out.matching[index] = open;
                 self.out.matching[open as usize] = index as u32;
             }
-            _ => self.problem(at, "a closing bracket with no matching opening one"),
+            _ => self.problem(at, "a closing bracket with no matching opening one", true),
         }
         self.pos += 1;
     }
@@ -420,7 +431,7 @@ impl<'a> Lexer<'a> {
                     self.pos = start + 2 + at + 2;
                 }
                 None => {
-                    self.problem(start, "a comment that is never closed");
+                    self.problem(start, "a comment that is never closed", true);
                     self.pos = self.bytes.len();
                 }
             },
@@ -459,6 +470,7 @@ impl<'a> Lexer<'a> {
         self.problem(
             start,
             "a `/` that is neither a division nor a complete regular expression",
+            false,
         );
         self.push(Kind::Punct(b'/'), start, start + 1, false);
         self.pos = start + 1;
@@ -490,7 +502,7 @@ impl<'a> Lexer<'a> {
             i += 1;
         }
         let end = i.min(self.bytes.len());
-        self.problem(start, "a string that is never closed");
+        self.problem(start, "a string that is never closed", false);
         self.push(Kind::Str, start, end, false);
         self.pos = end;
     }
@@ -509,7 +521,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'$' if self.bytes.get(i + 1) == Some(&b'{') => {
                     if self.templates.len() >= MAX_TEMPLATE_DEPTH {
-                        self.problem(i, "template literals nested too deeply to follow");
+                        self.problem(i, "template literals nested too deeply to follow", true);
                         self.pos = self.bytes.len();
                         return;
                     }
@@ -525,7 +537,7 @@ impl<'a> Lexer<'a> {
                 _ => i += 1,
             }
         }
-        self.problem(start, "a template literal that is never closed");
+        self.problem(start, "a template literal that is never closed", true);
         self.push(Kind::Template, start, self.bytes.len(), false);
         self.pos = self.bytes.len();
     }
