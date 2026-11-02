@@ -245,8 +245,8 @@ const NETWORK: &[&str] = &[
 const QUIET: &[&str] = &[
     "echo", "exit", "true", "false", ":", "test", "[", "[[", "pwd", "mkdir", "rm", "rmdir", "cp",
     "mv", "ls", "touch", "set", "export", "unset", "printf", "cat", "chmod", "ln", "type", "del",
-    "copy", "move", "rd", "md", "fi", "done", "for", "esac", "case", "rem", "title", "pause",
-    "cls", "clear", "which", "where", "date", "sleep", "read", "shift", "umask", "ulimit", "wait",
+    "copy", "move", "rd", "md", "fi", "done", "for", "rem", "title", "pause", "cls", "clear",
+    "which", "where", "date", "sleep", "read", "shift", "umask", "ulimit", "wait",
 ];
 
 /// Wrappers that run the rest of the command line.
@@ -511,6 +511,9 @@ struct Outcome {
     node_files: Vec<String>,
     /// A front-end tool found in the chain.
     frontend: Option<String>,
+    /// Why part of a command could not be read (quotes, expansions, `eval`,
+    /// heredocs, `case`, ...). The check never calls such a command clean.
+    unparsed: Option<String>,
 }
 
 impl Outcome {
@@ -521,6 +524,13 @@ impl Outcome {
         }
     }
 
+    /// Records that something could not be read; the first reason is kept.
+    fn unparse(&mut self, why: &str) {
+        if self.unparsed.is_none() {
+            self.unparsed = Some(why.to_string());
+        }
+    }
+
     /// Takes what a called script found; `via` names the call in the reason.
     fn absorb(&mut self, child: Outcome, via: &str) {
         if let Some(sev) = child.sev {
@@ -528,6 +538,9 @@ impl Outcome {
         }
         self.truncated |= child.truncated;
         self.cycle |= child.cycle;
+        if self.unparsed.is_none() {
+            self.unparsed = child.unparsed;
+        }
         for file in child.node_files {
             if !self.node_files.contains(&file) && self.node_files.len() < 8 {
                 self.node_files.push(file);
@@ -545,12 +558,22 @@ fn short(word: &str) -> String {
 
 // --------------------------------------------------------------- shell text
 
+/// A command line split into pieces.
+struct Shell {
+    /// The simple commands, each a list of words with quotes removed.
+    segments: Vec<Vec<String>>,
+    /// The texts of `$(...)` and backtick substitutions.
+    subs: Vec<String>,
+    /// Constructs the splitter cannot follow: the text is not read reliably.
+    problems: Vec<&'static str>,
+}
+
 /// Splits a shell command line into simple commands (each a list of words, with
 /// quotes removed) and the texts of `$(...)` and backtick substitutions.
 /// `&&`, `||`, `;`, `|`, `&`, newlines and parentheses end a command; an `&`
 /// that is part of a redirection (`2>&1`, `&>`) does not. Backslashes are kept,
 /// since on Windows they are path separators.
-fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
+fn split_shell(text: &str) -> Shell {
     struct State {
         segments: Vec<Vec<String>>,
         words: Vec<String>,
@@ -579,6 +602,12 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
         in_word: false,
     };
     let mut subs = Vec::new();
+    let mut problems: Vec<&'static str> = Vec::new();
+    let problem = |why: &'static str, problems: &mut Vec<&'static str>| {
+        if !problems.contains(&why) {
+            problems.push(why);
+        }
+    };
     let (mut single, mut double) = (false, false);
     let mut i = 0;
     while i < chars.len() {
@@ -593,7 +622,13 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
             continue;
         }
         if c == '$' && chars.get(i + 1) == Some(&'(') {
-            let end = sub_end(&chars, i + 1, 0);
+            let end = sub_end(&chars, i + 1, 0).unwrap_or_else(|| {
+                problem(
+                    "a command substitution that is not closed or is nested too deeply",
+                    &mut problems,
+                );
+                chars.len().saturating_sub(1)
+            });
             subs.push(chars[i + 2..end.max(i + 2)].iter().collect());
             st.word.extend(&chars[i..=end]);
             st.in_word = true;
@@ -601,10 +636,13 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
             continue;
         }
         if c == '`' {
-            let end = chars[i + 1..]
-                .iter()
-                .position(|&x| x == '`')
-                .map_or(chars.len() - 1, |p| i + 1 + p);
+            let end = chars[i + 1..].iter().position(|&x| x == '`').map_or_else(
+                || {
+                    problem("a backtick substitution that is not closed", &mut problems);
+                    chars.len() - 1
+                },
+                |p| i + 1 + p,
+            );
             subs.push(chars[i + 1..end.max(i + 1)].iter().collect());
             st.word.extend(&chars[i..=end]);
             st.in_word = true;
@@ -650,6 +688,29 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
             }
         }
         match c {
+            '$' if matches!(chars.get(i + 1), Some('\'' | '"')) => {
+                problem("quoting that spells characters out ($'...')", &mut problems);
+                st.word.push(c);
+                st.in_word = true;
+            }
+            ';' if chars.get(i + 1) == Some(&';') => {
+                problem("a case statement", &mut problems);
+                st.segment_end();
+            }
+            '<' | '>' if chars.get(i + 1) == Some(&'(') => {
+                problem("a process substitution", &mut problems);
+                st.segment_end();
+            }
+            '<' => {
+                if chars.get(i + 1) == Some(&'<') {
+                    problem("a heredoc or here-string", &mut problems);
+                }
+                // A redirection of the input starts a word of its own, so
+                // `node<x.js` and `node < x.js` both show the `<`.
+                st.word_end();
+                st.word.push(c);
+                st.in_word = true;
+            }
             '\'' => {
                 single = true;
                 st.in_word = true;
@@ -677,8 +738,15 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
         }
         i += 1;
     }
+    if single || double {
+        problem("a quote that is never closed", &mut problems);
+    }
     st.segment_end();
-    (st.segments, subs)
+    Shell {
+        segments: st.segments,
+        subs,
+        problems,
+    }
 }
 
 /// How deep `sub_end` follows `$(` inside `$(`; deeper text is read as a single
@@ -686,12 +754,11 @@ fn split_shell(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
 const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
 /// The index of the `)` that closes the `(` at `open`, reading quotes, escapes
-/// and nested `$(...)` the way the shell does; the last index when there is
-/// none.
-fn sub_end(chars: &[char], open: usize, nesting: usize) -> usize {
-    let last = chars.len().saturating_sub(1);
+/// and nested `$(...)` the way the shell does; `None` when there is none or
+/// the nesting is too deep.
+fn sub_end(chars: &[char], open: usize, nesting: usize) -> Option<usize> {
     if nesting > MAX_SUBSTITUTION_DEPTH {
-        return last;
+        return None;
     }
     let mut depth = 0usize;
     let mut j = open;
@@ -710,7 +777,7 @@ fn sub_end(chars: &[char], open: usize, nesting: usize) -> usize {
                     if chars[j] == '\\' {
                         j += 1;
                     } else if chars[j] == '$' && chars.get(j + 1) == Some(&'(') {
-                        j = sub_end(chars, j + 1, nesting + 1);
+                        j = sub_end(chars, j + 1, nesting + 1)?;
                     }
                     j += 1;
                 }
@@ -719,14 +786,14 @@ fn sub_end(chars: &[char], open: usize, nesting: usize) -> usize {
             ')' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return j;
+                    return Some(j);
                 }
             }
             _ => {}
         }
         j += 1;
     }
-    last
+    None
 }
 
 fn is_env_assignment(word: &str) -> bool {
@@ -762,6 +829,50 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
 fn looks_like_file(word: &str) -> bool {
     let lower = word.to_lowercase();
     word.contains(['/', '\\']) || SCRIPT_EXTENSIONS.iter().any(|e| lower.ends_with(e))
+}
+
+/// Why a command is not read when the file it runs is named by a variable.
+const VARIABLE_TARGET: &str = "the file to run is named by a variable or a substitution";
+
+/// Programs that run the code they are given.
+const INTERPRETERS: &[&str] = &[
+    "node",
+    "nodejs",
+    "nodemon",
+    "ts-node",
+    "ts-node-dev",
+    "tsx",
+    "babel-node",
+    "esno",
+    "electron",
+    "deno",
+    "python",
+    "python2",
+    "python3",
+    "py",
+    "ruby",
+    "perl",
+    "php",
+    "lua",
+    "rscript",
+    "cscript",
+    "wscript",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "powershell_ise",
+];
+
+/// Whether a word holds a shell variable, a substitution or a `%VAR%`, so the
+/// text the shell runs is not the text in the file.
+fn has_variable(word: &str) -> bool {
+    word.contains(['$', '`']) || word.matches('%').count() >= 2
 }
 
 fn has_network_marker(code: &str) -> bool {
@@ -991,6 +1102,7 @@ impl<'a> Resolver<'a> {
             && !manifest.scripts.contains_key("restart")
         {
             // Without a restart script npm runs stop and then start.
+            out.unparse("npm restart without a restart script falls back to stop and start");
             for part in ["stop", "start"] {
                 let child = self.run_named(dir, part, depth + 1, stack);
                 out.absorb(child, &format!("script \"{part}\""));
@@ -1075,19 +1187,19 @@ impl<'a> Resolver<'a> {
             out.truncated = true;
             return out;
         }
-        let (segments, subs) = split_shell(text);
+        let shell = split_shell(text);
+        for problem in &shell.problems {
+            out.unparse(problem);
+        }
         let mut cwd = dir.to_string();
-        for words in &segments {
+        for words in &shell.segments {
             self.command(&mut cwd, words, depth, stack, &mut out);
         }
-        for sub in subs {
+        for sub in shell.subs {
             if sub.split_whitespace().any(|word| word == "case") {
                 // `case a in a) cmd;; esac` has a `)` the substitution scan
                 // takes for its end, so the text cannot be split reliably.
-                out.raise(
-                    Severity::High,
-                    "a command substitution with a case statement, which is not read".to_string(),
-                );
+                out.unparse("a case statement inside a command substitution");
             }
             let child = self.text(&cwd, &sub, depth + 1, stack);
             out.absorb(child, "a command substitution");
@@ -1124,6 +1236,31 @@ impl<'a> Resolver<'a> {
         };
         let args = &words[1..];
         let name = tool_name(first);
+
+        if has_variable(first) || (first.contains('{') && first.contains(',')) {
+            out.unparse(
+                "the command name is built from a variable, a substitution or a brace expansion",
+            );
+            return;
+        }
+        if matches!(
+            name.as_str(),
+            "alias"
+                | "function"
+                | "select"
+                | "coproc"
+                | "case"
+                | "esac"
+                | "eval"
+                | "source"
+                | "."
+                | "trap"
+        ) {
+            out.unparse(&format!("the shell construct `{}`", short(&name)));
+        }
+        if INTERPRETERS.contains(&name.as_str()) && args.iter().any(|a| a.starts_with('<')) {
+            out.unparse("input is redirected into an interpreter");
+        }
 
         if matches!(name.as_str(), "cd" | "pushd" | "chdir") {
             let target = args
@@ -1487,6 +1624,10 @@ impl<'a> Resolver<'a> {
             }
             return;
         }
+        if has_variable(target) {
+            out.unparse(VARIABLE_TARGET);
+            return;
+        }
         match resolve(cwd, target) {
             Some(path) => self.local_file(&path, out, true),
             None => out.raise(
@@ -1548,6 +1689,10 @@ impl<'a> Resolver<'a> {
                 break;
             }
         }
+        if args.get(i).is_some_and(|file| has_variable(file)) {
+            out.unparse(VARIABLE_TARGET);
+            return;
+        }
         match args.get(i).and_then(|file| resolve(cwd, file)) {
             Some(path) => self.local_file(&path, out, false),
             None if args.get(i).is_some() => out.raise(
@@ -1586,6 +1731,10 @@ impl<'a> Resolver<'a> {
             } else {
                 break;
             }
+        }
+        if args.get(i).is_some_and(|file| has_variable(file)) {
+            out.unparse(VARIABLE_TARGET);
+            return;
         }
         match args.get(i) {
             Some(file) => match resolve(cwd, file) {
@@ -1674,6 +1823,10 @@ impl<'a> Resolver<'a> {
                 return;
             }
             if !flag.is_empty() && "file".starts_with(&flag) {
+                if args.get(i + 1).is_some_and(|file| has_variable(file)) {
+                    out.unparse(VARIABLE_TARGET);
+                    return;
+                }
                 match args.get(i + 1).and_then(|file| resolve(cwd, file)) {
                     Some(path) => self.local_file(&path, out, false),
                     None => out.raise(
@@ -1781,6 +1934,7 @@ impl<'a> Resolver<'a> {
                             .unwrap_or_else(|| "?outside".to_string());
                     }
                     "--script-shell" => {
+                        out.unparse("--script-shell changes the program every script runs in");
                         // npm runs every script through this program.
                         if let Some(path) = value.as_deref().and_then(|v| resolve(cwd, v)) {
                             self.local_file(&path, out, false);
@@ -1877,6 +2031,9 @@ impl<'a> Resolver<'a> {
         match action {
             Action::Nothing => {}
             Action::Run(name) => {
+                if has_variable(&name) {
+                    out.unparse("the script to run is named by a variable");
+                }
                 let child = self.run_named(&dir, &name, depth + 1, stack);
                 out.absorb(child, &format!("{tool} run {}", short(&name)));
             }
@@ -2249,17 +2406,42 @@ pub fn lifecycle_hook(ctx: &Ctx<'_>) -> Vec<Hit> {
                 outcome.sev = Some(Severity::High);
             }
         }
-        let Some(mut sev) = outcome.sev else {
+        let mut sev = outcome
+            .sev
+            .map(|sev| if install_time { sev } else { demote(sev) });
+        if sev.is_none() && outcome.unparsed.is_none() {
             continue;
-        };
-        let mut reason = if install_time {
-            format!("npm runs \"{name}\" on npm install: {}", outcome.why)
+        }
+        // A command that could not be read is never called clean: an install
+        // hook is at least HIGH, any other hook at least MEDIUM.
+        let floor = if install_time {
+            Severity::High
         } else {
-            sev = demote(sev);
+            Severity::Medium
+        };
+        let what = match &outcome.unparsed {
+            Some(why) if sev.is_none_or(|sev| sev < floor) => {
+                sev = Some(floor);
+                let read = if outcome.sev.is_some() {
+                    format!("; what could be read: {}", outcome.why)
+                } else {
+                    String::new()
+                };
+                format!("could not fully parse this command; review it by hand ({why}){read}")
+            }
+            Some(why) => format!(
+                "{}; also could not fully parse this command; review it by hand ({why})",
+                outcome.why
+            ),
+            None => outcome.why.clone(),
+        };
+        let sev = sev.unwrap_or(floor);
+        let mut reason = if install_time {
+            format!("npm runs \"{name}\" on npm install: {what}")
+        } else {
             format!(
                 "\"{name}\" is not run by npm install (npm runs it on pack, publish, or when \
-                 the repository is installed as a git dependency): {}",
-                outcome.why
+                 the repository is installed as a git dependency): {what}"
             )
         };
         if outcome.cycle {
@@ -2372,33 +2554,53 @@ pub fn run_script(ctx: &Ctx<'_>) -> Vec<Hit> {
         let script = &scripts[&name];
         let mut stack: Stack = vec![(own_dir.clone(), name.clone())];
         let outcome = resolver.text(&own_dir, &script.value, 1, &mut stack);
-        let (Some(file), Some(tool)) = (outcome.node_files.first(), outcome.frontend.as_ref())
-        else {
+        let combination = match (outcome.node_files.first(), outcome.frontend.as_ref()) {
+            (Some(file), Some(tool)) => {
+                let more = outcome.node_files.len().saturating_sub(1);
+                let files = if more > 0 {
+                    format!("{} (and {more} more)", short(file))
+                } else {
+                    short(file)
+                };
+                let base = name.trim_start_matches("pre").trim_start_matches("post");
+                let unusual = if matches!(base, "build" | "test") {
+                    format!("; a {base} script that starts a server is unusual")
+                } else {
+                    "; full-stack projects do this, but the file is attacker-controlled when the \
+                     repository is"
+                        .to_string()
+                };
+                Some(format!(
+                    "script \"{name}\" runs the local file {files} next to {tool}{unusual}"
+                ))
+            }
+            _ => None,
+        };
+        // A script that could not be read is never called clean.
+        let problem = outcome.unparsed.clone().or_else(|| {
+            outcome
+                .truncated
+                .then(|| "the chain of scripts is too deep or too large to follow".to_string())
+        });
+        if combination.is_none() && problem.is_none() {
             continue;
-        };
-        let more = outcome.node_files.len().saturating_sub(1);
-        let files = if more > 0 {
-            format!("{} (and {more} more)", short(file))
-        } else {
-            short(file)
-        };
-        let base = name.trim_start_matches("pre").trim_start_matches("post");
-        let unusual = if matches!(base, "build" | "test") {
-            format!("; a {base} script that starts a server is unusual")
-        } else {
-            "; full-stack projects do this, but the file is attacker-controlled when the \
-             repository is"
-                .to_string()
-        };
+        }
+        let mut severity = ctx.base;
+        let mut reasons = Vec::new();
+        reasons.extend(combination);
+        if let Some(why) = problem {
+            severity = severity.max(Severity::Medium);
+            reasons.push(format!(
+                "script \"{name}\": could not fully parse this command; review it by hand ({why})"
+            ));
+        }
         hits.push(Hit {
             line: line_of(&loaded.text, script.offset),
             span: loaded
                 .spans_ok
                 .then_some(TextSpan(script.offset..script.end)),
-            severity: ctx.base,
-            reason: format!(
-                "script \"{name}\" runs the local file {files} next to {tool}{unusual}"
-            ),
+            severity,
+            reason: reasons.join("; "),
         });
     }
     hits
@@ -2435,7 +2637,8 @@ mod tests {
 
     #[test]
     fn shell_split_respects_quotes_and_operators() {
-        let (segments, subs) = split_shell(r#"a "b && c" 'd;e' && f | g; h & i 2>&1"#);
+        let shell = split_shell(r#"a "b && c" 'd;e' && f | g; h & i 2>&1"#);
+        let (segments, subs) = (shell.segments, shell.subs);
         assert_eq!(
             segments,
             vec![
@@ -2451,13 +2654,13 @@ mod tests {
 
     #[test]
     fn shell_split_collects_substitutions() {
-        let (_, subs) = split_shell("echo $(curl x | sh) `wget y`");
+        let subs = split_shell("echo $(curl x | sh) `wget y`").subs;
         assert_eq!(subs, vec!["curl x | sh", "wget y"]);
     }
 
     #[test]
     fn shell_split_keeps_windows_paths() {
-        let (segments, _) = split_shell(r".\scripts\setup.bat && node scripts\a.js");
+        let segments = split_shell(r".\scripts\setup.bat && node scripts\a.js").segments;
         assert_eq!(segments[0][0], r".\scripts\setup.bat");
         assert_eq!(segments[1][1], r"scripts\a.js");
     }
@@ -2752,7 +2955,7 @@ mod tests {
     #[test]
     fn nested_substitutions_do_not_overflow_the_stack() {
         let script = "$(\"".repeat(200_000);
-        let (segments, _) = split_shell(&script);
+        let segments = split_shell(&script).segments;
         assert!(segments.len() <= 1);
     }
 
@@ -2813,10 +3016,15 @@ mod tests {
         }
         let text = r#"{"scripts": {"postinstall": "npm restart", "start": "node setup.js"}}"#;
         let hits = run(lifecycle_hook, "package.json", text, &["setup.js"]);
-        assert_eq!(hits[0].severity, Severity::Medium);
+        assert_eq!(hits[0].severity, Severity::High);
+        assert!(
+            hits[0]
+                .reason
+                .contains("could not fully parse this command; review it by hand")
+        );
         let text = r#"{"scripts": {"postinstall": "npm run noop --script-shell=./setup.sh"}}"#;
         let hits = run(lifecycle_hook, "package.json", text, &["setup.sh"]);
-        assert_eq!(hits[0].severity, Severity::Medium);
+        assert_eq!(hits[0].severity, Severity::High);
         let repo = RepoIndex::new(["package.json", "node_modules/.bin/husky"]);
         let text = r#"{"scripts": {"prepare": "npx husky"}}"#;
         let views = Views::new(text.as_bytes(), Decode::Utf8WithoutNuls);

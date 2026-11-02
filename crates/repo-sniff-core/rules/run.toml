@@ -7,7 +7,8 @@ family      = "npm-scripts"
 stage       = "run"
 # Full-stack repositories do this honestly, so the level is low; the file it
 # names is the thing to read, and milestone 3 raises it when the file itself
-# has a loader finding.
+# has a loader finding. A script the check could not read completely is
+# reported too, at medium (see deps.npm-lifecycle-hook).
 severity    = "low"
 attack      = ["T1059.007"]
 description = "An npm start, dev, build or test script runs a local JavaScript file (node <path>, nodemon <path>) next to a front-end tool such as react-scripts, vite, next or webpack. A build or test script that starts a server is unusual"

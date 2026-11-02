@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "build": "$BUILDER --prod",
+    "test": "node -e 1"
+  }
+}

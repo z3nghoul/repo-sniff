@@ -1,0 +1,10 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "preinstall": "echo $(case a in a) node -e x;; esac)",
+    "install": "trap 'node -e x' EXIT",
+    "postinstall": "python3 -c'import urllib.request'",
+    "prepare": "npm run noop --script-shell=./setup.sh"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "build": "tsc --outDir $OUT && rollup -c --environment MODE:$MODE",
+    "postinstall": "echo $npm_package_version",
+    "start": "node server.js --port $PORT"
+  }
+}
