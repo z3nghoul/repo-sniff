@@ -99,7 +99,7 @@ file = "positive/fetch-eval/function-forms/forms.js"
 line = 23
 rule = "run.js-fetch-eval"
 severity = "critical"
-explanation_contains = 'vm.'
+explanation_contains = 'runInNewContext'
 
 [[finding]]
 file = "positive/fetch-eval/indirect/indirect.js"
@@ -155,7 +155,7 @@ file = "positive/minified/dist/dist/app.min.js"
 line = 2
 rule = "obfuscation.minified-source"
 severity = "info"
-explanation_contains = 'expected'
+explanation_contains = 'built bundles'
 
 [[finding]]
 file = "positive/minified/src/lib/bundle.js"

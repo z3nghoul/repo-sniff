@@ -1,0 +1,14 @@
+# Stage: obfuscation. Code written to hide what it does.
+
+[[rule]]
+id          = "obfuscation.encoded-payload-sink"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+severity    = "high"
+attack      = ["T1027", "T1140"]
+description = "A JavaScript file hands decoded data to eval, new Function, vm.runIn* or a command: atob, Buffer.from with base64 or hex, unescape, String.fromCharCode, a long base64 string or a run of escape sequences. Encoding the code that runs hides what it does from a reader"
+example     = 'lib/run.js:3 calls eval(atob(blob))'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true

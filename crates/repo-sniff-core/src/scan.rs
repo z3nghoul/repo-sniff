@@ -71,6 +71,11 @@ const SNIPPET_LEAD_CHARS: usize = 40;
 /// very long line would make that quadratic.
 const MAX_LOCATED_HITS: usize = 100;
 
+/// A text file over the buffered size is read whole for a file rule that sets
+/// `reads_large_files`, up to this many bytes; a larger one is listed as too
+/// large, as for any other file rule.
+const LARGE_CHECK_LIMIT: u64 = 32 * 1024 * 1024;
+
 /// Added to findings from a file that has NUL bytes and does not read as text.
 const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
 
@@ -321,7 +326,6 @@ fn scan_with_budget(
                 size,
                 rules,
                 &limits,
-                has_file_rule(&slash_path),
                 &env,
                 &mut report.unlisted,
             );
@@ -1108,7 +1112,6 @@ fn scan_streamed(
     size: u64,
     rules: &[Rule],
     limits: &Limits,
-    file_rule_applies: bool,
     env: &Env<'_>,
     unlisted: &mut Vec<Unlisted>,
 ) -> Streamed {
@@ -1145,6 +1148,16 @@ fn scan_streamed(
         .iter()
         .filter(|rule| rule.applies_to(slash_path))
         .collect();
+    // A file rule that reads large files gets the file whole, up to a limit; any
+    // other file rule, or a file over that limit, lists the file as too large.
+    let file_rule_applies = env.file_rules.iter().any(|(rule, _)| {
+        rule.applies_to(slash_path) && (!rule.reads_large_files || size > LARGE_CHECK_LIMIT)
+    });
+    let large_file_rule = !file_rule_applies
+        && env
+            .file_rules
+            .iter()
+            .any(|(rule, _)| rule.applies_to(slash_path));
     let whole_file_rule = file_rule_applies
         || applicable
             .iter()
@@ -1173,6 +1186,17 @@ fn scan_streamed(
     let script = is_script(slash_path, &head);
     if whole_file_rule {
         out.skipped.push(too_large);
+    }
+    if large_file_rule && !whole_file_rule {
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let class = classify(slash_path, &bytes);
+                let views = Views::new(&bytes, class.decode);
+                let checked = env.run_file_checks(relative, slash_path, &views, None);
+                out.findings.extend(checked.findings);
+            }
+            Err(err) => out.skipped.push(unreadable(err)),
+        }
     }
     if is_utf16_script(slash_path, &head) {
         // Decoded as it is read, as for a file read whole (`Decode::Utf16Bom`).
@@ -2278,6 +2302,7 @@ mod tests {
             matcher: Matcher::File(check),
             files: Some(globs.build().unwrap()),
             names_executables: false,
+            reads_large_files: false,
         }
     }
 

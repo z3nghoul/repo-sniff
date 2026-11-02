@@ -17,6 +17,7 @@
 //! repository as unreadable; both make the scan inconclusive.
 
 pub mod js_lex;
+pub mod js_loaders;
 pub mod npm_scripts;
 mod pylines;
 pub mod python_pth;
@@ -85,6 +86,8 @@ pub(crate) struct Views<'a> {
     size: Option<u64>,
     text: OnceCell<Cow<'a, str>>,
     jsonc: OnceCell<Result<Node, ParseError>>,
+    /// What the JavaScript loader flow analysis found in `text`.
+    js_flow: OnceCell<Vec<js_loaders::Found>>,
     /// The last `line_of` answer, `(offset, line)`, to count on from.
     line_cursor: Cell<(usize, usize)>,
 }
@@ -98,6 +101,7 @@ impl<'a> Views<'a> {
             size: None,
             text: OnceCell::new(),
             jsonc: OnceCell::new(),
+            js_flow: OnceCell::new(),
             line_cursor: Cell::new((0, 1)),
         }
     }
@@ -162,6 +166,12 @@ impl<'a> Views<'a> {
     /// is meant to be asked once `text` has been computed.
     pub(crate) fn columns_are_exact(&self) -> bool {
         self.text_is_bytes() || self.decode == Decode::Utf16Bom
+    }
+
+    /// The loader findings of `text` read as JavaScript (see `js_loaders`),
+    /// found once for all the rules that ask.
+    pub(crate) fn js_flow(&self) -> &[js_loaders::Found] {
+        self.js_flow.get_or_init(|| js_loaders::flow(self.text()))
     }
 
     /// `text` parsed as JSONC.
@@ -242,6 +252,11 @@ impl<'a> Ctx<'a> {
     /// quadratic on a file with many hits.
     pub fn line_of(&self, offset: usize) -> usize {
         self.views.line_of(offset)
+    }
+
+    /// What the JavaScript loader analysis found in the file's text.
+    pub(crate) fn js_flow(&self) -> &'a [js_loaders::Found] {
+        self.views.js_flow()
     }
 
     /// The file parsed as JSONC, or the parse error.
@@ -345,6 +360,12 @@ pub const HEAD_LEN: usize = 8 * 1024;
 const FILE_CHECKS: &[(&str, Check)] = &[
     ("deps.npm-lifecycle-hook", npm_scripts::lifecycle_hook),
     ("run.npm-script-local-server", npm_scripts::run_script),
+    ("run.js-fetch-eval", js_loaders::fetch_eval),
+    ("run.js-function-require", js_loaders::function_require),
+    (
+        "obfuscation.encoded-payload-sink",
+        js_loaders::encoded_payload,
+    ),
     ("deps.python-pth-exec", python_pth::check),
     ("deps.python-start-entrypoint", python_start::check),
 ];

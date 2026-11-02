@@ -1,0 +1,1684 @@
+//! The JavaScript loader rules: code that fetches, decodes or hides other
+//! code and runs it.
+//!
+//! - `run.js-fetch-eval`: a dynamic code sink (`eval`, `new Function`,
+//!   `Function(...)()`, `vm.runIn*`, `module._compile`) whose argument comes
+//!   from a network call (`axios`, `fetch`, `http(s).get/request`, `got`, ...)
+//!   in the same file. CRITICAL. A call the check cannot follow, or a file it
+//!   cannot read to the end, while the file makes network calls, is MEDIUM and
+//!   says "review it by hand".
+//! - `run.js-function-require`: `new Function("require", ...)` called with
+//!   `require`, the usual shape of a loader. CRITICAL.
+//! - `obfuscation.encoded-payload-sink`: a decoder (`atob`,
+//!   `Buffer.from(x, "base64" | "hex")`, `unescape`, `String.fromCharCode`), a
+//!   long base64 string or a run of `\x` escapes handed to a code or command
+//!   sink. HIGH.
+//!
+//! The flow checks use the lexer (`js_lex`) and follow data by name, ignoring
+//! scopes: a name that receives network data anywhere in the file is tainted
+//! everywhere in it. Taint passes through assignments, destructuring,
+//! compound assignment, parameters of callbacks given to a call whose callee
+//! chain touches a tainted value (`.then(r => ...)`, `.catch(err => ...)`,
+//! `res.on("data", chunk => ...)`), the parameter of a `catch` whose `try`
+//! block touched one, and the return value of a function that returns one. It
+//! does not follow data across files, through object fields by name, or
+//! through `Array` methods other than a callback's parameters (gaps listed in
+//! `docs/DETECTIONS.md`).
+//!
+//! Everything is linear in the size of the file: the lexer is one pass, the
+//! passes over the tokens are few and a step budget stops a hostile file.
+
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+
+use super::js_lex::{self, Kind, Lexed};
+use super::{Ctx, Hit, TextSpan};
+use crate::finding::Severity;
+
+const NET: u8 = 1;
+const BLOB: u8 = 2;
+
+/// What the flow analysis found, before it is turned into a `Hit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FoundKind {
+    FetchEval,
+    FunctionRequire,
+    /// The check could not follow something; review it by hand.
+    Uncertain,
+    Encoded,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Found {
+    pub kind: FoundKind,
+    pub start: usize,
+    pub end: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Taint {
+    bits: u8,
+    /// What the data came from, for the explanation (`axios.get`, `atob`).
+    net: Option<String>,
+    blob: Option<String>,
+}
+
+impl Taint {
+    fn net(label: String) -> Self {
+        Taint {
+            bits: NET,
+            net: Some(label),
+            blob: None,
+        }
+    }
+
+    fn blob(label: &str) -> Self {
+        Taint {
+            bits: BLOB,
+            net: None,
+            blob: Some(label.to_string()),
+        }
+    }
+
+    /// Adds `other`; true if `self` learned something.
+    fn merge(&mut self, other: &Taint) -> bool {
+        let before = (self.bits, self.net.is_some(), self.blob.is_some());
+        self.bits |= other.bits;
+        if self.net.is_none() {
+            self.net.clone_from(&other.net);
+        }
+        if self.blob.is_none() {
+            self.blob.clone_from(&other.blob);
+        }
+        before != (self.bits, self.net.is_some(), self.blob.is_some())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SinkClass {
+    /// Runs JavaScript.
+    Code,
+    /// Runs a command line.
+    Command,
+}
+
+/// Modules whose functions fetch data over the network.
+const NET_MODULES: &[&str] = &[
+    "axios",
+    "got",
+    "node-fetch",
+    "cross-fetch",
+    "isomorphic-fetch",
+    "undici",
+    "ky",
+    "bent",
+    "phin",
+    "centra",
+    "needle",
+    "superagent",
+    "request",
+    "request-promise",
+    "request-promise-native",
+    "follow-redirects",
+    "http",
+    "https",
+    "http2",
+    "node:http",
+    "node:https",
+    "node:http2",
+];
+
+const NET_METHODS: &[&str] = &[
+    "get", "post", "put", "patch", "delete", "del", "head", "options", "request", "fetch",
+    "stream", "json", "text",
+];
+
+const CHILD_PROCESS: &[&str] = &["child_process", "node:child_process"];
+const VM_MODULES: &[&str] = &["vm", "node:vm"];
+
+/// Words after which `name(` is a control statement, not a function.
+const CONTROL: &[&str] = &[
+    "if", "for", "while", "switch", "catch", "function", "with", "return", "typeof", "await",
+    "yield", "new", "in", "of", "case", "do", "else", "throw", "delete", "void",
+];
+
+/// A file with none of these words cannot hold a dynamic code or command
+/// sink; `\u` and `\x` are listed because a name can be written with them.
+const SINK_WORDS: &[&str] = &[
+    "eval",
+    "Function",
+    "runIn",
+    "compile",
+    "exec",
+    "spawn",
+    "constructor",
+    "Script",
+    "global",
+    "window",
+    "self",
+    "this[",
+    "\\u",
+    "\\x",
+];
+
+/// Most tokens an expression is followed through.
+const MAX_EXPR_TOKENS: usize = 1000;
+
+/// Passes over the tokens before the taint is taken as final.
+const MAX_PASSES: usize = 5;
+
+/// The flow findings of one file's text.
+pub(crate) fn flow(text: &str) -> Vec<Found> {
+    if !SINK_WORDS.iter().any(|word| text.contains(word)) {
+        return Vec::new();
+    }
+    let lexed = js_lex::lex(text);
+    Flow::new(text, &lexed).run()
+}
+
+struct Flow<'a> {
+    text: &'a str,
+    lx: &'a Lexed,
+    names: HashMap<String, Taint>,
+    net_alias: HashSet<String>,
+    net_fn: HashSet<String>,
+    sink_alias: HashMap<String, SinkClass>,
+    cp_alias: HashSet<String>,
+    cp_fn: HashSet<String>,
+    steps: usize,
+    budget: usize,
+    over_budget: bool,
+    found: Vec<Found>,
+}
+
+impl<'a> Flow<'a> {
+    fn new(text: &'a str, lx: &'a Lexed) -> Self {
+        Flow {
+            text,
+            lx,
+            names: HashMap::new(),
+            net_alias: HashSet::new(),
+            net_fn: HashSet::new(),
+            sink_alias: HashMap::new(),
+            cp_alias: HashSet::new(),
+            cp_fn: HashSet::new(),
+            steps: 0,
+            budget: lx.tokens.len().saturating_mul(60).saturating_add(200_000),
+            over_budget: false,
+            found: Vec::new(),
+        }
+    }
+
+    // ------------------------------------------------------------ helpers
+
+    fn n(&self) -> usize {
+        self.lx.tokens.len()
+    }
+
+    fn kind(&self, i: usize) -> Option<Kind> {
+        self.lx.tokens.get(i).map(|t| t.kind)
+    }
+
+    fn name(&self, i: usize) -> Option<Cow<'a, str>> {
+        let token = self.lx.tokens.get(i)?;
+        if token.kind != Kind::Ident {
+            return None;
+        }
+        let raw = self.lx.raw(self.text, i);
+        Some(if token.escaped {
+            Cow::Owned(js_lex::decode_escapes(raw))
+        } else {
+            Cow::Borrowed(raw)
+        })
+    }
+
+    fn is_id(&self, i: usize, word: &str) -> bool {
+        self.lx.is_ident(self.text, i, word)
+    }
+
+    fn punct(&self, i: usize, b: u8) -> bool {
+        self.lx.is_punct(i, b)
+    }
+
+    fn str_val(&self, i: usize) -> Option<String> {
+        self.lx.str_value(self.text, i)
+    }
+
+    fn partner(&self, i: usize) -> Option<usize> {
+        self.lx.partner(i)
+    }
+
+    fn prev_dot(&self, i: usize) -> bool {
+        i > 0 && self.punct(i - 1, b'.')
+    }
+
+    fn is_global_obj(&self, i: usize) -> bool {
+        self.name(i)
+            .is_some_and(|n| matches!(&*n, "window" | "global" | "globalThis" | "self"))
+    }
+
+    /// An identifier that names a variable or function here: not a property
+    /// after a dot, unless the object is the global one.
+    fn is_reference(&self, i: usize) -> bool {
+        !self.prev_dot(i) || (i >= 2 && self.is_global_obj(i - 2))
+    }
+
+    /// Counts a step; false once the budget is spent.
+    fn tick(&mut self) -> bool {
+        self.steps += 1;
+        if self.steps > self.budget {
+            self.over_budget = true;
+        }
+        !self.over_budget
+    }
+
+    fn add(&mut self, kind: FoundKind, i: usize, reason: String) {
+        let token = self.lx.tokens[i];
+        self.found.push(Found {
+            kind,
+            start: token.start as usize,
+            end: token.end as usize,
+            reason,
+        });
+    }
+
+    // ------------------------------------------------------------ bindings
+
+    /// Records what `require` and `import` bind to: network modules, the
+    /// child process module and `vm`.
+    fn bind_pass(&mut self) {
+        for i in 0..self.n() {
+            if !self.tick() {
+                return;
+            }
+            if self.is_id(i, "require")
+                && self.punct(i + 1, b'(')
+                && self.kind(i + 2) == Some(Kind::Str)
+                && self.punct(i + 3, b')')
+                && let Some(module) = self.str_val(i + 2)
+            {
+                self.bind_require(i, &module);
+            } else if self.is_id(i, "import") && !self.punct(i + 1, b'(') && !self.prev_dot(i) {
+                self.bind_import(i);
+            }
+        }
+    }
+
+    fn bind_require(&mut self, at: usize, module: &str) {
+        let net = NET_MODULES.contains(&module);
+        let cp = CHILD_PROCESS.contains(&module);
+        let vm = VM_MODULES.contains(&module);
+        if !(net || cp || vm) {
+            return;
+        }
+        // `const X = require(...)`, maybe with `await` or parentheses between.
+        let mut j = at;
+        while j > 0 && (self.is_id(j - 1, "await") || self.punct(j - 1, b'(')) {
+            j -= 1;
+        }
+        if j == 0 || !self.punct(j - 1, b'=') {
+            return;
+        }
+        let end = j.saturating_sub(2);
+        if self.kind(end) == Some(Kind::Ident) {
+            if let Some(name) = self.name(end) {
+                let name = name.into_owned();
+                if net {
+                    self.net_alias.insert(name.clone());
+                }
+                if cp {
+                    self.cp_alias.insert(name);
+                }
+            }
+        } else if self.punct(end, b'}')
+            && let Some(open) = self.partner(end)
+        {
+            for name in self.pattern_names(open, end) {
+                if net {
+                    self.net_fn.insert(name.clone());
+                }
+                if cp {
+                    self.cp_fn.insert(name.clone());
+                }
+                if vm {
+                    self.sink_alias.insert(name, SinkClass::Code);
+                }
+            }
+        }
+    }
+
+    fn bind_import(&mut self, at: usize) {
+        let mut j = at + 1;
+        let mut in_braces = false;
+        let mut default: Vec<String> = Vec::new();
+        let mut named: Vec<String> = Vec::new();
+        while j < self.n() && j < at + 80 {
+            if self.is_id(j, "from") && self.kind(j + 1) == Some(Kind::Str) {
+                let Some(module) = self.str_val(j + 1) else {
+                    return;
+                };
+                let net = NET_MODULES.contains(&module.as_str());
+                let cp = CHILD_PROCESS.contains(&module.as_str());
+                let vm = VM_MODULES.contains(&module.as_str());
+                for name in default {
+                    if net {
+                        self.net_alias.insert(name.clone());
+                    }
+                    if cp {
+                        self.cp_alias.insert(name);
+                    }
+                }
+                for name in named {
+                    if net {
+                        self.net_fn.insert(name.clone());
+                    }
+                    if cp {
+                        self.cp_fn.insert(name.clone());
+                    }
+                    if vm {
+                        self.sink_alias.insert(name, SinkClass::Code);
+                    }
+                }
+                return;
+            }
+            if self.punct(j, b'{') {
+                in_braces = true;
+            } else if self.punct(j, b'}') {
+                in_braces = false;
+            } else if let Some(name) = self.name(j)
+                && !matches!(&*name, "as" | "type" | "from")
+                && !self.is_id(j + 1, "as")
+            {
+                if in_braces {
+                    named.push(name.into_owned());
+                } else {
+                    default.push(name.into_owned());
+                }
+            } else if self.punct(j, b';') || self.kind(j) == Some(Kind::Str) {
+                return;
+            }
+            j += 1;
+        }
+    }
+
+    // ------------------------------------------------------------ taint of values
+
+    /// Whether token `k` starts a network call, and what to call it.
+    fn net_head(&self, k: usize) -> Option<String> {
+        let name = self.name(k)?;
+        if !self.is_reference(k) {
+            return None;
+        }
+        let call = self.punct(k + 1, b'(');
+        let method = || -> Option<String> {
+            if self.punct(k + 1, b'.') {
+                let m = self.name(k + 2)?;
+                NET_METHODS.contains(&&*m).then(|| m.into_owned())
+            } else {
+                None
+            }
+        };
+        match &*name {
+            "fetch" if call => Some("fetch".to_string()),
+            "XMLHttpRequest" if k > 0 && self.is_id(k - 1, "new") => {
+                Some("XMLHttpRequest".to_string())
+            }
+            "axios" => {
+                if call {
+                    Some("axios".to_string())
+                } else {
+                    method().map(|m| format!("axios.{m}"))
+                }
+            }
+            "$" | "jQuery" => {
+                let m = self
+                    .punct(k + 1, b'.')
+                    .then(|| self.name(k + 2))
+                    .flatten()?;
+                matches!(&*m, "get" | "post" | "ajax" | "getJSON").then(|| format!("{name}.{m}"))
+            }
+            "require" => {
+                if !(self.punct(k + 1, b'(')
+                    && self.kind(k + 2) == Some(Kind::Str)
+                    && self.punct(k + 3, b')'))
+                {
+                    return None;
+                }
+                let module = self.str_val(k + 2)?;
+                if !NET_MODULES.contains(&module.as_str()) {
+                    return None;
+                }
+                if self.punct(k + 4, b'(') {
+                    Some(module)
+                } else if self.punct(k + 4, b'.') {
+                    let m = self.name(k + 5)?;
+                    NET_METHODS.contains(&&*m).then(|| format!("{module}.{m}"))
+                } else {
+                    None
+                }
+            }
+            other => {
+                if self.net_alias.contains(other) {
+                    if call {
+                        Some(other.to_string())
+                    } else {
+                        method().map(|m| format!("{other}.{m}"))
+                    }
+                } else if self.net_fn.contains(other) && call {
+                    Some(other.to_string())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// The decoder the identifier at `k` starts, if it is one.
+    fn decoder(&self, k: usize) -> Option<&'static str> {
+        let name = self.name(k)?;
+        match &*name {
+            "atob" if self.punct(k + 1, b'(') => Some("atob"),
+            "unescape" if self.punct(k + 1, b'(') => Some("unescape"),
+            "String"
+                if self.punct(k + 1, b'.')
+                    && self.is_id(k + 2, "fromCharCode")
+                    && self.punct(k + 3, b'(') =>
+            {
+                Some("String.fromCharCode")
+            }
+            "Buffer" => {
+                let open = if self.punct(k + 1, b'.')
+                    && self.is_id(k + 2, "from")
+                    && self.punct(k + 3, b'(')
+                {
+                    k + 3
+                } else if self.punct(k + 1, b'(') && k > 0 && self.is_id(k - 1, "new") {
+                    k + 1
+                } else {
+                    return None;
+                };
+                let close = self.partner(open)?;
+                let encoded = (open + 1..close).any(|j| {
+                    self.str_val(j).is_some_and(|v| {
+                        matches!(
+                            v.as_str(),
+                            "base64" | "base64url" | "hex" | "latin1" | "binary"
+                        )
+                    })
+                });
+                encoded.then_some("Buffer.from with a base64 or hex string")
+            }
+            _ => None,
+        }
+    }
+
+    fn ident_taint(&self, k: usize) -> Option<Taint> {
+        if !self.is_reference(k) {
+            return None;
+        }
+        if let Some(label) = self.net_head(k) {
+            return Some(Taint::net(label));
+        }
+        if let Some(label) = self.decoder(k) {
+            return Some(Taint::blob(label));
+        }
+        let name = self.name(k)?;
+        self.names.get(&*name).cloned()
+    }
+
+    /// The taint of the tokens `a..b`: what flows into an expression written
+    /// there.
+    fn range_taint(&mut self, a: usize, b: usize) -> Taint {
+        let mut taint = Taint::default();
+        let end = b.min(self.n());
+        for k in a..end {
+            if !self.tick() {
+                break;
+            }
+            match self.kind(k) {
+                Some(Kind::Ident) => {
+                    if let Some(t) = self.ident_taint(k) {
+                        taint.merge(&t);
+                    }
+                }
+                Some(Kind::Str) => {
+                    if let Some(label) = blob_literal(self.lx.raw(self.text, k)) {
+                        taint.merge(&Taint::blob(label));
+                    }
+                }
+                _ => {}
+            }
+        }
+        taint
+    }
+
+    /// The taint along the callee chain that ends at token `k`
+    /// (`axios.get(u).then` for the call `.then(...)`).
+    fn chain_taint(&mut self, k: usize) -> Taint {
+        let mut taint = Taint::default();
+        let mut j = k;
+        for _ in 0..200 {
+            if !self.tick() {
+                break;
+            }
+            match self.kind(j) {
+                Some(Kind::Ident) => {
+                    if let Some(t) = self.ident_taint(j) {
+                        taint.merge(&t);
+                    }
+                    if j >= 2 && self.punct(j - 1, b'.') {
+                        // `?.` has the question mark first.
+                        j -= if j >= 3 && self.punct(j - 2, b'?') {
+                            3
+                        } else {
+                            2
+                        };
+                    } else {
+                        break;
+                    }
+                }
+                Some(Kind::Punct(b')' | b']')) => match self.partner(j) {
+                    Some(open) if open > 0 => j = open - 1,
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        taint
+    }
+
+    // ------------------------------------------------------------ statements
+
+    fn is_assign(&self, j: usize) -> bool {
+        if !self.punct(j, b'=') {
+            return false;
+        }
+        if (self.punct(j + 1, b'=') || self.punct(j + 1, b'>')) && self.lx.adjacent(j + 1) {
+            return false;
+        }
+        if j > 0
+            && self.lx.adjacent(j)
+            && let Some(Kind::Punct(prev)) = self.kind(j - 1)
+        {
+            return !matches!(prev, b'=' | b'!' | b'<' | b'>');
+        }
+        true
+    }
+
+    /// The names an assignment whose `=` is at `j` gives a value to.
+    fn lhs_names(&self, j: usize) -> Vec<String> {
+        let mut p = j.saturating_sub(1);
+        while p > 0
+            && self.lx.adjacent(p + 1)
+            && matches!(
+                self.kind(p),
+                Some(Kind::Punct(
+                    b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'?'
+                ))
+            )
+        {
+            p -= 1;
+        }
+        match self.kind(p) {
+            Some(Kind::Ident) => self.base_name(p).into_iter().collect(),
+            Some(Kind::Punct(b']')) => {
+                let Some(open) = self.partner(p) else {
+                    return Vec::new();
+                };
+                if open > 0
+                    && matches!(
+                        self.kind(open - 1),
+                        Some(Kind::Ident | Kind::Punct(b')' | b']'))
+                    )
+                {
+                    self.base_name(open - 1).into_iter().collect()
+                } else {
+                    self.pattern_names(open, p)
+                }
+            }
+            Some(Kind::Punct(b'}')) => match self.partner(p) {
+                Some(open) => self.pattern_names(open, p),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// The first name of the chain `a.b[c].d` that ends at `p`.
+    fn base_name(&self, mut p: usize) -> Option<String> {
+        for _ in 0..100 {
+            match self.kind(p) {
+                Some(Kind::Ident) => {
+                    if p >= 2 && self.punct(p - 1, b'.') {
+                        p -= 2;
+                    } else {
+                        return self.name(p).map(Cow::into_owned);
+                    }
+                }
+                Some(Kind::Punct(b')' | b']')) => {
+                    let open = self.partner(p)?;
+                    if open == 0 {
+                        return None;
+                    }
+                    p = open - 1;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The names bound by a destructuring pattern between `open` and `close`.
+    fn pattern_names(&self, open: usize, close: usize) -> Vec<String> {
+        let mut names = Vec::new();
+        for k in open + 1..close {
+            let Some(name) = self.name(k) else { continue };
+            let after_separator = k > 0
+                && matches!(
+                    self.kind(k - 1),
+                    Some(Kind::Punct(b'{' | b'[' | b',' | b':'))
+                );
+            if after_separator && !self.punct(k + 1, b':') && !matches!(&*name, "async" | "await") {
+                names.push(name.into_owned());
+            }
+            if names.len() >= 64 {
+                break;
+            }
+        }
+        names
+    }
+
+    /// Where the expression that starts at `from` ends (exclusive).
+    fn expr_end(&self, from: usize) -> usize {
+        let limit = (from + MAX_EXPR_TOKENS).min(self.n());
+        let mut k = from;
+        while k < limit {
+            match self.kind(k) {
+                Some(Kind::Punct(b';' | b',')) => return k,
+                Some(Kind::Punct(b')' | b']' | b'}')) => return k,
+                Some(Kind::Punct(b'(' | b'[' | b'{')) => match self.partner(k) {
+                    Some(close) => {
+                        k = close + 1;
+                        if k < limit && self.new_statement(k) {
+                            return k;
+                        }
+                        continue;
+                    }
+                    None => return k,
+                },
+                _ => {}
+            }
+            k += 1;
+            if k < limit && self.new_statement(k) {
+                return k;
+            }
+        }
+        limit
+    }
+
+    /// Whether a line break before token `k` ends a statement (automatic
+    /// semicolon insertion, as far as it matters here).
+    fn new_statement(&self, k: usize) -> bool {
+        let Some(token) = self.lx.tokens.get(k) else {
+            return false;
+        };
+        if !token.nl_before || k == 0 {
+            return false;
+        }
+        let starts = match token.kind {
+            Kind::Number | Kind::Str => true,
+            Kind::Ident => !matches!(self.lx.raw(self.text, k), "in" | "of" | "instanceof" | "as"),
+            _ => false,
+        };
+        let ends = match self.lx.tokens[k - 1].kind {
+            Kind::Number | Kind::Str | Kind::Regex | Kind::Template => true,
+            Kind::Ident => !matches!(
+                self.lx.raw(self.text, k - 1),
+                "typeof"
+                    | "new"
+                    | "await"
+                    | "delete"
+                    | "void"
+                    | "in"
+                    | "of"
+                    | "instanceof"
+                    | "return"
+                    | "throw"
+                    | "yield"
+                    | "case"
+                    | "do"
+                    | "else"
+            ),
+            Kind::Punct(b')' | b']' | b'}') => true,
+            Kind::Punct(_) => false,
+        };
+        starts && ends
+    }
+
+    /// Whether a function expression starts at `k`.
+    fn starts_function(&self, mut k: usize) -> bool {
+        if self.is_id(k, "async") {
+            k += 1;
+        }
+        if self.is_id(k, "function") {
+            return true;
+        }
+        let arrow =
+            |p: usize| self.punct(p, b'=') && self.punct(p + 1, b'>') && self.lx.adjacent(p + 1);
+        if self.punct(k, b'(') {
+            return self.partner(k).is_some_and(|close| arrow(close + 1));
+        }
+        self.kind(k) == Some(Kind::Ident) && arrow(k + 1)
+    }
+
+    /// The taint of what a function expression that starts at `k` returns.
+    fn fn_return_taint(&mut self, k: usize) -> Taint {
+        let mut k = k;
+        if self.is_id(k, "async") {
+            k += 1;
+        }
+        let body_open = if self.is_id(k, "function") {
+            let mut p = k + 1;
+            while p < self.n() && !self.punct(p, b'(') {
+                p += 1;
+                if p > k + 4 {
+                    return Taint::default();
+                }
+            }
+            let Some(close) = self.partner(p) else {
+                return Taint::default();
+            };
+            close + 1
+        } else {
+            let after = if self.punct(k, b'(') {
+                match self.partner(k) {
+                    Some(close) => close + 1,
+                    None => return Taint::default(),
+                }
+            } else {
+                k + 1
+            };
+            // Past `=` and `>`.
+            after + 2
+        };
+        if self.punct(body_open, b'{') {
+            match self.partner(body_open) {
+                Some(close) => self.returns_taint(body_open, close),
+                None => Taint::default(),
+            }
+        } else {
+            let end = self.expr_end(body_open);
+            self.range_taint(body_open, end)
+        }
+    }
+
+    /// The taint of the values returned between `open` and `close`.
+    fn returns_taint(&mut self, open: usize, close: usize) -> Taint {
+        let mut taint = Taint::default();
+        for k in open + 1..close {
+            if !self.tick() {
+                break;
+            }
+            if self.is_id(k, "return") && !self.prev_dot(k) {
+                let end = self.expr_end(k + 1);
+                let t = self.range_taint(k + 1, end);
+                taint.merge(&t);
+            }
+        }
+        taint
+    }
+
+    fn taint_names(&mut self, names: &[String], taint: &Taint) -> bool {
+        let mut changed = false;
+        if taint.bits == 0 {
+            return false;
+        }
+        for name in names {
+            let entry = self.names.entry(name.clone()).or_default();
+            changed |= entry.merge(taint);
+        }
+        changed
+    }
+
+    fn assign_pass(&mut self) -> bool {
+        let mut changed = false;
+        for j in 1..self.n() {
+            if !self.tick() {
+                break;
+            }
+            if !self.is_assign(j) {
+                continue;
+            }
+            let names = self.lhs_names(j);
+            if names.is_empty() {
+                continue;
+            }
+            // `const run = eval;`
+            if let [name] = names.as_slice()
+                && let Some(class) = self.sink_reference(j + 1)
+            {
+                self.sink_alias.entry(name.clone()).or_insert(class);
+            }
+            // `const api = axios.create(...)`
+            if let [name] = names.as_slice()
+                && self.is_net_factory(j + 1)
+                && self.net_alias.insert(name.clone())
+            {
+                changed = true;
+            }
+            let taint = if self.starts_function(j + 1) {
+                self.fn_return_taint(j + 1)
+            } else {
+                let end = self.expr_end(j + 1);
+                self.range_taint(j + 1, end)
+            };
+            changed |= self.taint_names(&names, &taint);
+        }
+        changed
+    }
+
+    /// `eval`, `Function`, `window.eval` and similar written without a call.
+    fn sink_reference(&self, k: usize) -> Option<SinkClass> {
+        let mut at = k;
+        if self.is_global_obj(at) && self.punct(at + 1, b'.') {
+            at += 2;
+        }
+        let name = self.name(at)?;
+        let bare =
+            |end: usize| !(self.punct(end, b'(') || self.punct(end, b'.') || self.punct(end, b'['));
+        match &*name {
+            "eval" | "Function" if bare(at + 1) => Some(SinkClass::Code),
+            "execSync" | "exec" if bare(at + 1) && self.cp_fn.contains(&*name) => {
+                Some(SinkClass::Command)
+            }
+            _ => None,
+        }
+    }
+
+    /// `axios.create(...)`, `got.extend(...)`: an object that makes requests.
+    fn is_net_factory(&self, k: usize) -> bool {
+        let Some(head) = self.name(k) else {
+            return false;
+        };
+        let known = head == "axios" || self.net_alias.contains(&*head);
+        known
+            && self.punct(k + 1, b'.')
+            && self
+                .name(k + 2)
+                .is_some_and(|m| matches!(&*m, "create" | "extend" | "default"))
+    }
+
+    /// `function name(...) { ... return tainted; }` and methods.
+    fn function_pass(&mut self) -> bool {
+        let mut changed = false;
+        for i in 1..self.n() {
+            if !self.tick() {
+                break;
+            }
+            if !self.punct(i, b'(') {
+                continue;
+            }
+            let Some(name) = self.name(i - 1) else {
+                continue;
+            };
+            if CONTROL.contains(&&*name) {
+                continue;
+            }
+            let Some(close) = self.partner(i) else {
+                continue;
+            };
+            if !self.punct(close + 1, b'{') {
+                continue;
+            }
+            let Some(body_close) = self.partner(close + 1) else {
+                continue;
+            };
+            let taint = self.returns_taint(close + 1, body_close);
+            changed |= self.taint_names(&[name.into_owned()], &taint);
+        }
+        changed
+    }
+
+    /// The parameter names of the function written at `s`, if one is.
+    fn function_params(&self, s: usize) -> Option<Vec<String>> {
+        let mut k = s;
+        if self.is_id(k, "async") {
+            k += 1;
+        }
+        if self.is_id(k, "function") {
+            k += 1;
+            if self.kind(k) == Some(Kind::Ident) {
+                k += 1;
+            }
+            if !self.punct(k, b'(') {
+                return None;
+            }
+            let close = self.partner(k)?;
+            return Some(self.param_list(k, close));
+        }
+        let arrow =
+            |p: usize| self.punct(p, b'=') && self.punct(p + 1, b'>') && self.lx.adjacent(p + 1);
+        if self.punct(k, b'(') {
+            let close = self.partner(k)?;
+            return arrow(close + 1).then(|| self.param_list(k, close));
+        }
+        if self.kind(k) == Some(Kind::Ident) && arrow(k + 1) {
+            return self.name(k).map(|n| vec![n.into_owned()]);
+        }
+        None
+    }
+
+    fn param_list(&self, open: usize, close: usize) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut k = open + 1;
+        while k < close {
+            if let Some(name) = self.name(k) {
+                let starts =
+                    self.punct(k - 1, b'(') || self.punct(k - 1, b',') || self.punct(k - 1, b'.');
+                if starts && names.len() < 64 {
+                    names.push(name.into_owned());
+                }
+            } else if self.is_open(k)
+                && let Some(end) = self.partner(k)
+            {
+                if self.punct(k, b'{') || self.punct(k, b'[') {
+                    names.extend(self.pattern_names(k, end));
+                }
+                k = end;
+            }
+            // A default value is skipped up to the next comma.
+            if self.punct(k, b'=') && !self.punct(k + 1, b'>') {
+                while k < close && !self.punct(k, b',') {
+                    k = match self.partner(k).filter(|_| self.is_open(k)) {
+                        Some(end) => end + 1,
+                        None => k + 1,
+                    };
+                }
+                continue;
+            }
+            k += 1;
+        }
+        names
+    }
+
+    fn is_open(&self, k: usize) -> bool {
+        self.lx.is_open(k)
+    }
+
+    /// Callbacks given to a call whose callee chain carries taint get tainted
+    /// parameters.
+    fn callback_pass(&mut self) -> bool {
+        let mut changed = false;
+        for i in 1..self.n() {
+            if !self.tick() {
+                break;
+            }
+            if !self.punct(i, b'(') {
+                continue;
+            }
+            let callee_ok = match self.kind(i - 1) {
+                // `catch (e) {` is a clause, `.catch(f)` a call.
+                Some(Kind::Ident) => {
+                    self.prev_dot(i - 1) || !CONTROL.contains(&self.lx.raw(self.text, i - 1))
+                }
+                Some(Kind::Punct(b')' | b']')) => true,
+                _ => false,
+            };
+            if !callee_ok {
+                continue;
+            }
+            let Some(close) = self.partner(i) else {
+                continue;
+            };
+            // Only calls that pass a function are worth a chain walk.
+            let mut params: Vec<Vec<String>> = Vec::new();
+            let mut s = i + 1;
+            while s < close {
+                if let Some(list) = self.function_params(s) {
+                    params.push(list);
+                }
+                // To the next comma at this level.
+                let mut k = s;
+                while k < close && !self.punct(k, b',') {
+                    k = match self.partner(k).filter(|_| self.is_open(k)) {
+                        Some(end) => end + 1,
+                        None => k + 1,
+                    };
+                }
+                s = k + 1;
+            }
+            if params.is_empty() {
+                continue;
+            }
+            let taint = self.chain_taint(i - 1);
+            if taint.bits == 0 {
+                continue;
+            }
+            for list in params {
+                changed |= self.taint_names(&list, &taint);
+            }
+        }
+        changed
+    }
+
+    /// `try { ...tainted... } catch (err) { ... }`: the error of a failed
+    /// request carries the response.
+    fn catch_pass(&mut self) -> bool {
+        let mut changed = false;
+        for i in 1..self.n() {
+            if !self.tick() {
+                break;
+            }
+            if !(self.is_id(i, "catch") && self.punct(i + 1, b'(') && self.punct(i - 1, b'}')) {
+                continue;
+            }
+            let (Some(block_open), Some(close)) = (self.partner(i - 1), self.partner(i + 1)) else {
+                continue;
+            };
+            if block_open == 0 || !self.is_id(block_open - 1, "try") {
+                continue;
+            }
+            let taint = self.range_taint(block_open, i);
+            if taint.bits == 0 {
+                continue;
+            }
+            let mut names = self.param_list(i + 1, close);
+            if names.is_empty() {
+                names = self.pattern_names(i + 1, close);
+            }
+            changed |= self.taint_names(&names, &taint);
+        }
+        changed
+    }
+
+    // ------------------------------------------------------------ sinks
+
+    /// The sink the identifier at `i` starts, as `(class, label, open paren)`.
+    fn sink_at(&self, i: usize) -> Option<(SinkClass, String, usize)> {
+        let name = self.name(i)?;
+        let next = i + 1;
+        let global_call = |k: usize| self.punct(k, b'(');
+        let reference = self.is_reference(i);
+        match &*name {
+            "eval" if reference => {
+                if global_call(next) {
+                    return Some((SinkClass::Code, "eval".into(), next));
+                }
+                // `(0, eval)(x)` and `(eval)(x)`
+                if self.punct(next, b')')
+                    && self.punct(next + 1, b'(')
+                    && i > 0
+                    && (self.punct(i - 1, b',') || self.punct(i - 1, b'('))
+                {
+                    return Some((SinkClass::Code, "indirect eval".into(), next + 1));
+                }
+                // `eval.call(null, x)`
+                if self.punct(next, b'.')
+                    && self
+                        .name(next + 1)
+                        .is_some_and(|m| matches!(&*m, "call" | "apply" | "bind"))
+                    && self.punct(next + 2, b'(')
+                {
+                    return Some((SinkClass::Code, "eval".into(), next + 2));
+                }
+                None
+            }
+            "Function" if reference && global_call(next) => {
+                let label = if i > 0 && self.is_id(i - 1, "new") {
+                    "new Function"
+                } else {
+                    "Function"
+                };
+                Some((SinkClass::Code, label.into(), next))
+            }
+            "constructor" if self.prev_dot(i) && global_call(next) => {
+                // `x.constructor.constructor(code)`
+                (i >= 3 && self.is_id(i - 2, "constructor") && self.punct(i - 3, b'.'))
+                    .then(|| (SinkClass::Code, "constructor.constructor".to_string(), next))
+            }
+            "runInThisContext" | "runInNewContext" | "runInContext" | "compileFunction"
+            | "_compile"
+                if global_call(next) =>
+            {
+                Some((SinkClass::Code, name.to_string(), next))
+            }
+            "Script"
+                if self.prev_dot(i) && i >= 2 && self.is_id(i - 2, "vm") && global_call(next) =>
+            {
+                Some((SinkClass::Code, "vm.Script".into(), next))
+            }
+            "execSync" | "execFileSync" | "spawnSync" | "execFile" if global_call(next) => {
+                Some((SinkClass::Command, name.to_string(), next))
+            }
+            "exec" | "spawn" if global_call(next) => {
+                let bound = if self.prev_dot(i) {
+                    i >= 2
+                        && (self
+                            .name(i - 2)
+                            .is_some_and(|o| self.cp_alias.contains(&*o))
+                            || self.is_child_process_call(i - 2))
+                } else {
+                    self.cp_fn.contains(&*name)
+                };
+                bound.then(|| (SinkClass::Command, name.to_string(), next))
+            }
+            other => {
+                // An alias of a sink: `const run = eval; run(x)`.
+                if reference && !self.prev_dot(i) && global_call(next) {
+                    self.sink_alias
+                        .get(other)
+                        .map(|&class| (class, other.to_string(), next))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Token `k` is the `)` of `require("child_process")`.
+    fn is_child_process_call(&self, k: usize) -> bool {
+        self.punct(k, b')')
+            && k >= 3
+            && self.kind(k - 1) == Some(Kind::Str)
+            && self.is_id(k - 3, "require")
+            && self
+                .str_val(k - 1)
+                .is_some_and(|m| CHILD_PROCESS.contains(&m.as_str()))
+    }
+
+    /// `window["eval"](x)`, and the same with a name built at run time.
+    fn computed_global_call(&self, i: usize) -> Option<(Option<String>, usize)> {
+        if !(self.is_global_obj(i) || self.is_id(i, "this")) || !self.punct(i + 1, b'[') {
+            return None;
+        }
+        let close = self.partner(i + 1)?;
+        if !self.punct(close + 1, b'(') {
+            return None;
+        }
+        let literal = (close == i + 3 && self.kind(i + 2) == Some(Kind::Str))
+            .then(|| self.str_val(i + 2))
+            .flatten();
+        Some((literal, close + 1))
+    }
+
+    fn sink_pass(&mut self) {
+        let mut function_vars: HashMap<String, usize> = HashMap::new();
+        let mut uncertain: Option<(usize, String)> = None;
+        let first_net = (0..self.n()).find_map(|k| self.net_head(k));
+        let mut sinks: Vec<(usize, SinkClass, String, usize)> = Vec::new();
+        for i in 0..self.n() {
+            if !self.tick() {
+                break;
+            }
+            if self.kind(i) != Some(Kind::Ident) {
+                continue;
+            }
+            if let Some((class, label, open)) = self.sink_at(i) {
+                sinks.push((i, class, label, open));
+            } else if let Some((literal, open)) = self.computed_global_call(i) {
+                match literal.as_deref() {
+                    Some("eval") => sinks.push((i, SinkClass::Code, "eval".into(), open)),
+                    Some("Function") => sinks.push((i, SinkClass::Code, "Function".into(), open)),
+                    Some(_) => {}
+                    None => {
+                        if uncertain.is_none() {
+                            uncertain = Some((
+                                i,
+                                "a function is looked up on the global object by a name built at \
+                                 run time"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for (i, class, label, open) in sinks {
+            let Some(close) = self.partner(open) else {
+                continue;
+            };
+            let taint = self.range_taint(open + 1, close);
+            // `Function("require", ...)` called with `require`.
+            if class == SinkClass::Code && matches!(label.as_str(), "new Function" | "Function") {
+                self.function_require(i, open, close, &mut function_vars);
+            }
+            if class == SinkClass::Code && taint.bits & NET != 0 {
+                self.add(
+                    FoundKind::FetchEval,
+                    i,
+                    format!(
+                        "`{label}` runs data that came from a network call ({}) in the same file: \
+                         code is downloaded and run, which is how loaders work",
+                        taint.net.as_deref().unwrap_or("network")
+                    ),
+                );
+            } else if taint.bits & BLOB != 0 {
+                self.add(
+                    FoundKind::Encoded,
+                    i,
+                    format!(
+                        "`{label}` is given decoded data ({}): an encoded blob handed to a code or \
+                         command sink hides what the code does",
+                        taint.blob.as_deref().unwrap_or("encoded data")
+                    ),
+                );
+            }
+        }
+        // A function made with `require` as a parameter and called later.
+        if !function_vars.is_empty() {
+            for k in 0..self.n() {
+                if !self.tick() {
+                    break;
+                }
+                let Some(name) = self.name(k) else { continue };
+                let Some(&site) = function_vars.get(&*name) else {
+                    continue;
+                };
+                if self.prev_dot(k) {
+                    continue;
+                }
+                let mut open = k + 1;
+                if self.punct(open, b'.')
+                    && self
+                        .name(open + 1)
+                        .is_some_and(|m| matches!(&*m, "call" | "apply"))
+                {
+                    open += 2;
+                }
+                if self.punct(open, b'(')
+                    && let Some(close) = self.partner(open)
+                    && (open + 1..close).any(|j| self.is_id(j, "require"))
+                {
+                    self.add(FoundKind::FunctionRequire, site, function_require_reason());
+                }
+            }
+        }
+        // What the check could not follow, when the file also uses the network.
+        if let Some(net) = first_net {
+            if let Some((i, why)) = uncertain {
+                self.add(
+                    FoundKind::Uncertain,
+                    i,
+                    format!(
+                        "{why}, and this file makes network calls ({net}); the check cannot tell \
+                         what is called, so review it by hand"
+                    ),
+                );
+            }
+            let cut = self.lx.problems.first().map(|p| (p.offset, p.what));
+            if let Some((offset, what)) = cut {
+                self.found.push(Found {
+                    kind: FoundKind::Uncertain,
+                    start: offset.min(self.text.len().saturating_sub(1)),
+                    end: offset.min(self.text.len()),
+                    reason: format!(
+                        "the file could not be read to the end ({what}) and it makes network \
+                         calls ({net}); code after that point was not checked, so review it by hand"
+                    ),
+                });
+            } else if self.lx.truncated || self.over_budget {
+                self.found.push(Found {
+                    kind: FoundKind::Uncertain,
+                    start: 0,
+                    end: 0,
+                    reason: format!(
+                        "the file is too large or too complex to follow completely and it makes \
+                         network calls ({net}); review it by hand"
+                    ),
+                });
+            }
+        }
+    }
+
+    fn function_require(
+        &mut self,
+        i: usize,
+        open: usize,
+        close: usize,
+        vars: &mut HashMap<String, usize>,
+    ) {
+        // The first argument is a string that names `require` as a parameter.
+        if self.kind(open + 1) != Some(Kind::Str) {
+            return;
+        }
+        let Some(params) = self.str_val(open + 1) else {
+            return;
+        };
+        if !params.split(',').any(|p| p.trim() == "require") {
+            return;
+        }
+        // Called at once: `new Function("require", body)(require)`.
+        if self.punct(close + 1, b'(')
+            && let Some(call_close) = self.partner(close + 1)
+        {
+            if (close + 2..call_close).any(|j| self.is_id(j, "require")) {
+                self.add(FoundKind::FunctionRequire, i, function_require_reason());
+            }
+            return;
+        }
+        // Kept in a variable: `const make = new Function("require", body);`
+        let before = if i > 0 && self.is_id(i - 1, "new") {
+            i - 1
+        } else {
+            i
+        };
+        if before >= 2
+            && self.punct(before - 1, b'=')
+            && let Some(name) = self.name(before - 2)
+        {
+            vars.insert(name.into_owned(), i);
+        }
+    }
+
+    fn run(mut self) -> Vec<Found> {
+        self.bind_pass();
+        for _ in 0..MAX_PASSES {
+            let mut changed = self.assign_pass();
+            changed |= self.function_pass();
+            changed |= self.callback_pass();
+            changed |= self.catch_pass();
+            if !changed || self.over_budget {
+                break;
+            }
+        }
+        self.sink_pass();
+        self.found.sort_by_key(|f| (f.start, f.end));
+        self.found
+            .dedup_by(|a, b| a.start == b.start && a.kind == b.kind);
+        self.found
+    }
+}
+
+fn function_require_reason() -> String {
+    "`new Function(\"require\", ...)` is called with `require`: code built at run time gets the \
+     module loader, which is the usual shape of a loader"
+        .to_string()
+}
+
+/// Whether a string literal (raw, with its quotes) is an encoded blob: a long
+/// base64 string with mixed case, or a run of escape sequences.
+fn blob_literal(raw: &str) -> Option<&'static str> {
+    let inner = raw.get(1..raw.len().saturating_sub(1))?;
+    if inner.len() >= 64
+        && inner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+        && inner.bytes().any(|b| b.is_ascii_uppercase())
+        && inner.bytes().any(|b| b.is_ascii_lowercase())
+        && inner
+            .bytes()
+            .any(|b| b.is_ascii_digit() || matches!(b, b'+' | b'/'))
+    {
+        return Some("a long base64 string");
+    }
+    let escapes = inner.matches("\\x").count() + inner.matches("\\u").count();
+    (escapes >= 8).then_some("a string of escape sequences")
+}
+
+// ---------------------------------------------------------------- hits
+
+pub(crate) fn hit(
+    ctx: &Ctx<'_>,
+    start: usize,
+    end: usize,
+    severity: Severity,
+    reason: String,
+) -> Hit {
+    let text = ctx.text();
+    let start = start.min(text.len());
+    let end = end.clamp(start, text.len());
+    Hit {
+        line: ctx.line_of(start),
+        severity,
+        reason,
+        span: (end > start).then_some(TextSpan(start..end)),
+    }
+}
+
+fn flow_hits(ctx: &Ctx<'_>, wanted: &[(FoundKind, Severity)]) -> Vec<Hit> {
+    ctx.js_flow()
+        .iter()
+        .filter_map(|found| {
+            wanted
+                .iter()
+                .find(|(kind, _)| *kind == found.kind)
+                .map(|&(_, severity)| {
+                    hit(ctx, found.start, found.end, severity, found.reason.clone())
+                })
+        })
+        .collect()
+}
+
+/// Rule `run.js-fetch-eval`.
+pub fn fetch_eval(ctx: &Ctx<'_>) -> Vec<Hit> {
+    flow_hits(
+        ctx,
+        &[
+            (FoundKind::FetchEval, ctx.base),
+            (FoundKind::Uncertain, Severity::Medium),
+        ],
+    )
+}
+
+/// Rule `run.js-function-require`.
+pub fn function_require(ctx: &Ctx<'_>) -> Vec<Hit> {
+    flow_hits(ctx, &[(FoundKind::FunctionRequire, ctx.base)])
+}
+
+/// Rule `obfuscation.encoded-payload-sink`.
+pub fn encoded_payload(ctx: &Ctx<'_>) -> Vec<Hit> {
+    flow_hits(ctx, &[(FoundKind::Encoded, ctx.base)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(text: &str) -> Vec<(FoundKind, String)> {
+        flow(text)
+            .into_iter()
+            .map(|f| (f.kind, text[f.start..f.end].to_string()))
+            .collect()
+    }
+
+    fn fetch_eval_count(text: &str) -> usize {
+        kinds(text)
+            .iter()
+            .filter(|(k, _)| *k == FoundKind::FetchEval)
+            .count()
+    }
+
+    #[test]
+    fn a_response_awaited_into_a_variable_and_evaluated() {
+        let text = "const r = await axios.get(u);\neval(r.data.cookie);";
+        assert_eq!(fetch_eval_count(text), 1);
+    }
+
+    #[test]
+    fn promise_callbacks_carry_the_response() {
+        assert_eq!(
+            fetch_eval_count("fetch(u).then(r => r.text()).then(code => eval(code));"),
+            1
+        );
+        assert_eq!(
+            fetch_eval_count(
+                "axios.get(u).then(res=>res.data).catch(err=>{ eval(err.response.data); });"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn a_node_stream_callback_chain_is_followed() {
+        let text = "const https = require('https');\nhttps.get(u, (res) => { let b = ''; res.on('data', c => { b += c; }); res.on('end', () => { eval(b); }); });";
+        assert_eq!(fetch_eval_count(text), 1);
+    }
+
+    #[test]
+    fn the_function_constructor_and_vm_are_sinks() {
+        assert_eq!(
+            fetch_eval_count("const c = await (await fetch(u)).text(); new Function(c)();"),
+            1
+        );
+        assert_eq!(
+            fetch_eval_count("const c = await fetch(u); Function('return ' + c)();"),
+            1
+        );
+        assert_eq!(
+            fetch_eval_count("const c = await fetch(u); vm.runInNewContext(c);"),
+            1
+        );
+        assert_eq!(
+            fetch_eval_count("const c = await fetch(u); module._compile(c, 'x');"),
+            1
+        );
+    }
+
+    #[test]
+    fn indirect_forms_are_sinks() {
+        for sink in [
+            "(0, eval)(c)",
+            "window.eval(c)",
+            "globalThis['eval'](c)",
+            "eval.call(null, c)",
+            "[].constructor.constructor(c)()",
+            "\\u0065val(c)",
+        ] {
+            let text = format!("const c = await fetch(u);\n{sink};");
+            assert_eq!(fetch_eval_count(&text), 1, "{sink}");
+        }
+        assert_eq!(
+            fetch_eval_count("const c = await fetch(u); const run = eval; run(c);"),
+            1
+        );
+    }
+
+    #[test]
+    fn words_in_comments_and_strings_are_not_calls() {
+        let text = "// eval(r.data)\nconst s = 'eval(r.data)';\nconst r = await axios.get(u);\n/* eval(r.data) */";
+        assert!(kinds(text).is_empty());
+    }
+
+    #[test]
+    fn eval_without_network_data_is_not_this_rule() {
+        assert_eq!(
+            fetch_eval_count("const code = '1+1'; eval(code); axios.get(u);"),
+            0
+        );
+        assert_eq!(
+            fetch_eval_count("app.get('/x', (req, res) => { eval(req.body.x); });"),
+            0
+        );
+        assert_eq!(
+            fetch_eval_count("const r = await axios.get(u); JSON.parse(r.data); eval('1');"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_method_called_eval_on_another_object_is_not_a_sink() {
+        assert_eq!(
+            fetch_eval_count("const r = await fetch(u); page.eval(r);"),
+            0
+        );
+    }
+
+    #[test]
+    fn taint_goes_through_returns_and_destructuring() {
+        assert_eq!(
+            fetch_eval_count(
+                "async function get(){ const r = await axios.get(u); return r.data; }\nconst d = await get();\neval(d);"
+            ),
+            1
+        );
+        assert_eq!(
+            fetch_eval_count("const { data } = await axios.get(u);\neval(data);"),
+            1
+        );
+        assert_eq!(
+            fetch_eval_count("let s = ''; s += (await axios.get(u)).data;\nnew Function(s)();"),
+            1
+        );
+    }
+
+    #[test]
+    fn a_computed_name_on_the_global_object_is_reported_with_a_network_call() {
+        let text = "axios.get(u).then(r => { global['ev' + 'al'](r.data); });";
+        let found = kinds(text);
+        assert!(
+            found.iter().any(|(k, _)| *k == FoundKind::Uncertain),
+            "{found:?}"
+        );
+        let alone = "global['ev' + 'al'](x);";
+        assert!(kinds(alone).is_empty());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_to_the_end_is_reported_with_a_network_call() {
+        let text = "axios.get(u); eval(x);\nconst t = `never closed";
+        assert!(kinds(text).iter().any(|(k, _)| *k == FoundKind::Uncertain));
+        assert!(kinds("eval(x);\nconst t = `never closed").is_empty());
+    }
+
+    #[test]
+    fn function_require_is_found_called_at_once_and_through_a_variable() {
+        assert_eq!(
+            kinds("const m = new Function('require', body)(require);")
+                .iter()
+                .filter(|(k, _)| *k == FoundKind::FunctionRequire)
+                .count(),
+            1
+        );
+        assert_eq!(
+            kinds("const make = new Function('a, require', body);\nmake(1, require);")
+                .iter()
+                .filter(|(k, _)| *k == FoundKind::FunctionRequire)
+                .count(),
+            1
+        );
+        assert!(kinds("const m = new Function('x', body)(require);").is_empty());
+        assert!(kinds("const m = new Function('require', body);").is_empty());
+    }
+
+    #[test]
+    fn decoded_data_in_a_sink_is_an_encoded_payload() {
+        for text in [
+            "eval(atob(x));",
+            "new Function(Buffer.from(x, 'base64').toString())();",
+            "execSync(Buffer.from(x, 'hex').toString());",
+            "const { exec } = require('child_process');\nexec(unescape(x));",
+            "eval(String.fromCharCode(1, 2, 3));",
+        ] {
+            assert_eq!(
+                kinds(text)
+                    .iter()
+                    .filter(|(k, _)| *k == FoundKind::Encoded)
+                    .count(),
+                1,
+                "{text}"
+            );
+        }
+        // The regular expression method of the same name is not a command.
+        assert!(kinds("const m = /a/.exec(atob(x));").is_empty());
+        assert!(kinds("const logo = 'x'; execSync('git status');").is_empty());
+    }
+
+    #[test]
+    fn a_long_base64_literal_given_to_a_sink_through_a_variable_counts() {
+        let blob = "QUJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5QUJjZGVmZ2hpamtsbW5vcA==";
+        let text = format!("const p = \"{blob}\";\neval(p);");
+        assert_eq!(kinds(&text).len(), 1);
+        assert!(kinds(&format!("const p = \"{blob}\";\nconsole.log(p);")).is_empty());
+    }
+
+    #[test]
+    fn a_huge_input_stays_fast_and_bounded() {
+        let text = "a=b;".repeat(400_000) + "eval(c);";
+        let started = std::time::Instant::now();
+        let _ = flow(&text);
+        assert!(started.elapsed().as_secs() < 10);
+        let nested = "f(".repeat(50_000) + &")".repeat(50_000) + "; eval(x);";
+        let _ = flow(&nested);
+    }
+}
