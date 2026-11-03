@@ -219,8 +219,8 @@ repo-sniff scan some-folder
 The fixtures in this repository are stored defanged and become real only in a
 temporary folder while the tests run, whereas the signatures in `src/` and
 `rules/` are what the scanner looks for. `repo-sniff scan .` here therefore
-reports little: mostly the Trojan Source fixtures, whose invisible characters
-cannot be defanged. The fixture paths are not excluded from a scan, because an
+reports far fewer findings than the fixtures hold: the ones left come from
+invisible characters and constructions that cannot be defanged. The fixture paths are not excluded from a scan, because an
 attacker can name a payload folder the same way, and a scanner that skipped
 such paths would be blind to it.
 

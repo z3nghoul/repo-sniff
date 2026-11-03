@@ -4,7 +4,7 @@
 #
 # The demo repository is stored defanged (see docs/demo/README.md), so the tape
 # first writes the real one to a temporary folder (the ignored test below does
-# that) and scans it from there; the report is the same as for the stored copy.
+# that) and scans it from there; the report is the same as for the original, undefanged demo.
 Output docs/demo.gif
 
 Set Theme "Catppuccin Mocha"
@@ -16,7 +16,7 @@ Set TypingSpeed 40ms
 Set PlaybackSpeed 1
 
 Hide
-Type "T=$(mktemp -d); REPO_SNIFF_DEMO_DIR=$T/docs/demo cargo test -q -p repo-sniff-core --test fixture_expectations materialize_demo -- --ignored >/dev/null; cd $T; echo DEMO-$((1+1))"
+Type "T=$(mktemp -d); REPO_SNIFF_DEMO_DIR=$T/docs/demo cargo test -q -p repo-sniff-core --test fixture_expectations materialize_demo -- --ignored >/dev/null && cd $T && echo DEMO-$((1+1))"
 Enter
 Wait@120s /DEMO-2/
 Type "clear"
@@ -41,3 +41,8 @@ Sleep 600ms
 Type "repo-sniff scan https://github.com/rust-lang/cargo"
 Enter
 Sleep 12s
+
+Hide
+Type "cd; rm -rf $T"
+Enter
+Show
