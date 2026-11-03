@@ -1,0 +1,10 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "preinstall": "node --{{EVAL}}=\"console.log(1)\"",
+    "install": "cat x.js | node",
+    "postinstall": "node --require=./preload.js build.js",
+    "prepare": "npm exec --call=\"node -e x\""
+  }
+}

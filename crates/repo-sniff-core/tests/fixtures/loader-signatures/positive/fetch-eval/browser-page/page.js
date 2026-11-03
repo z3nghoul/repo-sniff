@@ -2,6 +2,6 @@
 fetch("https://cdn.example.invalid/widget.js")
   .then((r) => r.text())
   .then((code) => {
-    eval(code);
+    {{EVAL}}(code);
     document.title = "widget";
   });

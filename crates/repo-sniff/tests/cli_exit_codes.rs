@@ -2,13 +2,20 @@
 //! 2 when the scan could not run.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
-fn core_fixtures(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../repo-sniff-core/tests/fixtures")
-        .join(name)
+// The fixtures are stored defanged; the shared helper makes the real copy.
+#[path = "../../repo-sniff-core/tests/common/mod.rs"]
+mod common;
+
+/// A materialized copy of a core fixture family, to scan.
+fn core_fixtures(name: &str) -> tempfile::TempDir {
+    common::materialize(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../repo-sniff-core/tests/fixtures")
+            .join(name),
+    )
 }
 
 fn run(dir: &Path, args: &[&str]) -> Output {
@@ -81,7 +88,7 @@ fn threshold_at_or_below_a_finding_exits_one() {
 #[test]
 fn critical_findings_fail_at_the_critical_threshold() {
     let output = run(
-        &core_fixtures("trojan-source"),
+        core_fixtures("trojan-source").path(),
         &["scan", ".", "--fail-on", "critical"],
     );
 
@@ -91,7 +98,7 @@ fn critical_findings_fail_at_the_critical_threshold() {
 #[test]
 fn none_never_fails_because_of_findings() {
     let output = run(
-        &core_fixtures("trojan-source"),
+        core_fixtures("trojan-source").path(),
         &["scan", ".", "--fail-on", "none"],
     );
 

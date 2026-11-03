@@ -1,0 +1,7 @@
+@echo off
+rem SYNTHETIC TEST FIXTURE — not functional
+{{POWERSHELL}} -NoProfile -ExecutionPolicy Bypass -File build.ps1
+{{CERTUTIL}} -hashfile app.exe SHA256
+{{BITSADMIN}} /list
+{{REGSVR32}} /s mylib.dll
+{{RUNDLL32}} user32.dll,LockWorkStation

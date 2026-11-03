@@ -29,6 +29,12 @@
 //! so a negative fixture is simply a file without an entry), the harness checks
 //! the rules from CONTRIBUTING.md: the folder has `positive/` and `negative/`
 //! fixtures, every positive file is flagged, and no negative file is.
+//!
+//! The fixtures are stored defanged (see `common/mod.rs`): each test scans a
+//! copy with the real names and the markers replaced, made in a temporary
+//! folder. The paths in the expectations files are the real ones.
+
+mod common;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -68,7 +74,8 @@ struct ExpectedFinding {
 /// One finding as the harness compares it: file, line, rule, severity.
 type Row = (String, usize, String, Severity);
 
-fn fixtures_root() -> PathBuf {
+/// The stored (defanged) fixtures in the repository.
+fn stored_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
@@ -111,8 +118,8 @@ fn expected_path(folder: &Path) -> PathBuf {
 }
 
 /// Every folder directly under `tests/fixtures/`.
-fn families() -> Vec<PathBuf> {
-    let mut families: Vec<PathBuf> = fs::read_dir(fixtures_root())
+fn families(root: &Path) -> Vec<PathBuf> {
+    let mut families: Vec<PathBuf> = fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.is_dir())
@@ -122,8 +129,8 @@ fn families() -> Vec<PathBuf> {
 }
 
 /// Every fixture folder that has an expectations file.
-fn harness_folders() -> Vec<PathBuf> {
-    families()
+fn harness_folders(root: &Path) -> Vec<PathBuf> {
+    families(root)
         .into_iter()
         .filter(|folder| expected_path(folder).is_file())
         .collect()
@@ -146,9 +153,9 @@ fn rows(report: &Report) -> Vec<Row> {
 }
 
 /// Checks one folder and returns what is wrong with it, empty when all is well.
-fn check_folder(folder: &Path) -> Vec<String> {
+fn check_folder(root: &Path, folder: &Path) -> Vec<String> {
     let name = folder
-        .strip_prefix(fixtures_root())
+        .strip_prefix(root)
         .map_or_else(|_| folder.display().to_string(), slash);
     let expected = load(folder);
     let report = scan(folder, &builtin_rules().unwrap(), Limits::default());
@@ -228,15 +235,17 @@ fn check_folder(folder: &Path) -> Vec<String> {
 
 #[test]
 fn every_fixture_folder_matches_its_expected_toml() {
-    let folders = harness_folders();
+    let fixtures = common::materialize(&stored_root());
+    let root = fixtures.path();
+    let folders = harness_folders(root);
     assert!(!folders.is_empty(), "no *{EXPECTED_SUFFIX} found");
-    let problems: Vec<String> = folders.iter().flat_map(|f| check_folder(f)).collect();
+    let problems: Vec<String> = folders.iter().flat_map(|f| check_folder(root, f)).collect();
     assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
 }
 
 #[test]
 fn every_fixture_family_is_covered_by_exactly_one_table() {
-    for family in families() {
+    for family in families(&stored_root()) {
         let harness = expected_path(&family).is_file();
         let legacy = family.join(LEGACY_TABLE).is_file();
         assert!(
@@ -250,16 +259,81 @@ fn every_fixture_family_is_covered_by_exactly_one_table() {
 
 #[test]
 fn every_expectations_file_belongs_to_a_fixture_folder() {
-    for entry in fs::read_dir(fixtures_root()).unwrap() {
+    for entry in fs::read_dir(stored_root()).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         if let Some(family) = name.strip_suffix(EXPECTED_SUFFIX) {
             assert!(
-                fixtures_root().join(family).is_dir(),
+                stored_root().join(family).is_dir(),
                 "{name} has no folder {family}/ beside it"
             );
         }
     }
+}
+
+/// The demo repository of the README is stored defanged the same way.
+fn stored_demo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/demo")
+}
+
+#[test]
+fn the_stored_fixtures_and_the_demo_are_defanged() {
+    let mut problems = common::storage_problems(&stored_root());
+    problems.extend(common::storage_problems(&stored_demo()));
+    assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
+}
+
+#[test]
+fn the_storage_check_names_a_raw_fixture() {
+    let stored = tempfile::tempdir().unwrap();
+    let write = |relative: &str, contents: &str| {
+        let path = stored.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    // Built from pieces so this file stays free of the words as well.
+    write(
+        "positive/raw.js",
+        &format!("{}(x)\n", ["ev", "al"].concat()),
+    );
+    write("positive/.vscode/notes.txt", "text\n");
+    write("positive/tasks.json", "{}\n");
+    write("positive/ok.js", "{{EVAL}}(x)\n");
+    write("positive/ok.json.fixture", "{}\n");
+
+    let text = common::storage_problems(stored.path()).join("\n");
+    for expected in [
+        "positive/raw.js: contains {{EVAL}} written out",
+        "positive/.vscode: folder starts with a dot",
+        "positive/tasks.json: needs the .fixture suffix",
+    ] {
+        assert!(text.contains(expected), "{expected:?} not in:\n{text}");
+    }
+    assert!(!text.contains("ok.js"), "{text}");
+    assert!(!text.contains("ok.json.fixture"), "{text}");
+}
+
+#[test]
+fn materializing_restores_names_and_text_and_rejects_unknown_markers() {
+    let stored = tempfile::tempdir().unwrap();
+    let write = |relative: &str, contents: &str| {
+        let path = stored.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    write("_vscode/tasks.json.fixture", "{{EVAL}}({{ATOB}}(x))\n");
+    write("_distutils_hack/__init__.py", "plain\n");
+    let real = common::materialize(stored.path());
+    let text = fs::read_to_string(real.path().join(".vscode/tasks.json")).unwrap();
+    assert_eq!(
+        text,
+        format!("{}({}(x))\n", ["ev", "al"].concat(), ["at", "ob"].concat())
+    );
+    assert!(real.path().join("_distutils_hack/__init__.py").is_file());
+
+    write("bad.txt", "{{NO_SUCH_MARKER}}\n");
+    let result = std::panic::catch_unwind(|| common::materialize(stored.path()));
+    assert!(result.is_err(), "an unknown marker must fail");
 }
 
 #[test]
@@ -296,7 +370,7 @@ fn the_harness_reports_what_is_wrong() {
         "#,
     );
 
-    let problems = check_folder(&dir);
+    let problems = check_folder(parent.path(), &dir);
     let text = problems.join("\n");
     for expected in [
         "unexpected finding (\"negative/loud.txt\"",
@@ -310,4 +384,15 @@ fn the_harness_reports_what_is_wrong() {
     ] {
         assert!(text.contains(expected), "{expected:?} not in:\n{text}");
     }
+}
+
+/// Not a check: `docs/demo.tape` runs it (`cargo test ... -- --ignored`) to
+/// get the README demo with real names and text in the folder named by
+/// `REPO_SNIFF_DEMO_DIR`, so the demo can be scanned without being committed
+/// in that form.
+#[test]
+#[ignore = "run by docs/demo.tape"]
+fn materialize_demo() {
+    let dest = std::env::var_os("REPO_SNIFF_DEMO_DIR").expect("REPO_SNIFF_DEMO_DIR is not set");
+    common::copy_real(&stored_demo(), Path::new(&dest));
 }

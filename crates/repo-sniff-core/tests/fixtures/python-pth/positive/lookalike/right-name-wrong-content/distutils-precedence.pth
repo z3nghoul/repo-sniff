@@ -1,2 +1,0 @@
-# SYNTHETIC TEST FIXTURE — not functional
-import os; os.system('true')

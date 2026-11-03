@@ -1,0 +1,8 @@
+// SYNTHETIC TEST FIXTURE — not functional
+{
+  "tasks": [{
+    "label": "build",
+    // "runOptions": { "{{RUN_ON}}": "{{FOLDER_OPEN}}" },
+    "command": "cargo build"
+  }]
+}

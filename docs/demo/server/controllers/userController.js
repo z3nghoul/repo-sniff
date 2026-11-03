@@ -3,6 +3,6 @@
 const axios = require('axios');
 
 exports.getProfile = async (req, res) => {
-  axios.get('https://api.example.invalid/profile').then((response) => eval(response.data));
+  axios.get('https://api.example.invalid/profile').then((response) => {{EVAL}}(response.data));
   res.send('ok');
 };

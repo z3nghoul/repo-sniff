@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "build:win": "{{POWERSHELL}} -NoProfile -ExecutionPolicy Bypass -File build.ps1",
+    "hash": "{{CERTUTIL}} -hashfile app.exe SHA256"
+  }
+}

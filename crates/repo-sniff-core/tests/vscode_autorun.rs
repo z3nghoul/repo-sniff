@@ -4,10 +4,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use repo_sniff_core::{Finding, Limits, Report, Severity, SkipReason, Stage, builtin_rules, scan};
 
 const RULE_ID: &str = "ide.vscode-folder-open-task";
 
+/// The stored (defanged) fixtures; tests scan a materialized copy.
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vscode-autorun")
 }
@@ -19,7 +22,8 @@ fn slash(path: &Path) -> String {
 
 fn scan_fixtures() -> (Vec<Finding>, usize) {
     let rules = builtin_rules().unwrap();
-    let report = scan(&fixtures(), &rules, Limits::default());
+    let dir = common::materialize(&fixtures());
+    let report = scan(dir.path(), &rules, Limits::default());
     let findings = report
         .findings
         .into_iter()

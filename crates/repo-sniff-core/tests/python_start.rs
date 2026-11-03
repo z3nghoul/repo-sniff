@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use repo_sniff_core::{Limits, Report, Severity, SkipReason, builtin_rules, scan};
 
 const RULE_ID: &str = "deps.python-start-entrypoint";
@@ -11,6 +13,7 @@ const PTH_RULE_ID: &str = "deps.python-pth-exec";
 const MARKER: &str = "# SYNTHETIC TEST FIXTURE \u{2014} not functional";
 const ENTRY: &str = "demo.mod:run";
 
+/// The stored (defanged) fixtures; tests scan a materialized copy.
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python-start")
 }
@@ -57,12 +60,12 @@ fn list_dirs(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// `positive/<group>/<case>` and `negative/<case>`.
-fn case_dirs() -> Vec<PathBuf> {
+fn case_dirs(root: &Path) -> Vec<PathBuf> {
     let mut cases = Vec::new();
-    for group in list_dirs(&fixtures().join("positive")) {
+    for group in list_dirs(&root.join("positive")) {
         cases.extend(list_dirs(&group));
     }
-    cases.extend(list_dirs(&fixtures().join("negative")));
+    cases.extend(list_dirs(&root.join("negative")));
     cases
 }
 
@@ -87,11 +90,13 @@ fn expected_rows() -> Vec<Row> {
 
 #[test]
 fn every_fixture_case_matches_the_expectation_table() {
+    let fixtures = common::materialize(&fixtures());
+    let root = fixtures.path();
     let mut found = Vec::new();
-    let cases = case_dirs();
+    let cases = case_dirs(root);
     for case in &cases {
         let report = scan_dir(case, Limits::default());
-        let prefix = slash(case.strip_prefix(fixtures()).unwrap());
+        let prefix = slash(case.strip_prefix(root).unwrap());
         for (file, line, severity) in rows(&report) {
             found.push((format!("{prefix}/{file}"), line, severity));
         }
@@ -106,10 +111,8 @@ fn every_fixture_case_matches_the_expectation_table() {
 fn a_matching_start_file_never_lowers_the_pth_finding() {
     // In Python 3.15 a foo.start next to foo.pth suppresses the .pth's import
     // lines, but older versions still run them, so the .pth stays HIGH.
-    let report = scan_dir(
-        &fixtures().join("positive/pairs/with-pth"),
-        Limits::default(),
-    );
+    let dir = common::materialize(&fixtures().join("positive/pairs/with-pth"));
+    let report = scan_dir(dir.path(), Limits::default());
 
     assert_eq!(rows(&report), [row("foo.start", 2, Severity::High)]);
     assert_eq!(
@@ -120,10 +123,8 @@ fn a_matching_start_file_never_lowers_the_pth_finding() {
 
 #[test]
 fn findings_name_the_entry_point_and_whether_the_module_is_in_the_repository() {
-    let report = scan_dir(
-        &fixtures().join("positive/entry-points/plain"),
-        Limits::default(),
-    );
+    let dir = common::materialize(&fixtures().join("positive/entry-points/plain"));
+    let report = scan_dir(dir.path(), Limits::default());
     let finding = report
         .findings
         .iter()

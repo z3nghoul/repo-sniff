@@ -1,0 +1,3 @@
+# SYNTHETIC TEST FIXTURE — not functional
+import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os.environ.get(var, 'local') == 'local'; enabled and {{IMPORT_DUNDER}}('_distutils_hack').add_shim(); 
+import sys; print('hello')

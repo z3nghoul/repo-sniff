@@ -129,6 +129,36 @@ severity = "critical"
 explanation_contains = "Trojan Source"   # optional
 ```
 
+### storage format: fixtures are stored defanged
+
+The fixtures imitate attacks, so a tool that greps a repository for attack
+patterns would take this one for malware. They are therefore committed in a
+harmless form and become real only in a temporary folder while a test runs:
+
+- **Markers instead of words.** Words such tools react to are written as
+  `{{NAME}}` (for example `{{EVAL}}({{ATOB}}(x))`). The dictionary is the
+  `MARKERS` table in `crates/repo-sniff-core/tests/common/mod.rs`, the only
+  place that knows the real words. A marker that is not in the table makes the
+  test fail. A new family that needs new dangerous words adds them to that
+  table in the same pull request.
+- **Names.** A folder whose real name starts with a dot is stored with `_`
+  instead (`.vscode` as `_vscode`; the folders are listed in `DOT_DIRS`). A
+  file that a scanner or an editor might run or load (`tasks.json`,
+  `package.json`, `next.config.js`, `*.bat`, `*.ps1`, `*.pth` and the other
+  names and extensions in `needs_suffix`) is stored with the suffix
+  `.fixture` (`tasks.json.fixture`).
+- **Binary fixtures** and the ones generated in tests are not touched.
+- `<family>.expected.toml` and `expectations.tsv` use the real paths.
+
+Every test that scans fixtures first calls `common::materialize`, which copies
+the stored tree to a temporary folder with the real names and the markers
+replaced. Scanning a stored folder directly gives different results. The test
+`the_stored_fixtures_and_the_demo_are_defanged` walks `tests/fixtures/` and
+`docs/demo/` and fails, naming the file, on a written-out marker word, a
+folder that starts with a dot or an executable file without `.fixture`. The
+same applies to `docs/demo/`, which `docs/demo.tape` materializes before
+scanning it.
+
 The Python startup families scan each case on its own and keep their
 `expectations.tsv` inside the folder with their own tests.
 
