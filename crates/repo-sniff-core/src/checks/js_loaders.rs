@@ -30,6 +30,9 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use super::js_lex::{self, Kind, Lexed};
 use super::{Ctx, Hit, TextSpan};
@@ -45,6 +48,8 @@ pub(crate) enum FoundKind {
     FunctionRequire,
     /// The check could not follow something; review it by hand.
     Uncertain,
+    /// The file has more tokens than are read; the rest was matched by text.
+    Truncated,
     Encoded,
 }
 
@@ -1664,9 +1669,16 @@ impl<'a> Flow<'a> {
         }
         // A file cut short or too complex to follow is never called clean, with
         // or without network calls: the sink may be in the part not read.
-        if self.lx.truncated || exhausted || self.over_budget {
+        if self.lx.truncated {
+            self.tail_scan();
+        }
+        if exhausted || self.over_budget || self.lx.truncated {
             self.found.push(Found {
-                kind: FoundKind::Uncertain,
+                kind: if self.lx.truncated {
+                    FoundKind::Truncated
+                } else {
+                    FoundKind::Uncertain
+                },
                 lowered: false,
                 start: 0,
                 end: 0,
@@ -1722,6 +1734,41 @@ impl<'a> Flow<'a> {
             }
         }
         dom
+    }
+
+    /// The part of a file past the token limit is not lexed; it is searched as
+    /// text for the two shapes that need no data flow, so padding with a million
+    /// statements cannot hide them.
+    fn tail_scan(&mut self) {
+        static FUNCTION_REQUIRE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"Function\s*\(\s*['"][^'"]{0,200}\brequire\b"#).expect("valid pattern")
+        });
+        static ENCODED: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?:eval|Function|execSync|exec)\s*\([^)]{0,200}\b(?:atob|Buffer\s*\.\s*from)\s*\(")
+                .expect("valid pattern")
+        });
+        let from = self.lx.tokens.last().map_or(0, |t| t.end as usize);
+        let tail = &self.text[from.min(self.text.len())..];
+        if let Some(m) = FUNCTION_REQUIRE.find(tail) {
+            self.found.push(Found {
+                kind: FoundKind::FunctionRequire,
+                lowered: false,
+                start: from + m.start(),
+                end: from + m.end(),
+                reason: function_require_reason(),
+            });
+        }
+        if let Some(m) = ENCODED.find(tail) {
+            self.found.push(Found {
+                kind: FoundKind::Encoded,
+                lowered: false,
+                start: from + m.start(),
+                end: from + m.end(),
+                reason: "decoded data (atob or Buffer.from) is given to a code or command sink, \
+                         found by text in the part of the file past the token limit"
+                    .to_string(),
+            });
+        }
     }
 
     fn function_require(
@@ -1879,6 +1926,9 @@ pub fn fetch_eval(ctx: &Ctx<'_>) -> Vec<Hit> {
         &[
             (FoundKind::FetchEval, ctx.base),
             (FoundKind::Uncertain, Severity::Medium),
+            // A file cut at the token limit is never called clean: HIGH keeps it
+            // a non-pass at the default threshold.
+            (FoundKind::Truncated, Severity::High),
         ],
     )
 }
@@ -2213,13 +2263,19 @@ mod tests {
                 .any(|(k, _)| matches!(k, FoundKind::FunctionRequire | FoundKind::Uncertain)),
             "{found:?}"
         );
-        let text = format!(
-            "{}new Function('require', c)(require);",
-            ";\n".repeat(1_600_000)
-        );
-        let found = kinds(&text);
+        let pad = ";\n".repeat(super::super::js_lex::MAX_TOKENS + 100_000);
+        let found = kinds(&format!("{pad}new Function('require', c)(require);"));
         assert!(
-            found.iter().any(|(k, _)| *k == FoundKind::Uncertain),
+            found.iter().any(|(k, _)| *k == FoundKind::FunctionRequire),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().any(|(k, _)| *k == FoundKind::Truncated),
+            "{found:?}"
+        );
+        let found = kinds(&format!("{pad}eval(atob(blob));"));
+        assert!(
+            found.iter().any(|(k, _)| *k == FoundKind::Encoded),
             "{found:?}"
         );
     }

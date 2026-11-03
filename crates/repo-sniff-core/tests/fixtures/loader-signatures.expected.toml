@@ -15,7 +15,7 @@
 #   .vbs, .wsf and .hta findings of repo.windows-script and repo.windows-dropper
 #   are the ones that already existed.
 
-files_scanned = 53
+files_scanned = 54
 unflagged = ["positive/obfuscator/npm-start/package.json"]
 
 [[finding]]
@@ -452,3 +452,16 @@ file = "positive/js-budget/padded-function-require.js"
 line = 22
 rule = "run.js-function-require"
 severity = "critical"
+
+[[finding]]
+file = "positive/js-budget/padded-eval-atob.js"
+line = 1
+rule = "run.js-fetch-eval"
+severity = "medium"
+explanation_contains = 'review it by hand'
+
+[[finding]]
+file = "positive/js-budget/padded-eval-atob.js"
+line = 22
+rule = "obfuscation.encoded-payload-sink"
+severity = "high"
