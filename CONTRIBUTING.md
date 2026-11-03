@@ -1,24 +1,32 @@
-# Contributing to repo-sniff
+# contributing to repo-sniff
 
-Thanks for helping. repo-sniff is a security tool that reads hostile code
-for a living, so a few rules here are stricter than in a typical project.
-Please read the whole page before opening a pull request.
+How to change repo-sniff: the build, commits, the rule format, fixtures and
+the security rules every change must keep. repo-sniff is a security tool that
+reads hostile code for a living, so a few rules here are stricter than in a
+typical project; please read the whole page before opening a pull request.
 
-## Ground rules
+## ground rules
 
 - **The scanner never executes code from the scanned repository.** No
   install, no build, no scripts, no `eval` of anything it reads. It only
   reads files.
 - **No real malware in this repository.** Not in fixtures, not in
-  examples, not "just for a test". See [Fixtures](#fixtures).
-- **Every detection is documented.** A rule is not done until its row in
-  [docs/DETECTIONS.md](docs/DETECTIONS.md) has the rule ID filled in.
+  examples, not "just for a test". See [fixtures](#fixtures).
+- **Every detection is documented.** A rule is not done until it has a row in
+  the table and a section of its own in
+  [docs/DETECTIONS.md](docs/DETECTIONS.md#2-rules-at-a-glance).
 
-## Development
+## development
 
-Requirements: a stable Rust toolchain and `git`.
+Requirements: a stable Rust toolchain and `git`. The workspace has two
+crates:
 
-Before every commit, all three must pass:
+- `crates/repo-sniff-core`: the scanning engine. It never prints and has no
+  terminal or UI dependencies.
+- `crates/repo-sniff`: the binary (CLI now, TUI later).
+
+Before every commit, the same checks CI runs on Linux, Windows and macOS must
+pass:
 
 ```sh
 cargo fmt --all
@@ -26,13 +34,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The workspace has two crates:
-
-- `crates/repo-sniff-core`: the scanning engine. It never prints and has no
-  terminal or UI dependencies.
-- `crates/repo-sniff`: the binary (CLI now, TUI later).
-
-## Commits and pull requests
+## commits and pull requests
 
 - One logical change per commit: "add the npm lifecycle rule" and "add tests
   for it" are separate commits, a feature and an unrelated refactor never
@@ -47,41 +49,50 @@ The workspace has two crates:
 - Tick the matching task in [ROADMAP.md](ROADMAP.md) in the commit that
   completes it.
 
-## Review findings
+## review findings
 
-A design or code review of a pull request can raise more than the pull
-request needs. Findings that block the change are fixed in it. New, smaller
-findings (hardening ideas, extra evasion cases, nits) are not folded into
-the same pull request: file each as a GitHub issue with the `hardening`
-label instead (`gh issue create --label hardening`), so the pull request
-stays reviewable and nothing is lost.
+Every rule family gets an independent review pass, of its plan and fixtures
+before the rules are written and of its diff before it is merged. Findings that block the change
+are fixed in the same pull request. New, smaller findings (hardening ideas,
+extra evasion cases, nits) are not folded into it: each becomes a GitHub
+issue with the `hardening` label, so the pull request stays reviewable and
+nothing is lost.
 
-## Adding a rule
+## adding a rule
 
-Rules are TOML files in `crates/repo-sniff-core/rules/`:
+Rules are TOML files in `crates/repo-sniff-core/rules/`, one per stage. A
+line rule from `repo.toml`, shortened:
 
 ```toml
 [[rule]]
-id          = "deception.bidi-control"   # <stage>.<short-name>, unique
-engine      = "line-regex"               # how the rule matches (see below)
-family      = "trojan-source"            # groups related rules
-stage       = "deception"                # repo, ide, deps, build, tests, run, deception, obfuscation
-severity    = "critical"                 # info, low, medium, high, critical
-attack      = []                         # MITRE ATT&CK IDs, e.g. ["T1547.001"]
+id          = "repo.wsh-javascript"   # <stage>.<short-name>, unique
+engine      = "line-regex"            # how the rule matches (see below)
+family      = "repository-contents"   # groups related rules
+stage       = "repo"                  # repo, ide, deps, build, tests, run, deception, obfuscation
+severity    = "medium"                # info, low, medium, high, critical
+attack      = ["T1059.007"]           # MITRE ATT&CK IDs, may be empty
 description = "Why this is suspicious, in plain words"
-example     = "src/auth.rs:12 contains U+202E"
-pattern     = '[\u{202A}-\u{202E}\u{2066}-\u{2069}]'
-files       = ["*.rs"]                   # optional; omitted means every file
+example     = 'run.js:3 calls WScript.CreateObject("WScript.Shell")'
+pattern     = '''\b(?:WScript|WSH)\s*\.'''
+files       = ["**/*.js"]             # optional for line rules; omitted means every file
 ```
 
-`engine = "line-regex"` matches a regular expression against each line and
-needs a `pattern`. Other engines are added as the scanner grows.
+Engines:
+
+- `line-regex` matches the `pattern` against each line of a text file. A new
+  pattern needs no Rust code.
+- `jsonc`, `file` and `head` are Rust checks with one signature,
+  `fn(&Ctx) -> Vec<Hit>`, looked up by the rule id; the TOML entry carries
+  the metadata and the file globs. `jsonc` parses a structured file, `file`
+  sees one whole file as raw bytes (`files` is required), and `head` judges
+  every entry by its name and first bytes (`files` is optional; only a `head`
+  rule may set `names_executables = true`).
+- `bidi-display` and `nul-byte` are run by the scanner itself for
+  `deception.bidi-control` and `deception.nul-byte-in-script`.
 
 Unknown fields, unknown stages, malformed ATT&CK IDs, invalid regexes and
 duplicate IDs are rejected when the rules load, so `cargo test` catches them.
-
 The `files` globs ignore case, because Windows and macOS file systems do.
-
 Patterns use the [`regex`](https://docs.rs/regex) crate, which matches in
 linear time; never add a regex engine with backtracking.
 
@@ -90,21 +101,22 @@ Workflow for a new family:
 1. Open the pull request with the **fixtures first** (positive and negative,
    see below) so reviewers can agree on what should and should not match.
 2. Add the rules and tests.
-3. Fill in the Rule column in `docs/DETECTIONS.md`.
+3. Add the rules to [docs/DETECTIONS.md](docs/DETECTIONS.md): a row in the
+   table and a section each.
 
-## Fixtures
+## fixtures
 
 Fixtures live in `crates/repo-sniff-core/tests/fixtures/<family>/` with
-`positive/` and `negative/` subdirectories.
+`positive/` and `negative/` subdirectories. What the rules must report on
+them goes in `crates/repo-sniff-core/tests/fixtures/<family>.expected.toml`,
+beside the folder (inside it, the file would be scanned like a fixture).
 
-What the rules must report on them goes in
-`crates/repo-sniff-core/tests/fixtures/<family>.expected.toml`, beside the
-folder (inside it, the file would be scanned like a fixture). The harness in
-`tests/fixture_expectations.rs` scans the folder as one repository with the
-built-in rules and fails on any finding that is not listed, on any listed one
-that is missing, on a positive fixture without a finding and on a negative
-fixture with one, so a new family needs that file and no test code of its own.
-The format is described at the top of the harness:
+The harness in `crates/repo-sniff-core/tests/fixture_expectations.rs` scans
+the folder as one repository with the built-in rules and fails on any finding
+that is not listed, on any listed one that is missing, on a positive fixture
+without a finding and on a negative fixture with one, so a new family needs
+that file and no test code of its own. The format is described at the top of
+the harness:
 
 ```toml
 files_scanned = 7                        # optional
@@ -119,6 +131,8 @@ explanation_contains = "Trojan Source"   # optional
 
 The Python startup families scan each case on its own and keep their
 `expectations.tsv` inside the folder with their own tests.
+
+Rules for every fixture:
 
 - **Every rule has both** positive fixtures (must match) and negative
   fixtures (look similar but must not match, e.g. a mention in a comment, an
@@ -143,7 +157,7 @@ The Python startup families scan each case on its own and keep their
 - Line endings in fixtures are preserved exactly (see `.gitattributes`);
   some rules depend on CRLF or on invisible characters.
 
-## Cross-platform rules
+## cross-platform rules
 
 repo-sniff runs on Linux, Windows and macOS, and CI tests all three.
 
@@ -156,13 +170,13 @@ repo-sniff runs on Linux, Windows and macOS, and CI tests all three.
 - Do not depend on Unix-only tricks (such as `/dev/null`) without a
   cross-platform alternative; gate truly OS-specific tests with `#[cfg(...)]`.
 
-## Scanner security
+## scanner security
 
 The scanned repository may try to attack the scanner itself. These are design
 guarantees (the ones that exist in the code have tests); none of them is a
 promise of absolute safety, so never describe them as one. Changes must keep
 them (full list in
-[docs/DETECTIONS.md](docs/DETECTIONS.md#5-additional-requirements)):
+[docs/DETECTIONS.md](docs/DETECTIONS.md#5-scanner-hardening)):
 
 - symlinks are never followed;
 - file size, file count and decoding depth are limited, and every skipped
@@ -182,4 +196,4 @@ them (full list in
   never applied invisibly.
 
 Found a vulnerability in repo-sniff itself? Please report it privately as
-described in `SECURITY.md` instead of opening a public issue.
+described in [SECURITY.md](SECURITY.md) instead of opening a public issue.
