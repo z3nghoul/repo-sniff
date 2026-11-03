@@ -9,13 +9,20 @@
 //! and review the diff of the `.snap` files.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-fn core_fixtures(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../repo-sniff-core/tests/fixtures")
-        .join(name)
+// The fixtures are stored defanged; the shared helper makes the real copy.
+#[path = "../../repo-sniff-core/tests/common/mod.rs"]
+mod common;
+
+/// A materialized copy of a core fixture family, to scan.
+fn core_fixtures(name: &str) -> tempfile::TempDir {
+    common::materialize(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../repo-sniff-core/tests/fixtures")
+            .join(name),
+    )
 }
 
 /// Replaces the scan time, which differs on every run, with a fixed text.
@@ -53,12 +60,12 @@ fn scan_dot(dir: &Path) -> String {
 
 #[test]
 fn report_for_trojan_source_fixtures() {
-    insta::assert_snapshot!(scan_dot(&core_fixtures("trojan-source")));
+    insta::assert_snapshot!(scan_dot(core_fixtures("trojan-source").path()));
 }
 
 #[test]
 fn report_for_vscode_autorun_fixtures() {
-    insta::assert_snapshot!(scan_dot(&core_fixtures("vscode-autorun")));
+    insta::assert_snapshot!(scan_dot(core_fixtures("vscode-autorun").path()));
 }
 
 #[test]

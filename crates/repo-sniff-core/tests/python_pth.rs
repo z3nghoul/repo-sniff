@@ -4,12 +4,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use repo_sniff_core::{Finding, Limits, Report, Severity, SkipReason, Stage, builtin_rules, scan};
 
 const RULE_ID: &str = "deps.python-pth-exec";
 const MARKER: &str = "# SYNTHETIC TEST FIXTURE \u{2014} not functional";
 const PAYLOAD: &str = "import sys; print('hello')";
 
+/// The stored (defanged) fixtures; tests scan a materialized copy.
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python-pth")
 }
@@ -42,7 +45,7 @@ fn scan_dir(dir: &Path, limits: Limits) -> Report {
 // ------------------------------------------------------------ fixture table
 
 /// Every case directory: `positive/<group>/<case>` and `negative/<case>`.
-fn case_dirs() -> Vec<PathBuf> {
+fn case_dirs(root: &Path) -> Vec<PathBuf> {
     let list = |dir: &Path| -> Vec<PathBuf> {
         let mut paths: Vec<_> = fs::read_dir(dir)
             .unwrap()
@@ -53,10 +56,10 @@ fn case_dirs() -> Vec<PathBuf> {
         paths
     };
     let mut cases = Vec::new();
-    for group in list(&fixtures().join("positive")) {
+    for group in list(&root.join("positive")) {
         cases.extend(list(&group));
     }
-    cases.extend(list(&fixtures().join("negative")));
+    cases.extend(list(&root.join("negative")));
     cases
 }
 
@@ -81,11 +84,13 @@ fn expected_rows() -> Vec<(String, usize, Severity)> {
 
 #[test]
 fn every_fixture_case_matches_the_expectation_table() {
+    let fixtures = common::materialize(&fixtures());
+    let root = fixtures.path();
     let mut found = Vec::new();
-    let cases = case_dirs();
+    let cases = case_dirs(root);
     for case in &cases {
         let report = scan_dir(case, Limits::default());
-        let prefix = slash(case.strip_prefix(fixtures()).unwrap());
+        let prefix = slash(case.strip_prefix(root).unwrap());
         for (file, line, severity) in rows(&report) {
             found.push((format!("{prefix}/{file}"), line, severity));
         }
@@ -99,8 +104,10 @@ fn every_fixture_case_matches_the_expectation_table() {
 #[test]
 fn every_positive_case_has_at_least_one_expected_finding_and_no_negative_one_has() {
     let expected = expected_rows();
-    for case in case_dirs() {
-        let prefix = format!("{}/", slash(case.strip_prefix(fixtures()).unwrap()));
+    let fixtures = common::materialize(&fixtures());
+    let root = fixtures.path();
+    for case in case_dirs(root) {
+        let prefix = format!("{}/", slash(case.strip_prefix(root).unwrap()));
         let count = expected
             .iter()
             .filter(|(file, _, _)| file.starts_with(&prefix))
@@ -116,8 +123,8 @@ fn every_positive_case_has_at_least_one_expected_finding_and_no_negative_one_has
 // ------------------------------------------------------------ explanations
 
 fn explanation_of(case: &str, file: &str) -> String {
-    let dir = fixtures().join(case);
-    let report = scan_dir(&dir, Limits::default());
+    let dir = common::materialize(&fixtures().join(case));
+    let report = scan_dir(dir.path(), Limits::default());
     report
         .findings
         .iter()
@@ -129,10 +136,8 @@ fn explanation_of(case: &str, file: &str) -> String {
 
 #[test]
 fn findings_carry_rule_metadata() {
-    let report = scan_dir(
-        &fixtures().join("positive/executes/plain"),
-        Limits::default(),
-    );
+    let dir = common::materialize(&fixtures().join("positive/executes/plain"));
+    let report = scan_dir(dir.path(), Limits::default());
     let finding: &Finding = &report.findings[0];
     assert_eq!(finding.stage, Stage::Deps);
     assert_eq!(finding.attack, ["T1546.018"]);

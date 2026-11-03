@@ -4,7 +4,7 @@
 //!
 //! Text fixtures are committed under `tests/fixtures/repo-contents/`. Binary
 //! fixtures and symlinks are never committed: each test copies the text
-//! fixtures into a temporary folder and generates the rest there. A generated
+//! fixtures (stored defanged, see `common/mod.rs`) into a temporary folder and generates the rest there. A generated
 //! binary is a real header followed by the marker
 //! `SYNTHETIC TEST FIXTURE - not functional` and NUL padding; it holds no
 //! code and cannot run.
@@ -14,6 +14,8 @@ use std::fs;
 use std::path::Path;
 
 use repo_sniff_core::{Limits, Report, Severity, SkipReason, builtin_rules, scan};
+
+mod common;
 
 const MARKER: &[u8] = b"SYNTHETIC TEST FIXTURE - not functional";
 
@@ -93,24 +95,11 @@ fn write(root: &Path, relative: &str, contents: &[u8]) {
     fs::write(path, contents).unwrap();
 }
 
-fn copy_dir(from: &Path, to: &Path) {
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            fs::create_dir_all(&target).unwrap();
-            copy_dir(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
 /// The committed text fixtures plus every generated binary fixture.
 fn fixture_repository() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/repo-contents");
-    copy_dir(&committed, dir.path());
+    common::copy_real(&committed, dir.path());
     let root = dir.path();
 
     write(root, "positive/bin/tool", &elf());
@@ -706,11 +695,8 @@ fn the_committed_fixtures_match_their_expectations_file() {
     let text = fs::read_to_string(fixtures.join("repo-contents.expected.toml")).unwrap();
     let expected: Expected = toml::from_str(&text).unwrap();
 
-    let report = scan(
-        &fixtures.join("repo-contents"),
-        &builtin_rules().unwrap(),
-        Limits::default(),
-    );
+    let real = common::materialize(&fixtures.join("repo-contents"));
+    let report = scan(real.path(), &builtin_rules().unwrap(), Limits::default());
 
     let found: BTreeSet<(String, usize, String, Severity)> = report
         .findings

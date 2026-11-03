@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 
 use repo_sniff_core::{Limits, Severity, Stage, builtin_rules, scan};
 
+mod common;
+
 const RULE_ID: &str = "deception.bidi-control";
 
+/// The stored (defanged) fixtures; tests scan a materialized copy.
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trojan-source")
 }
@@ -20,7 +23,8 @@ fn slash(path: &Path) -> String {
 fn only_the_positive_and_unchanged_fixtures_are_flagged() {
     let rules = builtin_rules().unwrap();
 
-    let report = scan(&fixtures(), &rules, Limits::default());
+    let dir = common::materialize(&fixtures());
+    let report = scan(dir.path(), &rules, Limits::default());
 
     let found: Vec<_> = report
         .findings
@@ -180,7 +184,8 @@ fn only_the_positive_and_unchanged_fixtures_are_flagged() {
 fn finding_carries_rule_metadata() {
     let rules = builtin_rules().unwrap();
 
-    let report = scan(&fixtures(), &rules, Limits::default());
+    let dir = common::materialize(&fixtures());
+    let report = scan(dir.path(), &rules, Limits::default());
 
     let finding = &report.findings[0];
     assert_eq!(finding.stage, Stage::Deception);
