@@ -170,7 +170,10 @@ Infrastructure:
 
 ## milestone 5: README as a showcase
 
-- [ ] Demo GIF or screenshot of the report
+- [x] Banner for dark and light themes ([#114](https://github.com/z3nghoul/repo-sniff/pull/114))
+- [x] Demo GIF of the report ([#114](https://github.com/z3nghoul/repo-sniff/pull/114))
+- [x] One row of badges ([#114](https://github.com/z3nghoul/repo-sniff/pull/114))
+- [x] README structure: short sections, details moved to `docs/DETECTIONS.md` ([#114](https://github.com/z3nghoul/repo-sniff/pull/114))
 - [ ] Examples and "how to add your own rule"
 - [x] Publish benchmark results in the README
 - [ ] Honest list of blind spots
