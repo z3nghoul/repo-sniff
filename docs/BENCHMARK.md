@@ -119,8 +119,8 @@ Why each one is there:
 - **cpython, `empty.vbs`:** an empty VBScript used by the test suite.
 
 The LOW and INFO findings of vscode besides `repo.windows-script`:
-`test/automation/package.json:18`, a `prepublishOnly` (npm pack and publish,
-not install) that runs a local copy script (LOW), and
+`test/automation/package.json:18`, a `prepublishOnly` (npm runs it only on
+`npm publish`, not on install or pack) that runs a local copy script (LOW), and
 `extensions/json-language-features/server/package.json:26`, a
 `prepublishOnly` that runs `rimraf` (INFO). The 3 INFO findings of cpython
 are `Lib/profiling/sampling/_vendor/d3*/**/*.min.js`, vendored minified
