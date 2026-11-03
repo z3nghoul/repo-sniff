@@ -1021,16 +1021,27 @@ enum LineRule<'a> {
 /// What the bidi rule says about a line whose controls change nothing.
 const BIDI_UNCHANGED: &str = "bidi controls present, display unchanged";
 
+/// What the bidi rule says about a control inside a string value of a JSON
+/// data file.
+const BIDI_IN_DATA: &str = "bidi controls in data; not executed as code";
+
+/// Slots of the levels a line rule lists findings at: the rule's own, LOW (the
+/// bidi rule, display unchanged) and MEDIUM (the bidi rule, a string value of
+/// a data file). Each has its own limit, so a flood of harmless lines cannot
+/// push a deceptive one out of the list.
+const LEVEL_SLOTS: usize = 3;
+
 /// Runs the line rules over lines fed one at a time, keeping at most
 /// `MAX_LINE_FINDINGS_PER_RULE` findings per rule and level and counting the
 /// rest.
 struct LineScanner<'a> {
     rules: Vec<(&'a Rule, LineRule<'a>)>,
-    /// Findings listed so far, per rule: at the rule's own level and at LOW.
-    /// Only the bidi rule has LOW findings. They count apart, so a flood of
-    /// harmless lines cannot push a deceptive one out of the list.
-    listed: Vec<[usize; 2]>,
-    hidden: Vec<[usize; 2]>,
+    /// Findings listed so far, per rule and level slot (`LEVEL_SLOTS`). Only
+    /// the bidi rule has findings below its own level.
+    listed: Vec<[usize; LEVEL_SLOTS]>,
+    hidden: Vec<[usize; LEVEL_SLOTS]>,
+    /// Lines whose bidi controls all sit in string values of a JSON data file.
+    data_lines: HashSet<usize>,
     findings: Vec<Finding>,
     /// What this scan has left for laying out lines of the bidi rule.
     bidi_budget: &'a Cell<usize>,
@@ -1047,8 +1058,9 @@ impl<'a> LineScanner<'a> {
             })
             .collect();
         LineScanner {
-            listed: vec![[0; 2]; rules.len()],
-            hidden: vec![[0; 2]; rules.len()],
+            listed: vec![[0; LEVEL_SLOTS]; rules.len()],
+            hidden: vec![[0; LEVEL_SLOTS]; rules.len()],
+            data_lines: HashSet::new(),
             rules,
             findings: Vec::new(),
             bidi_budget,
@@ -1057,6 +1069,12 @@ impl<'a> LineScanner<'a> {
 
     fn is_empty(&self) -> bool {
         self.rules.is_empty()
+    }
+
+    /// Tells the scanner which lines of the file are data (see
+    /// `bidi::lines_with_controls_in_values`).
+    fn set_data_lines(&mut self, lines: HashSet<usize>) {
+        self.data_lines = lines;
     }
 
     /// `file_offset` is where the line starts in the file, given only when
@@ -1102,6 +1120,12 @@ impl<'a> LineScanner<'a> {
                         bidi::Verdict::Unchanged => {
                             (found, 1, Severity::Low, BIDI_UNCHANGED.to_string())
                         }
+                        _ if self.data_lines.contains(&line_number) => (
+                            found,
+                            2,
+                            rule.severity.min(Severity::Medium),
+                            BIDI_IN_DATA.to_string(),
+                        ),
                         bidi::Verdict::Differs => {
                             (found, 0, rule.severity, rule.description.clone())
                         }
@@ -1139,7 +1163,11 @@ impl<'a> LineScanner<'a> {
 
     fn finish(self, relative: &Path, unlisted: &mut Vec<Unlisted>) -> Vec<Finding> {
         for ((rule, _), hidden) in self.rules.iter().zip(&self.hidden) {
-            for (slot, severity) in [(0, rule.severity), (1, Severity::Low)] {
+            for (slot, severity) in [
+                (0, rule.severity),
+                (1, Severity::Low),
+                (2, Severity::Medium),
+            ] {
                 if hidden[slot] > 0 {
                     unlisted.push(Unlisted {
                         file: relative.to_path_buf(),
@@ -1574,6 +1602,9 @@ fn scan_text<'v>(
     let column_exact = views.columns_are_exact();
     let mut findings = Vec::new();
     let mut lines = LineScanner::new(&applicable, &env.bidi_budget);
+    if bidi::is_data_json(slash_path) {
+        lines.set_data_lines(bidi::lines_with_controls_in_values(slash_path, text));
+    }
     for (index, line) in text.lines().enumerate() {
         // `lines` hands out slices of `text`, so the distance between the
         // pointers is where the line starts.

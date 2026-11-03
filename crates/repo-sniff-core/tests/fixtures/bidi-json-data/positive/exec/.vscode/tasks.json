@@ -1,0 +1,10 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SYNTHETIC TEST FIXTURE — not functional",
+      "type": "shell",
+      "command": "echo ‮./setup.sh"
+    }
+  ]
+}
