@@ -14,6 +14,7 @@ agreed before it starts.
 - [milestone 2: automatic execution (in progress)](#milestone-2-automatic-execution-in-progress)
 - [milestone 3: report and scoring](#milestone-3-report-and-scoring)
 - [milestone 4: SARIF, GitHub Action, releases](#milestone-4-sarif-github-action-releases)
+- [milestone 4.5: integrations: MCP server and agent skills](#milestone-45-integrations-mcp-server-and-agent-skills)
 - [milestone 5: README as a showcase](#milestone-5-readme-as-a-showcase)
 - [milestone 6: TUI and localization](#milestone-6-tui-and-localization)
 - [milestone 7: capabilities and AST](#milestone-7-capabilities-and-ast)
@@ -37,8 +38,9 @@ scan ([docs/BENCHMARK.md](docs/BENCHMARK.md)).
 below), then the report and scoring of milestone 3.
 
 The order of the milestones: detections for automatic execution (M2), report
-and scoring (M3), SARIF, GitHub Action and release binaries (M4), the README
-showcase (M5), the TUI with localization (M6), and only then capabilities and
+and scoring (M3), SARIF, GitHub Action and release binaries (M4), the MCP
+server and agent skills (M4.5, numbered so the later milestones keep their
+numbers), the README showcase (M5), the TUI with localization (M6), and only then capabilities and
 AST (M7), obfuscation (M8) and dependencies (M9). It was chosen on 2026-10-31
 so that a usable product exists early.
 
@@ -168,6 +170,21 @@ Infrastructure:
 - [ ] Release binaries for Linux, Windows and macOS with checksums and GitHub artifact attestations (or signatures)
 - [ ] Man page and shell completions (bash, zsh, fish, PowerShell) generated from the clap definitions in release CI, never written by hand, and shipped with the release binaries
 
+## milestone 4.5: integrations: MCP server and agent skills
+
+Depends on the JSON output of milestone 3 and the release binaries of milestone 4.
+
+- [ ] MCP server as a real integration and a thin wrapper over the same core, with no logic of its own. Tools:
+  - `scan_repo(url)`: structured findings, the capability map and the list of automatic-execution points that no rule covers;
+  - `get_context(finding_id)`: a bounded, defanged snippet around one finding;
+  - `list_execution_points(url)`: every automatic-execution point, also when there are no findings
+- [ ] Everything from the scanned repository in the MCP output is marked as untrusted data (in a fence, with a note), never as instructions; an agent's verdict is not presented as the verdict of repo-sniff, the two stay separate
+- [ ] Thin per-agent instruction files over the one MCP server, not copies of its logic. Each only tells the agent when to call the scanner and not to read the raw files itself:
+  - Claude: `SKILL.md` and a slash command;
+  - Codex: an `AGENTS.md` fragment;
+  - Gemini: `GEMINI.md` or an extension
+- [ ] Lives first as the `integrations/` folder of this repository; moves to a separate addon repository only if it grows (examples, CI against each agent)
+
 ## milestone 5: README as a showcase
 
 - [x] Banner for dark and light themes ([#114](https://github.com/z3nghoul/repo-sniff/pull/114))
@@ -267,7 +284,6 @@ Review points:
 - [ ] Repository signals behind opt-in `--online` (GitHub API): repository age, zero stars/forks/issues, lists of known malicious repositories and accounts
 - [ ] Fake recruiter assignment lures in the name, description and README ("defi exchange test", "real estate rental platform", "dex staking platform"), together with repository signals
 - [ ] Reading remote repositories without a checkout: bare clone with `ls-tree`/`cat-file` (with `GIT_NO_LAZY_FETCH=1` for partial clones), or streaming the GitHub tarball without extracting it (symlinks and `../` entries handled)
-- [ ] MCP server as a thin wrapper over `--json`, only after M3 and M4
 - [ ] Documentation site built with mdBook from `docs/` (detections, rules, guarantees, benchmark)
 
 ## considered and rejected
