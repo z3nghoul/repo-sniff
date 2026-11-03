@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-11-03
 
 First release. `repo-sniff scan <TARGET>` scans a local directory or an https
 git repository without running anything from it and prints a plain-text report.
@@ -110,3 +110,5 @@ open at this release (each item is an open issue):
   archive ([#42](https://github.com/z3nghoul/repo-sniff/issues/42)).
 - There is no risk score, JSON or SARIF output, GitHub Action or TUI yet; see
   [ROADMAP.md](ROADMAP.md).
+
+[0.1.0]: https://github.com/z3nghoul/repo-sniff/releases/tag/v0.1.0
