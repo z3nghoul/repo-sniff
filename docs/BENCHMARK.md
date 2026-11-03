@@ -1,14 +1,13 @@
 # Benchmark on honest repositories
 
-Date: 2026-11-01, second run. Scanner: `repo-sniff 0.1.0`, release build of
-`main` at `71fb3b5`, which includes the hardening pull requests #75 (clone and
-secrets), #76 (symlinks, including links in remote clones) and #77 (UTF-16
-scripts). Each repository was scanned from its default branch with
-`repo-sniff scan <url>` (default `--fail-on high`) and a 300 second limit per
-repository including the clone. No repository timed out or hit the file limit.
-Re-run with `scripts/benchmark.sh`; the commits below are the heads that were
-current at the time of the run (only cpython moved since the first run on
-this page).
+Date: 2026-11-03, best of three runs. Scanner: `repo-sniff 0.1.0`, release build
+of `main` at `46b8501` (the merge of #107, the loader signatures). Each
+repository was scanned from its default branch with `repo-sniff scan <url>`
+(default `--fail-on high`), three times in a row, with a 300 second limit per
+repository including the clone. The findings were the same in all three runs;
+the table below gives the best scan time of the three. No repository timed out
+or hit the file limit. Re-run with `scripts/benchmark.sh`. The history of the
+earlier runs and families follows the current results.
 
 The target for honest repositories is 0 critical findings. **It is met:**
 0 CRITICAL in all ten, and no repository is INCONCLUSIVE. The findings are the
@@ -177,20 +176,22 @@ others have no JavaScript loader. The table of folders is in the pull request.
 
 ## Results
 
-| Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Seconds |
+| Repository | Commit | Result | Exit | Critical | High | Medium | Low | Info | Not fully analyzed | Scan time (best of 3) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| BurntSushi/ripgrep | 91f5d22ef48b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 7 binary, 1 symlink, 1 git metadata | 1 |
-| rust-lang/cargo | 809bcc525b61 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 121 symlink, 1 git metadata | 2 |
-| psf/requests | 3c7baaa05ab4 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 6 binary, 2 symlink, 1 git metadata | 1 |
-| pallets/flask | 49943b5a9441 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 5 binary, 1 git metadata | 1 |
-| pypa/pip | ec43c48b2f2d | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 2 |
-| expressjs/express | 1c6f1b0fe400 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 1 git metadata | 1 |
-| microsoft/vscode | 1306698e328e | findings | 1 | 0 | 8 | 0 | 50 | 0 | 330 binary, 7 executable, 1 symlink, 1 git metadata | 10 |
-| git/git | 50fe5cc63f9c | findings | 0 | 0 | 0 | 3 | 5 | 0 | 16 binary, 3 symlink, 1 git metadata | 3 |
-| python/cpython | 9c0cfb141c23 | findings | 1 | 0 | 2 | 1 | 28 | 0 | 146 binary, 4 symlink, 1 git metadata | 8 |
-| microsoft/terminal | 703ef7f969d9 | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 3 |
+| BurntSushi/ripgrep | 91f5d22ef48b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 7 binary, 1 symlink, 1 git metadata | 38 ms |
+| rust-lang/cargo | 2be5575ba36b | clean | 0 | 0 | 0 | 0 | 0 | 0 | 18 binary, 121 symlink, 1 git metadata | 302 ms |
+| psf/requests | 3c7baaa05ab4 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 6 binary, 2 symlink, 1 git metadata | 76 ms |
+| pallets/flask | 49943b5a9441 | findings | 0 | 0 | 0 | 0 | 1 | 0 | 5 binary, 1 git metadata | 35 ms |
+| pypa/pip | 42f71db06688 | findings | 1 | 0 | 6 | 0 | 0 | 0 | 90 binary, 6 executable, 1 git metadata | 263 ms |
+| expressjs/express | 43fca52d28a4 | clean | 0 | 0 | 0 | 0 | 0 | 0 | 1 git metadata | 33 ms |
+| microsoft/vscode | 5d029124799a | findings | 1 | 0 | 9 | 13 | 52 | 1 | 330 binary, 7 executable, 1 symlink, 1 git metadata | 11.0 s |
+| git/git | ebdc087dc99d | findings | 0 | 0 | 0 | 3 | 5 | 0 | 16 binary, 3 symlink, 1 git metadata | 643 ms |
+| python/cpython | 3945eaf2fcd9 | findings | 1 | 0 | 2 | 1 | 28 | 3 | 146 binary, 4 symlink, 1 git metadata | 1.5 s |
+| microsoft/terminal | 188822fa51db | findings | 1 | 0 | 14 | 0 | 74 | 0 | 1083 binary, 14 executable, 1 git metadata | 997 ms |
 
-Seconds include the clone. "Binary" means a file with a known binary header or
+Scan time is the time the scanner reports, without the clone: the best of three runs on the same clone (the findings were identical in all three).
+
+"Binary" means a file with a known binary header or
 with NUL bytes that does not read as text; the line rules read its ASCII only.
 "Executable" files are listed because nothing analyzes their code, but each
 one is reported above as a finding, so they no longer make a scan
@@ -208,6 +209,8 @@ pointing outside the repository.
 | microsoft/vscode | `build/lib/watch/watcher.exe`, `build/win32/inno_updater.exe`, `build/win32/vcruntime140.dll`, four PSReadLine `.dll` files | `repo.committed-binary` | HIGH (7) | True detection, benign | Build helpers, the installer updater, a runtime library and vendored PowerShell modules |
 | microsoft/terminal | 13 files under `dep/WinAppDriver/`, `dep/nuget/nuget.exe` | `repo.committed-binary` | HIGH (14) | True detection, benign | A vendored UI test driver and NuGet |
 | microsoft/vscode | `extensions/copilot/.vscode/tasks.json:94` | `ide.vscode-folder-open-task` | HIGH | True detection, benign | As before: a dev watch task that runs on folder open. Issue 43 |
+| microsoft/vscode | `src/vs/workbench/api/worker/extHostExtensionService.ts:87` | `run.js-fetch-eval` | HIGH | True detection, benign | The extension host builds a function with `new Function` from a source it fetched, to load an extension into a web worker; the file writes no URL, so HIGH. See the loader signatures run |
+| microsoft/vscode | 6 `package.json` lifecycle hooks and 7 files of minified-looking source | `deps.npm-lifecycle-hook`, `obfuscation.minified-source` | MEDIUM (13) | True detection, benign | Hooks that run local files; generated TypeScript and test files with very long lines. See the npm scripts and loader signatures runs |
 | python/cpython | `Lib/test/archivetestdata/exe_with_zip:26`, `exe_with_z64:25` | `deception.nul-byte-in-script` | HIGH (2) | False in intent | As before: a shell script followed by a zip archive. Issue 42 |
 | git/git | `git-gui/lib/win32_shortcut.js:4`, `:5`, `:27` | `repo.wsh-javascript` | MEDIUM (3) | True detection, benign | A real Windows Script Host script that creates shortcuts for git-gui |
 | python/cpython | `Lib/test/empty.vbs` | `repo.windows-script` | MEDIUM | True detection, benign | An empty VBScript used by the test suite |
