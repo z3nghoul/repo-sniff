@@ -1,2 +1,2 @@
 // SYNTHETIC TEST FIXTURE — not functional
-if (ok) { ⁧first(); second();⁩ }
+if (ok) { {{RLI}}first(); second();{{PDI}} }

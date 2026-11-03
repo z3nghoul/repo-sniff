@@ -1,4 +1,4 @@
 {
   "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
-  "hooks": {"before:init": "echo ‮./x.sh"}
+  "hooks": {"before:init": "echo {{RLO}}./x.sh"}
 }

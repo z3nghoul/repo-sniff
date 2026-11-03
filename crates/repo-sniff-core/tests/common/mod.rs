@@ -55,6 +55,8 @@ pub const MARKERS: &[(&str, &[&str])] = &[
     ("WEBCLIENT", &["Net.", "WebClient"]),
     ("POWERSHELL", &["power", "shell"]),
     ("MARSHAL", &["mar", "shal"]),
+    ("CTOR_CHAIN", &["construc", "tor.construc", "tor"]),
+    ("RUN_IN_NEW_CONTEXT", &["run", "InNew", "Context"]),
 ];
 
 /// Marker names and the character they stand for, by its exact name in the
@@ -106,6 +108,10 @@ const EXEC_EXTENSIONS: &[&str] = &[
     "sh",
     "exe",
     "code-workspace",
+    // Configuration of tools that run commands from it (tasks, hooks, MCP
+    // servers); every JSON fixture gets the suffix rather than a list of names.
+    "json",
+    "jsonc",
 ];
 
 /// Names (lowercase) of files that tools run or read as configuration.
@@ -301,8 +307,26 @@ fn raw_marker_text(data: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// True for a character that hides in the text: a bidi control, a zero-width
+/// character, a line or paragraph separator, NEL, a soft hyphen or a BOM. Such
+/// a character is stored as a marker from [`CHAR_MARKERS`].
+pub fn is_invisible(c: char) -> bool {
+    matches!(
+        c as u32,
+        0xAD | 0x85
+            | 0x61C
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+    )
+}
+
 /// What breaks the storage conventions in the stored tree `src`: a folder
-/// that starts with a dot, a file that needs [`SUFFIX`] and lacks it, or a
+/// that starts with a dot, an invisible character written out, a file that needs [`SUFFIX`] and lacks it, or a
 /// word that should be a marker.
 pub fn storage_problems(src: &Path) -> Vec<String> {
     fn walk(root: &Path, dir: &Path, problems: &mut Vec<String>) {
@@ -329,6 +353,18 @@ pub fn storage_problems(src: &Path) -> Vec<String> {
                     problems.push(format!("{shown}: needs the {SUFFIX} suffix"));
                 }
                 let data = fs::read(&path).unwrap();
+                if let Ok(text) = std::str::from_utf8(&data)
+                    && let Some(c) = text.chars().find(|c| is_invisible(*c))
+                {
+                    let name = CHAR_MARKERS
+                        .iter()
+                        .find(|(_, marker)| *marker == c)
+                        .map_or("a new CHAR_MARKERS entry", |(name, _)| name);
+                    problems.push(format!(
+                        "{shown}: contains U+{:04X} written out, use {{{{{name}}}}}",
+                        c as u32
+                    ));
+                }
                 if !data.contains(&0)
                     && !name.ends_with(".expected.toml")
                     && let Some(raw) = raw_marker_text(&data)

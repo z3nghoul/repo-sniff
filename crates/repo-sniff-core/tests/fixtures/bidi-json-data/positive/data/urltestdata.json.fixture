@@ -1,12 +1,12 @@
 [
   {
     "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
-    "input": "http://example.invalid/‮./foo/‮-/bar",
+    "input": "http://example.invalid/{{RLO}}./foo/{{RLO}}-/bar",
     "base": "about:blank",
     "href": "http://example.invalid/%E2%80%AE./foo/%E2%80%AE-/bar"
   },
   {
-    "input": "http://example.invalid/⁧x⁩",
+    "input": "http://example.invalid/{{RLI}}x{{PDI}}",
     "failure": true
   }
 ]

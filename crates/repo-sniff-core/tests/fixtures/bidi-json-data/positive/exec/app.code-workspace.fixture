@@ -1,4 +1,4 @@
 {
   "folders": [{ "path": "." }],
-  "settings": { "comment": "SYNTHETIC TEST FIXTURE — not functional", "x": "echo ‮./setup.sh" }
+  "settings": { "comment": "SYNTHETIC TEST FIXTURE — not functional", "x": "echo {{RLO}}./setup.sh" }
 }

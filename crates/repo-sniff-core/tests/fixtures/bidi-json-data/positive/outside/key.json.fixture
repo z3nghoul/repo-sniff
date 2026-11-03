@@ -1,0 +1,5 @@
+{
+  "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
+  "{{RLO}}key": "value",
+  "mixed {{RLO}}key": "value {{RLO}}too"
+}

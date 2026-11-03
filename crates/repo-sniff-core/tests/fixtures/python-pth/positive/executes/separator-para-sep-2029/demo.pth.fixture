@@ -1,2 +1,2 @@
 # SYNTHETIC TEST FIXTURE — not functional
-# harmless import sys; print('hello')
+# harmless{{PSEP}}import sys; print('hello')

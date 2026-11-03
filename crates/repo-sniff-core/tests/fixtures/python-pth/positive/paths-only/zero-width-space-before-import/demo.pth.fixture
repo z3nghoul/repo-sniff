@@ -1,2 +1,2 @@
 # SYNTHETIC TEST FIXTURE — not functional
-​import sys; print('hello')
+{{ZWSP}}import sys; print('hello')
