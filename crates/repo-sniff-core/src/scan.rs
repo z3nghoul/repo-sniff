@@ -13,7 +13,7 @@ use crate::bidi;
 use crate::checks::{Check, Ctx, Decode, FileIssue, HEAD_LEN, Hit, RepoIndex, TextSpan, Views};
 use crate::finding::{Finding, Severity};
 use crate::rule::{Matcher, Rule};
-use crate::sanitize::{display_safe, snippet_safe, to_slash};
+use crate::sanitize::{display_safe_cut, snippet_safe, snippet_safe_cut, to_slash};
 use crate::walk::{self, Limits, SkipReason, Skipped};
 use regex::Regex;
 
@@ -1156,7 +1156,9 @@ impl<'a> LineScanner<'a> {
                 column: location.column,
                 span: location.span,
                 snippet: location.snippet,
+                snippet_truncated: location.snippet_truncated,
                 explanation,
+                explanation_truncated: false,
             });
         }
     }
@@ -1371,7 +1373,9 @@ fn scan_streamed(
                 column: None,
                 span,
                 snippet: None,
+                snippet_truncated: false,
                 explanation: rule.description.clone(),
+                explanation_truncated: false,
             });
         }
     }
@@ -1645,7 +1649,9 @@ fn scan_text<'v>(
                         column: None,
                         span: nul_span(views.bytes()),
                         snippet: None,
+                        snippet_truncated: false,
                         explanation: rule.description.clone(),
+                        explanation_truncated: false,
                     });
                 }
             }
@@ -1672,6 +1678,9 @@ fn hit_finding(
         }
         _ => Location::default(),
     };
+    // The reason may quote the scanned file, so it is cleaned before it can
+    // reach a terminal.
+    let (explanation, explanation_truncated) = display_safe_cut(&hit.reason, MAX_EXPLANATION_CHARS);
     Finding {
         rule_id: rule.id.clone(),
         severity: hit.severity,
@@ -1682,9 +1691,9 @@ fn hit_finding(
         column: location.column,
         span: location.span,
         snippet: location.snippet,
-        // The reason may quote the scanned file, so it is cleaned before it can
-        // reach a terminal.
-        explanation: display_safe(&hit.reason, MAX_EXPLANATION_CHARS),
+        snippet_truncated: location.snippet_truncated,
+        explanation,
+        explanation_truncated,
     }
 }
 
@@ -1712,6 +1721,8 @@ struct Location {
     column: Option<usize>,
     span: Option<Range<usize>>,
     snippet: Option<String>,
+    /// The line was cut to fit the snippet.
+    snippet_truncated: bool,
 }
 
 impl Location {
@@ -1736,10 +1747,12 @@ impl Location {
                 ..Location::default()
             };
         };
+        let (snippet, snippet_truncated) = snippet(line, before.len());
         Location {
             column: column_exact.then(|| before.chars().count() + 1),
             span,
-            snippet: Some(snippet(line, before.len())),
+            snippet: Some(snippet),
+            snippet_truncated,
         }
     }
 
@@ -1775,12 +1788,13 @@ fn nul_span(bytes: &[u8]) -> Option<Range<usize>> {
 /// `SNIPPET_LEAD_CHARS` characters of output are kept, counted after escaping,
 /// so a run of escaped characters cannot push the match out of view; the match
 /// and what follows fill the rest of `MAX_SNIPPET_CHARS`. `...` marks each
-/// cut. Only the window is ever escaped, never the whole line.
-fn snippet(line: &str, at: usize) -> String {
+/// cut, and the flag returned with the snippet says whether there is one.
+/// Only the window is ever escaped, never the whole line.
+fn snippet(line: &str, at: usize) -> (String, bool) {
     let body = line.trim_start();
     let at = at.saturating_sub(line.len() - body.len()).min(body.len());
     let Some((before, after)) = body.split_at_checked(at) else {
-        return String::new();
+        return (String::new(), false);
     };
     let shown = |c: char| {
         let mut buffer = [0; 4];
@@ -1818,8 +1832,9 @@ fn snippet(line: &str, at: usize) -> String {
         .take(MAX_SNIPPET_CHARS + 1)
         .map(|c| if c == '\t' { ' ' } else { c })
         .collect();
-    out.push_str(&snippet_safe(tail.trim_end(), MAX_SNIPPET_CHARS - used));
-    out
+    let (tail, tail_cut) = snippet_safe_cut(tail.trim_end(), MAX_SNIPPET_CHARS - used);
+    out.push_str(&tail);
+    (out, cut || tail_cut)
 }
 
 /// What the scanner decides about a file before any rule runs.
@@ -2952,6 +2967,36 @@ mod tests {
         );
         let last = report.findings.last().unwrap();
         assert!(last.explanation.contains("50 more"), "{}", last.explanation);
+        // A note added by the scanner is not a cut.
+        assert!(report.findings.iter().all(|f| !f.explanation_truncated));
+    }
+
+    #[test]
+    fn a_file_rule_explanation_cut_to_its_limit_says_so() {
+        fn long(_: &Ctx<'_>) -> Vec<Hit> {
+            vec![Hit {
+                line: 1,
+                span: None,
+                severity: Severity::High,
+                reason: "x".repeat(MAX_EXPLANATION_CHARS + 1),
+            }]
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.pth", b"x");
+
+        let report = scan(
+            dir.path(),
+            &[file_rule("**/*.pth", long)],
+            Limits::default(),
+        );
+
+        let finding = &report.findings[0];
+        assert!(finding.explanation_truncated);
+        assert!(
+            finding.explanation.ends_with("..."),
+            "{}",
+            finding.explanation
+        );
     }
 
     // ---- scripts with NUL bytes -------------------------------------------
@@ -4293,6 +4338,18 @@ mod tests {
         assert_eq!(found[0].1, Some(501));
         let expected = format!("...{}TODO{}...", "a".repeat(40), "b".repeat(76));
         assert_eq!(found[0].3.as_deref(), Some(expected.as_str()));
+        assert!(report.findings[0].snippet_truncated);
+    }
+
+    #[test]
+    fn a_snippet_is_marked_cut_only_when_its_line_was_cut() {
+        let cut_at = |line: &str| snippet(line, line.find("TODO").unwrap()).1;
+        assert!(!cut_at("x TODO y"));
+        assert!(!cut_at(&format!("{}TODO", "a".repeat(40))));
+        assert!(cut_at(&format!("{}TODO", "a".repeat(41))));
+        assert!(cut_at(&format!("TODO{}", "b".repeat(200))));
+        // `...` that is in the line itself is not a cut.
+        assert!(!cut_at("x... TODO ..."));
     }
 
     #[test]
@@ -4447,14 +4504,14 @@ mod tests {
         );
         let past = Location::in_line("ab", 9, false, true, Some(0..1));
         assert_eq!((past.column, past.span), (Some(3), Some(0..1)));
-        assert_eq!(snippet("", 0), "");
-        assert_eq!(snippet("   ", 1), "");
+        assert_eq!(snippet("", 0), (String::new(), false));
+        assert_eq!(snippet("   ", 1), (String::new(), false));
         assert_eq!(
-            snippet("\u{e9}", 1),
+            snippet("\u{e9}", 1).0,
             "",
             "inside a character: nothing, no panic"
         );
-        assert_eq!(snippet("\u{e9}x", 2), "\u{e9}x");
+        assert_eq!(snippet("\u{e9}x", 2), ("\u{e9}x".to_string(), false));
         assert_eq!(nul_span(b"ab"), None);
         assert_eq!(nul_span(b"a\0"), Some(1..2));
     }

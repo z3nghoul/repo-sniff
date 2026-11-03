@@ -178,7 +178,9 @@ mod tests {
             column: None,
             span: None,
             snippet: None,
+            snippet_truncated: false,
             explanation: String::new(),
+            explanation_truncated: false,
         }
     }
 

@@ -134,8 +134,15 @@ pub struct Finding {
     /// the match and escaped with `snippet_safe`. It is still text from the
     /// scanned file. `None` when the rule points at a whole line or file.
     pub snippet: Option<String>,
-    /// Why this is suspicious, in plain words.
+    /// True when the line was longer than the window of `snippet`, so `...`
+    /// marks text left out before or after it.
+    pub snippet_truncated: bool,
+    /// Why this is suspicious, in plain words. A check may quote the scanned
+    /// file in it; such an explanation is escaped with `display_safe` and cut
+    /// to a limit.
     pub explanation: String,
+    /// True when `explanation` was cut to its limit.
+    pub explanation_truncated: bool,
 }
 
 #[cfg(test)]
