@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Tests and their fixtures stay in the repository: the fixtures imitate malware
+# on purpose and are of no use to a user of the crate.
+exclude = ["tests/"]
 
 [dependencies]
 globset = "0.4.21"
