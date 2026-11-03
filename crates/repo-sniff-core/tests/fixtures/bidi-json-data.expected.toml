@@ -1,0 +1,109 @@
+# What the built-in rules report when bidi-json-data/ is scanned as one
+# repository (read by tests/fixture_expectations.rs). Bidi controls in JSON:
+# CRITICAL where the strings are run (package.json, .vscode, .devcontainer,
+# ...), and wherever the control is outside a string value or the file is not
+# valid JSON; a string value of a data file is MEDIUM (#106).
+
+files_scanned = 15
+
+[[finding]]
+file = "positive/data/strings.jsonc"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/data/strings.jsonc"
+line = 5
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/data/test/fixtures/wpt/names.json"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/data/urltestdata.json"
+line = 4
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/data/urltestdata.json"
+line = 9
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/exec/.devcontainer/devcontainer.json"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/exec/.devcontainer.json"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/exec/.vscode/launch.json"
+line = 8
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/exec/.vscode/tasks.json"
+line = 7
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/exec/app.code-workspace"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/exec/package.json"
+line = 7
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/exec/test/fixtures/package.json"
+line = 5
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/outside/between_tokens.json"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/outside/broken.json"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/outside/comment.jsonc"
+line = 2
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/outside/key.json"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"
+
+[[finding]]
+file = "positive/outside/key.json"
+line = 4
+rule = "deception.bidi-control"
+severity = "critical"

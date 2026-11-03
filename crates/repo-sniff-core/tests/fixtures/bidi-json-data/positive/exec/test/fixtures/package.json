@@ -1,0 +1,7 @@
+{
+  "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "synthetic-nested",
+  "scripts": {
+    "lint": "echo ‮./lint.sh"
+  }
+}

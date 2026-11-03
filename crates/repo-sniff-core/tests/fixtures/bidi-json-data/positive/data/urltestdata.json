@@ -1,0 +1,12 @@
+[
+  {
+    "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
+    "input": "http://example.invalid/‮./foo/‮-/bar",
+    "base": "about:blank",
+    "href": "http://example.invalid/%E2%80%AE./foo/%E2%80%AE-/bar"
+  },
+  {
+    "input": "http://example.invalid/⁧x⁩",
+    "failure": true
+  }
+]
