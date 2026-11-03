@@ -1,0 +1,56 @@
+name: Missed detection
+description: A malicious technique that repo-sniff does not report.
+title: "Missed detection: <technique>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the known gaps of the rule and the planned detections in
+        [docs/DETECTIONS.md](https://github.com/z3nghoul/repo-sniff/blob/main/docs/DETECTIONS.md)
+        first. **Do not attach real malware, a working payload or a link to a
+        live sample.** A way to make the scanner itself run code, leave the
+        scanned folder or report an incomplete scan as clean is a
+        vulnerability: report it privately as described in
+        [SECURITY.md](https://github.com/z3nghoul/repo-sniff/blob/main/SECURITY.md).
+  - type: textarea
+    id: technique
+    attributes:
+      label: Technique
+      description: |
+        How the code gets run (on folder open, on install, on build, ...) and
+        how it is hidden. The ATT&CK technique, if you know it.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Synthetic example
+      description: |
+        The smallest file or set of files that shows the shape, written the
+        way fixtures are: only example.com, example.org, example.net or
+        .invalid domains, harmless commands such as `echo hello`, fake tokens
+        such as `FAKE_TOKEN_FOR_TESTS`.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: report
+    attributes:
+      label: Public report
+      description: A public write-up of the technique seen in the wild (blog post, advisory, research paper).
+      placeholder: https://
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: repo-sniff version
+      description: Output of `repo-sniff --version`, or the commit you built.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      options:
+        - label: The example contains no working payload, no real malware and no real credentials.
+          required: true

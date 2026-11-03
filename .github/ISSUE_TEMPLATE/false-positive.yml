@@ -1,0 +1,74 @@
+name: False positive
+description: repo-sniff reports a finding on honest code.
+title: "False positive: <rule id> on <repository>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for checking the finding by hand. The levels and the reasons
+        behind them are in [docs/DETECTIONS.md](https://github.com/z3nghoul/repo-sniff/blob/main/docs/DETECTIONS.md);
+        some findings on honest code are reported on purpose (see "Levels and
+        why" of the rule).
+  - type: input
+    id: repository
+    attributes:
+      label: Repository
+      description: URL of the public repository that was scanned.
+      placeholder: https://github.com/owner/repo
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: The commit that was scanned (`git rev-parse HEAD`).
+    validations:
+      required: true
+  - type: input
+    id: file
+    attributes:
+      label: File and line
+      description: As printed in the report.
+      placeholder: path/to/file.js:12
+    validations:
+      required: true
+  - type: input
+    id: rule
+    attributes:
+      label: Rule id
+      placeholder: run.js-fetch-eval
+    validations:
+      required: true
+  - type: dropdown
+    id: level
+    attributes:
+      label: Level
+      options:
+        - CRITICAL
+        - HIGH
+        - MEDIUM
+        - LOW
+        - INFO
+    validations:
+      required: true
+  - type: textarea
+    id: why-honest
+    attributes:
+      label: Why this is honest code
+      description: What the flagged code does and why it is legitimate in this repository.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: repo-sniff version
+      description: Output of `repo-sniff --version`, or the commit you built.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Report excerpt
+      description: The finding as the report prints it.
+      render: text
