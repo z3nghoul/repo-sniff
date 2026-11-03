@@ -1,4 +1,4 @@
 {
   "name": "SYNTHETIC TEST FIXTURE — not functional",
-  "postStartCommand": "echo ‮./setup.sh"
+  "postStartCommand": "echo {{RLO}}./setup.sh"
 }

@@ -1,4 +1,4 @@
-﻿{
+{
   "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
-  "input": "http://example.invalid/‮./a"
+  "a\"b": "x{{RLO}}y", "k{{RLO}}": 1
 }

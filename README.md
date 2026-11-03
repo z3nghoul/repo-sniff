@@ -218,11 +218,14 @@ repo-sniff scan some-folder
 
 The fixtures in this repository are stored defanged and become real only in a
 temporary folder while the tests run, whereas the signatures in `src/` and
-`rules/` are what the scanner looks for. `repo-sniff scan .` here therefore
-reports far fewer findings than the fixtures hold: the ones left come from
-invisible characters and constructions that cannot be defanged. The fixture paths are not excluded from a scan, because an
-attacker can name a payload folder the same way, and a scanner that skipped
-such paths would be blind to it.
+`rules/` are what the scanner looks for. Dangerous words and invisible
+characters (bidi controls, zero-width characters, line separators) are
+`{{NAME}}` markers, and the files a tool might run carry the suffix `.fixture`.
+`repo-sniff scan .` on a clean checkout of this repository therefore reports no
+findings and exits with 0; the only note is that `docs/demo.gif` is a binary
+file and was read as ASCII only. The fixture paths are not excluded from a
+scan, because an attacker can name a payload folder the same way, and a scanner
+that skipped such paths would be blind to it.
 
 ## roadmap
 

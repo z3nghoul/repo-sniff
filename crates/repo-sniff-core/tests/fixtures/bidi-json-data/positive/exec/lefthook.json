@@ -1,4 +1,0 @@
-{
-  "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
-  "pre-commit": {"commands": {"x": {"run": "echo ‮./setup.sh"}}}
-}

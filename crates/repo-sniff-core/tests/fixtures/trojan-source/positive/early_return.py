@@ -1,4 +1,4 @@
 # SYNTHETIC TEST FIXTURE — not functional
 def noop():
-    """‮ ⁦return⁩ ⁦"""
+    """{{RLO}} {{LRI}}return{{PDI}} {{LRI}}"""
     pass

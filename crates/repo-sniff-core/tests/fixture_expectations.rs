@@ -284,6 +284,14 @@ fn the_stored_fixtures_and_the_demo_are_defanged() {
 }
 
 #[test]
+fn the_demo_materializes_without_an_unknown_marker() {
+    // `docs/demo.tape` materializes the whole folder, README.md included.
+    let real = common::materialize(&stored_demo());
+    assert!(real.path().join(".vscode/tasks.json").is_file());
+    assert!(real.path().join("package.json").is_file());
+}
+
+#[test]
 fn the_storage_check_names_a_raw_fixture() {
     let stored = tempfile::tempdir().unwrap();
     let write = |relative: &str, contents: &str| {
@@ -299,6 +307,12 @@ fn the_storage_check_names_a_raw_fixture() {
     write("positive/.vscode/notes.txt", "text\n");
     write("positive/tasks.json", "{}\n");
     write("positive/ok.js", "{{EVAL}}(x)\n");
+    write("positive/bidi.js", "a \u{202E} b\n");
+    write("positive/ok.json", "{}\n");
+    write(
+        "positive/ctor.js",
+        &format!("a.{}(b)\n", ["construc", "tor.construc", "tor"].concat()),
+    );
     write("positive/ok.json.fixture", "{}\n");
 
     let text = common::storage_problems(stored.path()).join("\n");
@@ -306,10 +320,13 @@ fn the_storage_check_names_a_raw_fixture() {
         "positive/raw.js: contains {{EVAL}} written out",
         "positive/.vscode: folder starts with a dot",
         "positive/tasks.json: needs the .fixture suffix",
+        "positive/ok.json: needs the .fixture suffix",
+        "positive/bidi.js: contains U+202E written out, use {{RLO}}",
+        "positive/ctor.js: contains {{CTOR_CHAIN}} written out",
     ] {
         assert!(text.contains(expected), "{expected:?} not in:\n{text}");
     }
-    assert!(!text.contains("ok.js"), "{text}");
+    assert!(!text.contains("positive/ok.js:"), "{text}");
     assert!(!text.contains("ok.json.fixture"), "{text}");
 }
 
@@ -334,6 +351,69 @@ fn materializing_restores_names_and_text_and_rejects_unknown_markers() {
     write("bad.txt", "{{NO_SUCH_MARKER}}\n");
     let result = std::panic::catch_unwind(|| common::materialize(stored.path()));
     assert!(result.is_err(), "an unknown marker must fail");
+}
+
+#[test]
+fn materializing_restores_invisible_characters_new_words_and_generated_lines() {
+    let stored = tempfile::tempdir().unwrap();
+    let write = |relative: &str, contents: &str| {
+        let path = stored.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    for (name, character) in common::CHAR_MARKERS {
+        write(
+            &format!("chars/{name}.txt"),
+            &format!("a{{{{{name}}}}}b\r\n"),
+        );
+        let real = common::materialize(stored.path());
+        let text = fs::read_to_string(real.path().join(format!("chars/{name}.txt"))).unwrap();
+        assert_eq!(text, format!("a{character}b\r\n"), "{name}");
+    }
+    write(
+        "words.txt",
+        "x.{{CTOR_CHAIN}}(y); z.{{RUN_IN_NEW_CONTEXT}}(c)\n",
+    );
+    write("gen.js", "{{MIN_FUNCS_2}}\n");
+    let real = common::materialize(stored.path());
+    let words = fs::read_to_string(real.path().join("words.txt")).unwrap();
+    assert_eq!(
+        words,
+        format!(
+            "x.{}(y); z.{}(c)\n",
+            ["construc", "tor.construc", "tor"].concat(),
+            ["run", "InNew", "Context"].concat()
+        )
+    );
+    let line = fs::read_to_string(real.path().join("gen.js")).unwrap();
+    assert_eq!(
+        line,
+        "function f0(a){if(a>0){return a-0;}return a+0;}var v0=f0(0);\
+         function f1(a){if(a>1){return a-1;}return a+1;}var v1=f1(1);\n"
+    );
+}
+
+#[test]
+fn a_marker_right_after_a_brace_is_still_a_marker() {
+    let stored = tempfile::tempdir().unwrap();
+    fs::write(
+        stored.path().join("a.js"),
+        "catch(e){{{EVAL}}(e)}{{{MIN_FUNCS_1}}\n",
+    )
+    .unwrap();
+    let real = common::materialize(stored.path());
+    let text = fs::read_to_string(real.path().join("a.js")).unwrap();
+    let eval = ["ev", "al"].concat();
+    assert_eq!(
+        text,
+        format!(
+            "catch(e){{{eval}(e)}}{{function f0(a){{if(a>0){{return a-0;}}return a+0;}}var v0=f0(0);\n"
+        )
+    );
+
+    fs::write(stored.path().join("b.js"), "{{{NO_SUCH_MARKER}}\n").unwrap();
+    let result = std::panic::catch_unwind(|| common::materialize(stored.path()));
+    assert!(result.is_err(), "an unknown marker after a brace must fail");
 }
 
 #[test]

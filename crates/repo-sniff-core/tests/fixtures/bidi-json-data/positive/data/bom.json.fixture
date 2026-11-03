@@ -1,4 +1,4 @@
-{
+{{BOM}}{
   "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
-  "a\"b": "x‮y", "k‮": 1
+  "input": "http://example.invalid/{{RLO}}./a"
 }

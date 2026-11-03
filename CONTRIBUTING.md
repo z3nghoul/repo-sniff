@@ -141,11 +141,16 @@ harmless form and become real only in a temporary folder while a test runs:
   place that knows the real words. A marker that is not in the table makes the
   test fail. A new family that needs new dangerous words adds them to that
   table in the same pull request.
+- **Invisible characters** (bidi controls, LRM/RLM/ALM, line and paragraph
+  separators, NEL, zero-width characters, soft hyphen, BOM) are markers named
+  after the Unicode abbreviation (`{{RLO}}`, `{{PDI}}`, `{{LSEP}}`), listed in
+  `CHAR_MARKERS`; materializing writes exactly that code point. A long
+  generated line can be a generator marker such as `{{MIN_FUNCS_40}}`.
 - **Names.** A folder whose real name starts with a dot is stored with `_`
   instead (`.vscode` as `_vscode`; the folders are listed in `DOT_DIRS`). A
   file that a scanner or an editor might run or load (`tasks.json`,
-  `package.json`, `next.config.js`, `*.bat`, `*.ps1`, `*.pth` and the other
-  names and extensions in `needs_suffix`) is stored with the suffix
+  `package.json`, `next.config.js`, `*.bat`, `*.ps1`, `*.pth`, every `*.json` and
+  `*.jsonc`, and the other names and extensions in `needs_suffix`) is stored with the suffix
   `.fixture` (`tasks.json.fixture`).
 - **Binary fixtures** and the ones generated in tests are not touched.
 - `<family>.expected.toml` and `expectations.tsv` use the real paths.

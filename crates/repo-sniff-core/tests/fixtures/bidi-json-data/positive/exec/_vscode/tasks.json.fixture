@@ -4,7 +4,7 @@
     {
       "label": "SYNTHETIC TEST FIXTURE — not functional",
       "type": "shell",
-      "command": "echo ‮./setup.sh"
+      "command": "echo {{RLO}}./setup.sh"
     }
   ]
 }

@@ -20,7 +20,7 @@ function viaHttps(url) {
       body += chunk;
     });
     res.on("end", () => {
-      vm.runInNewContext(body);
+      vm.{{RUN_IN_NEW_CONTEXT}}(body);
     });
   });
 }

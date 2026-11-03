@@ -1,6 +1,0 @@
-{
-  // SYNTHETIC TEST FIXTURE — not functional
-  "title": "http://example.invalid/‮./page",
-  /* a comment is fine without controls */
-  "other": ["x", "http://example.invalid/⁧y⁩"]
-}

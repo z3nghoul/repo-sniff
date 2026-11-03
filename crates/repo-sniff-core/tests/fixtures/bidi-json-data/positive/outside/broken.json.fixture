@@ -1,4 +1,4 @@
 {
   "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
-  "cases": ["plain", "http://example.invalid/‮./a"]
+  "input": "http://example.invalid/{{RLO}}./foo",
 }

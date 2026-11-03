@@ -1,4 +1,4 @@
 {
   "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
-  "input": "http://example.invalid/‮./foo",
+  "postUpgradeTasks": {"commands": ["echo {{RLO}}./x.sh"]}
 }
