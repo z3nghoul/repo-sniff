@@ -130,6 +130,154 @@ fn control_beside_name(line: &str) -> bool {
     false
 }
 
+/// Base names of JSON files whose strings a tool runs or hands to a shell:
+/// package managers and task runners, deploy and build configuration, hooks.
+const RUNS_STRINGS_BASENAMES: &[&str] = &[
+    "package.json",
+    "composer.json",
+    "deno.json",
+    "deno.jsonc",
+    "bower.json",
+    "project.json",
+    "rust-project.json",
+    "workspace.json",
+    "angular.json",
+    "nx.json",
+    "turbo.json",
+    "lerna.json",
+    "vercel.json",
+    "now.json",
+    "firebase.json",
+    "wrangler.json",
+    "wrangler.jsonc",
+    "nodemon.json",
+    "devbox.json",
+    "app.json",
+    "renovate.json",
+    "renovate.json5",
+    "lefthook.json",
+    "simple-git-hooks.json",
+    "cloudbuild.json",
+    "railway.json",
+    "nixpacks.json",
+    "opencode.json",
+    "devcontainer.json",
+    "tasks.json",
+    "launch.json",
+    "settings.json",
+    "mcp.json",
+    "run.json",
+];
+
+/// Whether `slash_path` is a JSON file (`.json`, `.jsonc`) that is data, not
+/// something a tool runs: a bidi control in one of its string values is not a
+/// deception about code.
+///
+/// A file is data only when nothing says a tool reads it for commands. The
+/// test is structural, not a list of products, so a tool that did not exist
+/// when this was written is covered: a folder or a file whose name starts with
+/// a dot (editor, agent, hook and CI configuration), a configuration name
+/// (`*rc.json`, `*.config.json`), a name that holds `hooks` or `compose`, and
+/// the names above. The path does not lower the level (a `test/` or `fixtures/`
+/// folder is judged like any other).
+pub(crate) fn is_data_json(slash_path: &str) -> bool {
+    let lower = slash_path.to_lowercase();
+    let mut parts: Vec<&str> = lower.split('/').collect();
+    let Some(name) = parts.pop() else {
+        return false;
+    };
+    if !(name.ends_with(".json") || name.ends_with(".jsonc")) {
+        return false;
+    }
+    let stem = name
+        .strip_suffix(".jsonc")
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(name);
+    let configuration = name.starts_with('.')
+        || stem.ends_with("rc")
+        || stem.ends_with(".config")
+        || name.contains("hooks")
+        || name.contains("compose")
+        || RUNS_STRINGS_BASENAMES.contains(&name);
+    !configuration
+        && !parts
+            .iter()
+            .any(|p| p.starts_with('.') && *p != "." && *p != "..")
+}
+
+/// The 1-based numbers of the lines of a JSON document whose bidi controls
+/// all sit inside string values. A control in a key, a comment, between tokens
+/// or anywhere in a document that does not parse puts its line out of the set.
+/// `.json` is parsed the way `JSON.parse` does, `.jsonc` with comments.
+pub(crate) fn lines_with_controls_in_values(
+    slash_path: &str,
+    text: &str,
+) -> std::collections::HashSet<usize> {
+    let mut data = std::collections::HashSet::new();
+    if first_control(text).is_none() {
+        return data;
+    }
+    let parsed = if slash_path.to_lowercase().ends_with(".jsonc") {
+        crate::jsonc::parse(text)
+    } else {
+        crate::jsonc::parse_json(text)
+    };
+    let Ok(root) = parsed else {
+        return data;
+    };
+    // The string values that hold a control, in document order.
+    let mut values: Vec<std::ops::Range<usize>> = Vec::new();
+    collect_values_with_controls(&root, text, &mut values);
+
+    let mut bad = std::collections::HashSet::new();
+    let mut line = 1;
+    let mut counted = 0;
+    let mut at = 0;
+    while let Some(found) = first_control(&text[at..]) {
+        let start = at + found.start;
+        line += text.as_bytes()[counted..start]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        counted = start;
+        let index = values.partition_point(|v| v.end <= start);
+        if values.get(index).is_some_and(|v| v.start <= start) {
+            data.insert(line);
+        } else {
+            bad.insert(line);
+        }
+        at += found.end;
+    }
+    data.retain(|line| !bad.contains(line));
+    data
+}
+
+fn collect_values_with_controls(
+    node: &crate::jsonc::Node,
+    text: &str,
+    out: &mut Vec<std::ops::Range<usize>>,
+) {
+    use crate::jsonc::Value;
+    match &node.value {
+        Value::String(_) => {
+            if first_control(&text[node.offset..node.end]).is_some() {
+                out.push(node.offset..node.end);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_values_with_controls(item, text, out);
+            }
+        }
+        Value::Object(members) => {
+            for member in members {
+                collect_values_with_controls(&member.value, text, out);
+            }
+        }
+        Value::Other => {}
+    }
+}
+
 /// Judges a line known to hold a control. `budget` is what the scan has left
 /// for laying out lines.
 pub(crate) fn judge(line: &str, budget: &Cell<usize>) -> Verdict {
@@ -222,6 +370,72 @@ mod tests {
     /// The layout alone, for lines a name check would catch first.
     fn laid_out(line: &str) -> Verdict {
         compare(line)
+    }
+
+    #[test]
+    fn files_that_run_their_strings_are_not_data() {
+        for path in [
+            "package.json",
+            "a/b/package.json",
+            "test/fixtures/PACKAGE.JSON",
+            ".vscode/tasks.json",
+            "x/.vscode/launch.json",
+            ".devcontainer/sub/devcontainer.json",
+            ".devcontainer.json",
+            ".roo/mcp.json",
+            ".kiro/settings/mcp.json",
+            ".release-it.json",
+            ".projen/tasks.json",
+            "lefthook.json",
+            "renovate.json",
+            "mcp.json",
+            "x/tasks.json",
+            "tsconfig.config.json",
+            "lint.config.jsonc",
+            "babelrc.json",
+            "git-hooks.json",
+            "docker-compose.json",
+            "app.code-workspace",
+            "notes.txt",
+        ] {
+            assert!(!is_data_json(path), "{path}");
+        }
+        for path in [
+            "test/fixtures/wpt/url/resources/urltestdata.json",
+            "data.json",
+            "a/tsconfig.jsonc",
+            "vscode/data.json",
+            "./data.json",
+        ] {
+            assert!(is_data_json(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn only_controls_inside_string_values_make_a_data_line() {
+        let set = |text: String, path: &str| {
+            let mut lines: Vec<_> = lines_with_controls_in_values(path, &text)
+                .into_iter()
+                .collect();
+            lines.sort();
+            lines
+        };
+        // A value, in an object and in an array; a line with a key as well.
+        let text = format!("[\n{{\"a\": \"x{RLO}y\"}},\n\"{RLO}\"\n]");
+        assert_eq!(set(text, "a.json"), [2, 3]);
+        // A key, or a key and a value on one line.
+        let text = format!("{{\n\"a{RLO}\": 1,\n\"{RLO}k\": \"{RLO}v\"\n}}");
+        assert!(set(text, "a.json").is_empty());
+        // Between tokens, or a document that does not parse.
+        assert!(set(format!("{{\"a\": {RLO}1}}"), "a.json").is_empty());
+        assert!(set(format!("{{\"a\": \"{RLO}\",}}"), "a.json").is_empty());
+        // A comment is only JSONC, and then it is not a value.
+        let text = format!("{{\n// {RLO}\n\"a\": \"{RLO}\"\n}}");
+        assert_eq!(set(text.clone(), "a.jsonc"), [3]);
+        assert!(set(text, "a.json").is_empty());
+        // Lines count the same in a CRLF file.
+        let text = format!("{{\r\n\"a\": \"{RLO}\"\r\n}}");
+        assert_eq!(set(text, "a.json"), [2]);
     }
 
     #[test]

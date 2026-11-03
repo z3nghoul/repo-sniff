@@ -1,0 +1,4 @@
+{
+  "name": "SYNTHETIC TEST FIXTURE — not functional",
+  "postCreateCommand": "echo ‮./setup.sh"
+}

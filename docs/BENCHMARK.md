@@ -291,3 +291,14 @@ Filed from the reviews of the fixes: 49 (memory of the ASCII-only copy), 50
 (decoy lines inside one rule), 51 (gaps and missing fixtures around
 binary-looking files), 53 (streaming opens a file four times), 54 (a line over
 16 MiB), 55 (wording for a streamed file selected by a whole-file rule).
+
+## Bidi controls in JSON data (run of 2026-11-03, [#106](https://github.com/z3nghoul/repo-sniff/issues/106))
+
+A bidi control inside a string value of a JSON data file is MEDIUM now, not
+CRITICAL. The ten repositories of the table above and vite, vuejs/core, react
+and nodejs/node were scanned again with a release build of the fix. Result:
+**0 CRITICAL in all fourteen, and no scan is INCONCLUSIVE.** nodejs/node (head
+`22657630`) reports `test/fixtures/wpt/url/resources/urltestdata.json:2426` as
+MEDIUM, "bidi controls in data; not executed as code", and no other
+`deception.bidi-control` finding; the other thirteen have none. The other
+levels are as before except for the repository heads that moved.

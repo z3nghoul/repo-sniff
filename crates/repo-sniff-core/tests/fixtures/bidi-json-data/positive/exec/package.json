@@ -1,0 +1,9 @@
+{
+  "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "synthetic-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "echo ‮./setup.sh"
+  }
+}
