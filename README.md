@@ -1,5 +1,7 @@
 # repo-sniff
 
+![repo-sniff scanning a demo project and rust-lang/cargo](docs/demo.gif)
+
 [![CI](https://github.com/z3nghoul/repo-sniff/actions/workflows/ci.yml/badge.svg)](https://github.com/z3nghoul/repo-sniff/actions/workflows/ci.yml)
 
 **Sniff a repository before you run it.**
@@ -203,8 +205,8 @@ and other binary files affect the status is described in
 ## Benchmark
 
 Ten popular honest repositories, scanned from their default branches with
-`repo-sniff scan <url>` on 2026-11-01. The scanner was `main` (`71fb3b5`), which
-includes the hardening pull requests #75, #76 and #77. The target
+`repo-sniff scan <url>` on 2026-11-03. The scanner was `main` (`46b8501`), which
+includes the loader signatures (#107). The target
 is 0 CRITICAL findings on honest code; it is met, and no scan is
 INCONCLUSIVE.
 
@@ -216,16 +218,16 @@ INCONCLUSIVE.
 | pallets/flask | 0 | 0 | 0 | 0 | 1 |
 | pypa/pip | 1 | 0 | 6 | 0 | 0 |
 | expressjs/express | 0 | 0 | 0 | 0 | 0 |
-| microsoft/vscode | 1 | 0 | 8 | 0 | 50 |
+| microsoft/vscode | 1 | 0 | 9 | 13 | 52 |
 | git/git | 0 | 0 | 0 | 3 | 5 |
 | python/cpython | 1 | 0 | 2 | 1 | 28 |
 | microsoft/terminal | 1 | 0 | 14 | 0 | 74 |
 
-27 of the 30 HIGH findings are vendored executables (true detections of
-benign files) and one is a real folder-open task in vscode (#43). cpython's 2
+27 of the 31 HIGH findings are vendored executables (true detections of
+benign files), one is a real folder-open task in vscode (#43) and one is
+vscode's extension host building a function from a fetched source. cpython's 2
 are a known false positive (#42), and they alone cause its exit 1. The
-previous run, with the same changes merged locally, gave the same findings
-on the same heads (cpython has moved since). Commits of the
+findings were the same in three runs on the same heads. Commits of the
 scanned repositories, every HIGH and MEDIUM finding with a verdict, and how to
 re-run it are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
