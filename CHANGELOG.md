@@ -114,7 +114,6 @@ open at this release (each item is an open issue):
 - Known false positives, reported on purpose: shell scripts followed by a zip
   archive ([#42](https://github.com/z3nghoul/repo-sniff/issues/42)).
 - There is no risk score, JSON or SARIF output, GitHub Action or TUI yet; see
-docs/changelog-0.1.0
   [ROADMAP.md](ROADMAP.md).
 
 [0.1.0]: https://github.com/z3nghoul/repo-sniff/releases/tag/v0.1.0
