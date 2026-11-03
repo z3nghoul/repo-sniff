@@ -254,3 +254,22 @@ fn a_pack_hook_is_raised_one_level_less() {
         Some(Severity::High)
     );
 }
+
+#[test]
+fn a_failed_regular_expression_scales_linearly() {
+    // Time grows with the input, not with its square: four times the input must
+    // not cost sixteen times as much (the ratio is checked, not a duration).
+    let time = |pairs: usize| {
+        let text = format!("eval(x);\na = {}\n", "/\\".repeat(pairs));
+        let started = std::time::Instant::now();
+        let report = scan_files(&[("a.js", text.into_bytes())], Limits::default());
+        assert!(!report.findings.is_empty() || report.is_complete());
+        started.elapsed().as_secs_f64()
+    };
+    let small = time(50_000).max(0.001);
+    let large = time(200_000);
+    assert!(
+        large / small < 10.0,
+        "50k pairs {small:.3}s, 200k pairs {large:.3}s"
+    );
+}

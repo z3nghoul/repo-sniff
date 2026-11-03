@@ -15,7 +15,7 @@
 #   .vbs, .wsf and .hta findings of repo.windows-script and repo.windows-dropper
 #   are the ones that already existed.
 
-files_scanned = 49
+files_scanned = 53
 unflagged = ["positive/obfuscator/npm-start/package.json"]
 
 [[finding]]
@@ -421,3 +421,34 @@ line = 5
 rule = "run.windows-remote-code"
 severity = "critical"
 explanation_contains = 'rundll32'
+
+[[finding]]
+file = "positive/js-regex-confusion/brace.js"
+line = 3
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/js-regex-confusion/postinc.js"
+line = 3
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/js-regex-confusion/prop-in.js"
+line = 3
+rule = "run.js-fetch-eval"
+severity = "critical"
+
+[[finding]]
+file = "positive/js-budget/padded-function-require.js"
+line = 1
+rule = "run.js-fetch-eval"
+severity = "medium"
+explanation_contains = 'review it by hand'
+
+[[finding]]
+file = "positive/js-budget/padded-function-require.js"
+line = 22
+rule = "run.js-function-require"
+severity = "critical"
