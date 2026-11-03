@@ -137,12 +137,19 @@ scripts:
 | pallets/flask | 1 | | | |
 | git/git | 3 | | 2 | |
 | python/cpython | 26 | | 2 | |
-| microsoft/vscode | 13 | 11 | 24 | 2 |
+| microsoft/vscode | 13 | 11 | 25 | 2 |
 | microsoft/terminal | 18 | 20 | 35 | 1 |
 
 They are build glue in Windows-heavy repositories; LOW keeps them in the
 overall picture without failing anything. A repository with hundreds of them
 needs the grouped "needs manual review" section of milestone 3.
+
+vscode's 52 LOW findings are these 51 scripts and the `prepublishOnly` hook
+above. A rescan of commit `5d029124799a` with the benchmark build (`46b8501`)
+gives the same totals as the results table and 25 `.ps1` files, one more than
+an earlier version of this table counted:
+`test/smoke/scripts/run-agents-window-wsl-kerberos-proxy.ps1`, added to vscode
+on 2026-11-01 (commit `847d1cc5c1f0`).
 
 ## levels for vendored launchers
 
