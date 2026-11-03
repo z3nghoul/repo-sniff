@@ -1,0 +1,53 @@
+name: Bug
+description: repo-sniff crashes, fails to run or behaves differently from its documentation.
+title: "Bug: <short description>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a wrong finding, use the false positive or missed detection
+        template. A weakness that a scanned repository could exploit (code
+        execution, leaving the scanned folder, report spoofing, a false
+        "clean") is a vulnerability: report it privately as described in
+        [SECURITY.md](https://github.com/z3nghoul/repo-sniff/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: The exact command, and the smallest repository or file that shows the problem (synthetic, not real malware).
+      placeholder: repo-sniff scan ./some-project
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: What repo-sniff printed, and the exit status (`echo $?`).
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: repo-sniff version
+      description: Output of `repo-sniff --version`, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and git version
+      placeholder: Windows 11, git 2.47.1.windows.1
+    validations:
+      required: true

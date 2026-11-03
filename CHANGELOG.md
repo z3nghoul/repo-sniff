@@ -1,6 +1,7 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
+Notable changes in each release of repo-sniff, for users deciding whether
+to upgrade.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -13,6 +14,9 @@ Options: `--fail-on <info|low|medium|high|critical|none>` (default `high`) and
 `--ref <REF>` for remote repositories.
 
 ### Guarantees
+
+In short; the full list is in
+[docs/DETECTIONS.md](docs/DETECTIONS.md#7-how-the-scanner-protects-you).
 
 - The scanner never executes code from the scanned repository: no install, no
   build, no scripts. It only reads files.
@@ -47,8 +51,8 @@ Options: `--fail-on <info|low|medium|high|critical|none>` (default `high`) and
 
 ### Added
 
-Rule families (21 rules; the full catalog with levels and MITRE ATT&CK
-techniques is in [docs/DETECTIONS.md](docs/DETECTIONS.md)):
+Rule families (21 rules; levels, MITRE ATT&CK techniques and known gaps of
+each are in [docs/DETECTIONS.md](docs/DETECTIONS.md#2-rules-at-a-glance)):
 
 - Trojan Source and concealment: `deception.bidi-control` (a line is laid out
   with and without the bidi controls; CRITICAL if the display differs or cannot
@@ -66,7 +70,8 @@ techniques is in [docs/DETECTIONS.md](docs/DETECTIONS.md)):
   `obfuscation.obfuscator-io`, `obfuscation.minified-source`.
 - Windows script loaders: `run.windows-remote-code`,
   `obfuscation.windows-encoded-payload`, `run.windows-defender-exclusion`.
-- A fixture harness (`tests/fixtures/<family>/` with an `expected.toml`), a
+- A fixture harness (`tests/fixtures/<family>/` with a
+  `<family>.expected.toml` beside it), a
   benchmark script (`scripts/benchmark.sh`) and a real-sample test gated by
   `REPO_SNIFF_REAL_SAMPLES`.
 
@@ -109,6 +114,10 @@ open at this release (each item is an open issue):
 - Known false positives, reported on purpose: shell scripts followed by a zip
   archive ([#42](https://github.com/z3nghoul/repo-sniff/issues/42)).
 - There is no risk score, JSON or SARIF output, GitHub Action or TUI yet; see
+docs/changelog-0.1.0
   [ROADMAP.md](ROADMAP.md).
 
 [0.1.0]: https://github.com/z3nghoul/repo-sniff/releases/tag/v0.1.0
+
+  [ROADMAP.md](ROADMAP.md#where-we-are).
+main

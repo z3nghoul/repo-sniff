@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vulnerability in repo-sniff itself
+    url: https://github.com/z3nghoul/repo-sniff/blob/main/SECURITY.md
+    about: Do not open a public issue. Report weaknesses in the scanner privately, as SECURITY.md describes.
