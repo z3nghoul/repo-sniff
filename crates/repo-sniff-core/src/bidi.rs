@@ -153,6 +153,8 @@ const RUNS_STRINGS_BASENAMES: &[&str] = &[
     "nodemon.json",
     "devbox.json",
     "app.json",
+    "renovate.json",
+    "renovate.json5",
     "lefthook.json",
     "simple-git-hooks.json",
     "cloudbuild.json",
@@ -187,7 +189,10 @@ pub(crate) fn is_data_json(slash_path: &str) -> bool {
     if !(name.ends_with(".json") || name.ends_with(".jsonc")) {
         return false;
     }
-    let stem = name.trim_end_matches('c').trim_end_matches(".json");
+    let stem = name
+        .strip_suffix(".jsonc")
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(name);
     let configuration = name.starts_with('.')
         || stem.ends_with("rc")
         || stem.ends_with(".config")
@@ -382,6 +387,7 @@ mod tests {
             ".release-it.json",
             ".projen/tasks.json",
             "lefthook.json",
+            "renovate.json",
             "mcp.json",
             "x/tasks.json",
             "tsconfig.config.json",

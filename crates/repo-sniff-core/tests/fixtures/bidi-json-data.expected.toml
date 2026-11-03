@@ -4,7 +4,7 @@
 # ...), and wherever the control is outside a string value or the file is not
 # valid JSON; a string value of a data file is MEDIUM (#106).
 
-files_scanned = 21
+files_scanned = 22
 
 [[finding]]
 file = "positive/data/strings.jsonc"
@@ -149,3 +149,9 @@ line = 3
 rule = "deception.bidi-control"
 severity = "medium"
 explanation_contains = "not executed as code"
+
+[[finding]]
+file = "positive/exec/renovate.json"
+line = 3
+rule = "deception.bidi-control"
+severity = "critical"

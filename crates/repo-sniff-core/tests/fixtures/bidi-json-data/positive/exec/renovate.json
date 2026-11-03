@@ -1,0 +1,4 @@
+{
+  "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
+  "postUpgradeTasks": {"commands": ["echo ‮./x.sh"]}
+}
