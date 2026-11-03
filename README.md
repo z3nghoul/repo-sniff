@@ -4,9 +4,9 @@
   <img alt="repo-sniff: static analysis, never executes code, written in Rust" src="https://raw.githubusercontent.com/z3nghoul/repo-sniff/main/docs/assets/banner-dark.svg" width="100%">
 </picture>
 
-[![CI](https://img.shields.io/github/actions/workflow/status/z3nghoul/repo-sniff/ci.yml?branch=main&style=flat-square&labelColor=1e1e2e&label=ci)](https://github.com/z3nghoul/repo-sniff/actions/workflows/ci.yml) [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-cba6f7?style=flat-square&labelColor=1e1e2e)](LICENSE) [![Rust 2024 edition](https://img.shields.io/badge/rust-2024_edition-fab387?style=flat-square&labelColor=1e1e2e)](https://www.rust-lang.org/) [![Never executes code](https://img.shields.io/badge/never_executes_code-a6e3a1?style=flat-square&labelColor=1e1e2e)](#guarantees)
+[![CI](https://img.shields.io/github/actions/workflow/status/z3nghoul/repo-sniff/ci.yml?branch=main&style=flat-square&labelColor=1e1e2e&label=ci)](https://github.com/z3nghoul/repo-sniff/actions/workflows/ci.yml) [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-cba6f7?style=flat-square&labelColor=1e1e2e)](LICENSE) [![Rust 2024 edition](https://img.shields.io/badge/rust-2024_edition-fab387?style=flat-square&labelColor=1e1e2e)](https://www.rust-lang.org/) [![Never executes code](https://img.shields.io/badge/never-executes_code-a6e3a1?style=flat-square&labelColor=1e1e2e)](#guarantees)
 
-Sniff a repository before you run it.
+sniff a repository before you run it
 
 ![repo-sniff scanning a demo project and rust-lang/cargo](https://raw.githubusercontent.com/z3nghoul/repo-sniff/main/docs/demo.gif)
 
