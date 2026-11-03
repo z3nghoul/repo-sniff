@@ -337,6 +337,33 @@ fn materializing_restores_names_and_text_and_rejects_unknown_markers() {
 }
 
 #[test]
+fn materializing_restores_invisible_characters_and_generated_lines() {
+    let stored = tempfile::tempdir().unwrap();
+    let write = |relative: &str, contents: &str| {
+        let path = stored.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    for (name, character) in common::CHAR_MARKERS {
+        write(
+            &format!("chars/{name}.txt"),
+            &format!("a{{{{{name}}}}}b\r\n"),
+        );
+        let real = common::materialize(stored.path());
+        let text = fs::read_to_string(real.path().join(format!("chars/{name}.txt"))).unwrap();
+        assert_eq!(text, format!("a{character}b\r\n"), "{name}");
+    }
+    write("gen.js", "{{MIN_FUNCS_2}}\n");
+    let real = common::materialize(stored.path());
+    let line = fs::read_to_string(real.path().join("gen.js")).unwrap();
+    assert_eq!(
+        line,
+        "function f0(a){if(a>0){return a-0;}return a+0;}var v0=f0(0);\
+         function f1(a){if(a>1){return a-1;}return a+1;}var v1=f1(1);\n"
+    );
+}
+
+#[test]
 fn the_harness_reports_what_is_wrong() {
     let parent = tempfile::tempdir().unwrap();
     let dir = parent.path().join("family");

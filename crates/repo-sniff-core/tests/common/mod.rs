@@ -5,7 +5,9 @@
 //! committed files harmless (the details are in CONTRIBUTING.md):
 //!
 //! - words such scanners react to are written as `{{NAME}}` markers, listed in
-//!   [`MARKERS`];
+//!   [`MARKERS`]; invisible characters (bidi controls, zero-width characters,
+//!   line separators) the same way, listed in [`CHAR_MARKERS`], and a long
+//!   generated line as one generator marker, see [`generate`];
 //! - a folder whose real name starts with a dot is stored with `_` instead
 //!   (`.vscode` as `_vscode`), see [`DOT_DIRS`];
 //! - a file that a scanner or an editor might run is stored with the suffix
@@ -53,6 +55,33 @@ pub const MARKERS: &[(&str, &[&str])] = &[
     ("WEBCLIENT", &["Net.", "WebClient"]),
     ("POWERSHELL", &["power", "shell"]),
     ("MARSHAL", &["mar", "shal"]),
+];
+
+/// Marker names and the character they stand for, by its exact name in the
+/// Unicode standard. Written as escapes, so this file holds none of them.
+pub const CHAR_MARKERS: &[(&str, char)] = &[
+    ("SHY", '\u{AD}'),
+    ("NEL", '\u{85}'),
+    ("ALM", '\u{61C}'),
+    ("MVS", '\u{180E}'),
+    ("ZWSP", '\u{200B}'),
+    ("ZWNJ", '\u{200C}'),
+    ("ZWJ", '\u{200D}'),
+    ("LRM", '\u{200E}'),
+    ("RLM", '\u{200F}'),
+    ("LSEP", '\u{2028}'),
+    ("PSEP", '\u{2029}'),
+    ("LRE", '\u{202A}'),
+    ("RLE", '\u{202B}'),
+    ("PDF", '\u{202C}'),
+    ("LRO", '\u{202D}'),
+    ("RLO", '\u{202E}'),
+    ("WJ", '\u{2060}'),
+    ("LRI", '\u{2066}'),
+    ("RLI", '\u{2067}'),
+    ("FSI", '\u{2068}'),
+    ("PDI", '\u{2069}'),
+    ("BOM", '\u{FEFF}'),
 ];
 
 /// Folders whose real name is `.<name>`; stored as `_<name>`. A list, not a
@@ -137,9 +166,62 @@ fn substitute(data: &[u8], file: &Path) -> Vec<u8> {
         let marker = format!("{{{{{name}}}}}");
         out = replace_all(&out, marker.as_bytes(), marker_text(pieces).as_bytes());
     }
+    for (name, character) in CHAR_MARKERS {
+        let marker = format!("{{{{{name}}}}}");
+        let mut text = [0; 4];
+        out = replace_all(
+            &out,
+            marker.as_bytes(),
+            character.encode_utf8(&mut text).as_bytes(),
+        );
+    }
+    out = expand_generators(&out);
     if let Some(left) = leftover_marker(&out) {
         panic!("{}: marker {left} is not in MARKERS", file.display());
     }
+    out
+}
+
+/// The text a generator marker `{{NAME}}` stands for, or `None` if `name` is
+/// not a generator. `MIN_FUNCS_<n>` is the single line of a minified bundle:
+/// the functions `f0` to `f<n-1>` and a variable for each, without a newline.
+fn generate(name: &str) -> Option<String> {
+    let count: usize = name.strip_prefix("MIN_FUNCS_")?.parse().ok()?;
+    Some(
+        (0..count)
+            .map(|i| {
+                format!(
+                    "function f{i}(a){{if(a>{i}){{return a-{i};}}return a+{i};}}var v{i}=f{i}({i});"
+                )
+            })
+            .collect(),
+    )
+}
+
+fn expand_generators(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut at = 0;
+    while let Some(open) = data[at..].windows(2).position(|w| w == b"{{") {
+        let start = at + open;
+        let name_len = data[start + 2..]
+            .iter()
+            .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || **b == b'_')
+            .count();
+        let end = start + 2 + name_len;
+        let name = std::str::from_utf8(&data[start + 2..end]).unwrap();
+        match generate(name) {
+            Some(text) if data[end..].starts_with(b"}}") => {
+                out.extend_from_slice(&data[at..start]);
+                out.extend_from_slice(text.as_bytes());
+                at = end + 2;
+            }
+            _ => {
+                out.extend_from_slice(&data[at..start + 2]);
+                at = start + 2;
+            }
+        }
+    }
+    out.extend_from_slice(&data[at..]);
     out
 }
 
