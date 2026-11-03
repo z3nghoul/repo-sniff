@@ -16,12 +16,16 @@
 //! large instead, and a link whose target is not a regular file in the
 //! repository as unreadable; both make the scan inconclusive.
 
+pub mod js_lex;
+pub mod js_loaders;
+pub mod js_shape;
 pub mod npm_scripts;
 mod pylines;
 pub mod python_pth;
 pub mod python_start;
 pub mod repo_contents;
 pub mod vscode_autorun;
+pub mod win_loaders;
 
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell};
@@ -84,6 +88,10 @@ pub(crate) struct Views<'a> {
     size: Option<u64>,
     text: OnceCell<Cow<'a, str>>,
     jsonc: OnceCell<Result<Node, ParseError>>,
+    /// What the JavaScript loader flow analysis found in `text`.
+    js_flow: OnceCell<Vec<js_loaders::Found>>,
+    /// What the Windows loader signatures found in the file.
+    win_flow: OnceCell<Vec<win_loaders::WinFound>>,
     /// The last `line_of` answer, `(offset, line)`, to count on from.
     line_cursor: Cell<(usize, usize)>,
 }
@@ -97,6 +105,8 @@ impl<'a> Views<'a> {
             size: None,
             text: OnceCell::new(),
             jsonc: OnceCell::new(),
+            js_flow: OnceCell::new(),
+            win_flow: OnceCell::new(),
             line_cursor: Cell::new((0, 1)),
         }
     }
@@ -161,6 +171,12 @@ impl<'a> Views<'a> {
     /// is meant to be asked once `text` has been computed.
     pub(crate) fn columns_are_exact(&self) -> bool {
         self.text_is_bytes() || self.decode == Decode::Utf16Bom
+    }
+
+    /// The loader findings of `text` read as JavaScript (see `js_loaders`),
+    /// found once for all the rules that ask.
+    pub(crate) fn js_flow(&self) -> &[js_loaders::Found] {
+        self.js_flow.get_or_init(|| js_loaders::flow(self.text()))
     }
 
     /// `text` parsed as JSONC.
@@ -243,6 +259,19 @@ impl<'a> Ctx<'a> {
         self.views.line_of(offset)
     }
 
+    /// What the Windows loader signatures found in the file, computed once
+    /// for the three rules.
+    pub(crate) fn win_flow(&self) -> &'a [win_loaders::WinFound] {
+        self.views
+            .win_flow
+            .get_or_init(|| win_loaders::analyze(self))
+    }
+
+    /// What the JavaScript loader analysis found in the file's text.
+    pub(crate) fn js_flow(&self) -> &'a [js_loaders::Found] {
+        self.views.js_flow()
+    }
+
     /// The file parsed as JSONC, or the parse error.
     pub fn jsonc(&self) -> &'a Result<Node, ParseError> {
         self.views.jsonc()
@@ -270,6 +299,11 @@ pub struct RepoIndex {
     /// `with_manifests`), by path, so a check can follow `cd a && npm install`
     /// into another manifest without touching the disk.
     manifests: HashMap<String, Vec<u8>>,
+    /// Files that a script of some `package.json` starts with `node`.
+    run_files: HashSet<String>,
+    /// For some of those files, the worst finding a loader rule has for it,
+    /// with the rule's id (see `scan::loader_levels`).
+    loader_levels: HashMap<String, (Severity, String)>,
 }
 
 impl RepoIndex {
@@ -294,6 +328,46 @@ impl RepoIndex {
     pub fn with_manifests(mut self, manifests: HashMap<String, Vec<u8>>) -> Self {
         self.manifests = manifests;
         self
+    }
+
+    /// Records the files that npm scripts start (see
+    /// `npm_scripts::started_files`).
+    pub fn with_run_files(mut self, files: HashSet<String>) -> Self {
+        self.run_files = files;
+        self
+    }
+
+    /// The files that scripts start, sorted so that a scan is repeatable.
+    pub(crate) fn run_file_paths(&self) -> Vec<&String> {
+        let mut paths: Vec<&String> = self.run_files.iter().collect();
+        paths.sort();
+        paths
+    }
+
+    /// Records the worst loader finding of the files npm scripts start.
+    pub fn with_loader_levels(mut self, levels: HashMap<String, (Severity, String)>) -> Self {
+        self.loader_levels = levels;
+        self
+    }
+
+    /// The worst loader finding of a file that an npm script starts, and the
+    /// id of the rule that reported it. `None` for a file without one, and for
+    /// a file the scan did not look at beforehand.
+    pub fn loader_level(&self, path: &str) -> Option<(Severity, &str)> {
+        self.loader_levels
+            .get(path)
+            .map(|(severity, rule)| (*severity, rule.as_str()))
+    }
+
+    /// Whether a script of some `package.json` in the repository starts this
+    /// file with `node` or a similar program.
+    pub fn runs_file(&self, path: &str) -> bool {
+        self.run_files.contains(path)
+    }
+
+    /// The paths of the `package.json` files the scan read.
+    pub(crate) fn manifest_paths(&self) -> impl Iterator<Item = &String> {
+        self.manifests.keys()
     }
 
     /// The bytes of the `package.json` at this exact path, if the scan read it
@@ -344,6 +418,23 @@ pub const HEAD_LEN: usize = 8 * 1024;
 const FILE_CHECKS: &[(&str, Check)] = &[
     ("deps.npm-lifecycle-hook", npm_scripts::lifecycle_hook),
     ("run.npm-script-local-server", npm_scripts::run_script),
+    ("run.js-fetch-eval", js_loaders::fetch_eval),
+    ("run.js-function-require", js_loaders::function_require),
+    (
+        "obfuscation.encoded-payload-sink",
+        js_loaders::encoded_payload,
+    ),
+    ("obfuscation.obfuscator-io", js_shape::obfuscator),
+    ("obfuscation.minified-source", js_shape::minified),
+    ("run.windows-remote-code", win_loaders::remote_code),
+    (
+        "obfuscation.windows-encoded-payload",
+        win_loaders::encoded_payload,
+    ),
+    (
+        "run.windows-defender-exclusion",
+        win_loaders::defender_exclusion,
+    ),
     ("deps.python-pth-exec", python_pth::check),
     ("deps.python-start-entrypoint", python_start::check),
 ];

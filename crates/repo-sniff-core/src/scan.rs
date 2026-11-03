@@ -71,6 +71,11 @@ const SNIPPET_LEAD_CHARS: usize = 40;
 /// very long line would make that quadratic.
 const MAX_LOCATED_HITS: usize = 100;
 
+/// A text file over the buffered size is read whole for a file rule that sets
+/// `reads_large_files`, up to this many bytes; a larger one is listed as too
+/// large, as for any other file rule.
+const LARGE_CHECK_LIMIT: u64 = 32 * 1024 * 1024;
+
 /// Added to findings from a file that has NUL bytes and does not read as text.
 const BINARY_LOOKING_NOTE: &str = " (found in a binary-looking file)";
 
@@ -209,6 +214,13 @@ fn scan_with_budget(
     // The `package.json` files, for the npm check to follow a script into
     // another manifest of the repository.
     let index = index.with_manifests(read_manifests(root, &walked.files, &link_paths));
+    // The files those scripts start, for the loader rules.
+    let run_files = crate::checks::npm_scripts::started_files(&index);
+    let index = index.with_run_files(run_files);
+    // What the loader rules say about those files, so that a script which runs
+    // one is judged by it (the other direction of the same fact).
+    let levels = loader_levels(root, rules, &index, &limits, &link_paths);
+    let index = index.with_loader_levels(levels);
     // Links recorded by the caller whose files are scanned as content too.
     let recorded_links: HashSet<PathBuf> = walked
         .files
@@ -321,7 +333,6 @@ fn scan_with_budget(
                 size,
                 rules,
                 &limits,
-                has_file_rule(&slash_path),
                 &env,
                 &mut report.unlisted,
             );
@@ -587,6 +598,66 @@ fn scan_with_budget(
     }
     report.duration = started.elapsed();
     report
+}
+
+/// The family whose findings on a file that a script starts raise the finding
+/// of the script.
+const LOADER_FAMILY: &str = "loader-signatures";
+
+/// Runs the loader rules on each file an npm script starts, before the scan
+/// proper, and returns the worst level per file. Only regular files within the
+/// buffered size are looked at; the scan itself reads the rest.
+fn loader_levels(
+    root: &Path,
+    rules: &[Rule],
+    index: &RepoIndex,
+    limits: &Limits,
+    links: &HashSet<&PathBuf>,
+) -> HashMap<String, (Severity, String)> {
+    let loader_rules: Vec<(&Rule, Check)> = rules
+        .iter()
+        .filter(|rule| rule.family == LOADER_FAMILY)
+        .filter_map(|rule| match rule.matcher {
+            Matcher::File(check) => Some((rule, check)),
+            _ => None,
+        })
+        .collect();
+    let mut levels = HashMap::new();
+    if loader_rules.is_empty() {
+        return levels;
+    }
+    for path in index.run_file_paths() {
+        if !index.contains_path(path)
+            || links.contains(&PathBuf::from(path))
+            || !loader_rules.iter().any(|(rule, _)| rule.applies_to(path))
+        {
+            continue;
+        }
+        let full = root.join(path);
+        let size = fs::metadata(&full).map_or(u64::MAX, |metadata| metadata.len());
+        if size > limits.max_buffered_size {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&full) else {
+            continue;
+        };
+        let views = Views::new(&bytes, classify(path, &bytes).decode);
+        for (rule, check) in &loader_rules {
+            if !rule.applies_to(path) {
+                continue;
+            }
+            let ctx = Ctx::new(path, None, index, false, rule.severity, &views);
+            for hit in check(&ctx) {
+                let worse = levels
+                    .get(path.as_str())
+                    .is_none_or(|(known, _): &(Severity, String)| hit.severity > *known);
+                if worse {
+                    levels.insert(path.clone(), (hit.severity, rule.id.clone()));
+                }
+            }
+        }
+    }
+    levels
 }
 
 /// A `package.json` larger than this is not kept for other checks to follow.
@@ -1108,7 +1179,6 @@ fn scan_streamed(
     size: u64,
     rules: &[Rule],
     limits: &Limits,
-    file_rule_applies: bool,
     env: &Env<'_>,
     unlisted: &mut Vec<Unlisted>,
 ) -> Streamed {
@@ -1145,6 +1215,16 @@ fn scan_streamed(
         .iter()
         .filter(|rule| rule.applies_to(slash_path))
         .collect();
+    // A file rule that reads large files gets the file whole, up to a limit; any
+    // other file rule, or a file over that limit, lists the file as too large.
+    let file_rule_applies = env.file_rules.iter().any(|(rule, _)| {
+        rule.applies_to(slash_path) && (!rule.reads_large_files || size > LARGE_CHECK_LIMIT)
+    });
+    let large_file_rule = !file_rule_applies
+        && env
+            .file_rules
+            .iter()
+            .any(|(rule, _)| rule.applies_to(slash_path));
     let whole_file_rule = file_rule_applies
         || applicable
             .iter()
@@ -1173,6 +1253,20 @@ fn scan_streamed(
     let script = is_script(slash_path, &head);
     if whole_file_rule {
         out.skipped.push(too_large);
+    }
+    if large_file_rule && !whole_file_rule {
+        let mut bytes = Vec::new();
+        let read = File::open(&path)
+            .and_then(|file| file.take(LARGE_CHECK_LIMIT + 1).read_to_end(&mut bytes));
+        match read.map(|_| bytes) {
+            Ok(bytes) => {
+                let class = classify(slash_path, &bytes);
+                let views = Views::new(&bytes, class.decode);
+                let checked = env.run_file_checks(relative, slash_path, &views, None);
+                out.findings.extend(checked.findings);
+            }
+            Err(err) => out.skipped.push(unreadable(err)),
+        }
     }
     if is_utf16_script(slash_path, &head) {
         // Decoded as it is read, as for a file read whole (`Decode::Utf16Bom`).
@@ -2278,6 +2372,7 @@ mod tests {
             matcher: Matcher::File(check),
             files: Some(globs.build().unwrap()),
             names_executables: false,
+            reads_large_files: false,
         }
     }
 

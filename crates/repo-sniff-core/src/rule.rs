@@ -34,6 +34,10 @@ const BUILTIN_RULE_FILES: &[(&str, &str)] = &[
     ("deps.toml", include_str!("../rules/deps.toml")),
     ("repo.toml", include_str!("../rules/repo.toml")),
     ("run.toml", include_str!("../rules/run.toml")),
+    (
+        "obfuscation.toml",
+        include_str!("../rules/obfuscation.toml"),
+    ),
 ];
 
 /// How a rule looks for its target. Every rule names its engine explicitly.
@@ -82,6 +86,8 @@ struct RawRule {
     files: Vec<String>,
     #[serde(default)]
     names_executables: bool,
+    #[serde(default)]
+    reads_large_files: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +127,11 @@ pub struct Rule {
     /// report, so the file no longer makes the scan inconclusive; a finding
     /// of any other rule does not.
     pub names_executables: bool,
+    /// Only for `engine = "file"`: the check reads the file whole, so a text
+    /// file over the buffered size (up to a limit in the scanner) is read into
+    /// memory for it instead of being listed as too large, which would make
+    /// the scan inconclusive. Padding a file past 5 MiB then does not hide it.
+    pub reads_large_files: bool,
 }
 
 impl Rule {
@@ -169,6 +180,8 @@ pub enum RuleError {
     DuplicateId { id: String },
     #[error("rule `{id}`: only an `engine = \"head\"` rule can set `names_executables`")]
     NamesExecutablesNeedsHead { id: String },
+    #[error("rule `{id}`: only an `engine = \"file\"` rule can set `reads_large_files`")]
+    ReadsLargeNeedsFile { id: String },
 }
 
 /// Loads every rule shipped with repo-sniff.
@@ -285,6 +298,10 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
         return Err(RuleError::NamesExecutablesNeedsHead { id: raw.id });
     }
 
+    if raw.reads_large_files && !matches!(matcher, Matcher::File(_)) {
+        return Err(RuleError::ReadsLargeNeedsFile { id: raw.id });
+    }
+
     Ok(Rule {
         id: raw.id,
         family: raw.family,
@@ -296,6 +313,7 @@ fn compile(raw: RawRule) -> Result<Rule, RuleError> {
         matcher,
         files,
         names_executables: raw.names_executables,
+        reads_large_files: raw.reads_large_files,
     })
 }
 
@@ -550,6 +568,15 @@ mod tests {
         assert!(matches!(
             parse_rules(&source, "test.toml"),
             Err(RuleError::DuplicateId { .. })
+        ));
+    }
+
+    #[test]
+    fn reading_large_files_is_only_for_file_rules() {
+        let source = format!("{VALID}\nreads_large_files = true\n");
+        assert!(matches!(
+            parse_rules(&source, "test.toml"),
+            Err(RuleError::ReadsLargeNeedsFile { .. })
         ));
     }
 

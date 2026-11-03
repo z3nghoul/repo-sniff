@@ -14,3 +14,60 @@ attack      = ["T1059.007"]
 description = "An npm start, dev, build or test script runs a local JavaScript file (node <path>, nodemon <path>) next to a front-end tool such as react-scripts, vite, next or webpack. A build or test script that starts a server is unusual"
 example     = 'package.json:6 sets "test" to "node server/server.js | react-scripts test"'
 files       = ["**/package.json"]
+
+[[rule]]
+id          = "run.js-fetch-eval"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "run"
+# Code that is downloaded and run is a loader whatever the file is called. A call
+# the check could not follow, or a file it could not read to the end, while the
+# file makes network calls, is reported at medium and says to review it by hand.
+severity    = "critical"
+attack      = ["T1105", "T1059.007"]
+description = "A JavaScript file passes data from a network call (axios, fetch, http.get, got) to eval, new Function, Function() or vm.runIn*, in the same file. The code that runs is downloaded when the program runs, so what the repository shows is not what executes"
+example     = 'server/controllers/userController.js:7 calls eval on the result of axios.get'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true
+
+[[rule]]
+id          = "run.js-function-require"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "run"
+severity    = "critical"
+attack      = ["T1059.007", "T1620"]
+description = "A JavaScript file builds a function with new Function(\"require\", ...) and calls it with require. Code assembled at run time gets the module loader, so it can read files, start programs and open connections: the usual shape of a loader"
+example     = 'lib/loader.js:3 calls new Function("require", body)(require)'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true
+
+[[rule]]
+id          = "run.windows-remote-code"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "run"
+# Baseline for a command that downloads and runs code. The check lowers the forms
+# that do not name a URL (bitsadmin between local paths, regsvr32 with scrobj.dll
+# and no URL) to high.
+severity    = "critical"
+attack      = ["T1105", "T1059.001", "T1218.005", "T1218.010", "T1218.011", "T1197"]
+description = "A command line fetches code from the network or runs code from a string with a program that ships with Windows: IEX with a download on the same line, certutil -urlcache, bitsadmin /transfer, mshta with a URL, regsvr32 /i: with a URL, rundll32 with javascript:. Read in .ps1, .psm1, .bat, .cmd, .vbs, .hta and .wsf files and in the commands of package.json scripts and VS Code tasks"
+example     = 'setup.ps1:2 runs IEX on the result of DownloadString'
+files       = ["**/*.ps1", "**/*.psm1", "**/*.bat", "**/*.cmd", "**/*.vbs", "**/*.hta", "**/*.wsf", "**/package.json", "**/.vscode/tasks.json", "**/*.code-workspace"]
+# A padded script past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true
+
+[[rule]]
+id          = "run.windows-defender-exclusion"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "run"
+severity    = "high"
+attack      = ["T1562.001"]
+description = "A command line tells Windows Defender not to scan a path, process or extension (Add-MpPreference -Exclusion...) or switches a protection off (Set-MpPreference -Disable...). Malware does this before it drops a payload; some honest developer setup scripts do it for build speed"
+example     = 'setup.ps1:6 runs Add-MpPreference -ExclusionPath'
+files       = ["**/*.ps1", "**/*.psm1", "**/*.bat", "**/*.cmd", "**/*.vbs", "**/*.hta", "**/*.wsf", "**/package.json", "**/.vscode/tasks.json", "**/*.code-workspace"]
+reads_large_files = true

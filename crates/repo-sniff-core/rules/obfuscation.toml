@@ -1,0 +1,58 @@
+# Stage: obfuscation. Code written to hide what it does.
+
+[[rule]]
+id          = "obfuscation.encoded-payload-sink"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+severity    = "high"
+attack      = ["T1027", "T1140"]
+description = "A JavaScript file hands decoded data to eval, new Function, vm.runIn* or a command: atob, Buffer.from with base64 or hex, unescape, String.fromCharCode, a long base64 string or a run of escape sequences. Encoding the code that runs hides what it does from a reader"
+example     = 'lib/run.js:3 calls eval(atob(blob))'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true
+
+[[rule]]
+id          = "obfuscation.obfuscator-io"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+# Baseline for source. The check raises it to critical when a tool runs the file
+# (a configuration file such as next.config.js, or a file an npm script starts)
+# and lowers it to medium in folders for built bundles.
+severity    = "high"
+attack      = ["T1027.013"]
+description = "A JavaScript file looks like the output of the obfuscator.io tool: many _0x names with a string array that a loop rotates. Honest source is not written this way, and when a tool runs the file the obfuscated code runs on every build or start"
+example     = 'next.config.js:1 has 3000 _0x names and a while(!![]) loop'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true
+
+[[rule]]
+id          = "obfuscation.minified-source"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+severity    = "medium"
+attack      = ["T1027"]
+description = "A JavaScript file has a line of 2000 or more characters of code with almost no whitespace. Source that people review is not written that way; minified code in a source folder can hold anything. Where built bundles belong (dist, build, public, vendor, *.min.js) the level is INFO, because that folder name is chosen by the repository"
+example     = 'src/lib/bundle.js:2 is 2656 characters long'
+files       = ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+# A padded file past 5 MiB must not hide a loader, so a large file is read whole.
+reads_large_files = true
+
+[[rule]]
+id          = "obfuscation.windows-encoded-payload"
+engine      = "file"
+family      = "loader-signatures"
+stage       = "obfuscation"
+# Baseline for an encoded command or a decode step. The check raises an encoded
+# powershell command to critical when it hides the window or sits next to a
+# download.
+severity    = "high"
+attack      = ["T1027.010", "T1140"]
+description = "A command line runs powershell -EncodedCommand (or any prefix down to -e) with a long base64 operand, decodes a file with certutil -decode, or runs a FromBase64String result with IEX. The command is hidden from a reader of the file"
+example     = 'setup.bat:3 runs powershell -enc with a base64 string'
+files       = ["**/*.ps1", "**/*.psm1", "**/*.bat", "**/*.cmd", "**/*.vbs", "**/*.hta", "**/*.wsf", "**/package.json", "**/.vscode/tasks.json", "**/*.code-workspace"]
+reads_large_files = true

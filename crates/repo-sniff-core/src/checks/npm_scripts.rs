@@ -2491,6 +2491,13 @@ pub fn lifecycle_hook(ctx: &Ctx<'_>) -> Vec<Hit> {
                 pack_hook_when(&name)
             )
         };
+        let sev = match loader_in_files(ctx, &outcome.node_files) {
+            Some((level, note)) => {
+                reason.push_str(&note);
+                sev.max(if install_time { level } else { demote(level) })
+            }
+            None => sev,
+        };
         if outcome.cycle {
             reason.push_str("; the chain contains a cycle of scripts that call each other");
         }
@@ -2575,6 +2582,57 @@ fn unparseable(ctx: &Ctx<'_>, loaded: &Loaded, err: &jsonc::ParseError) -> Hit {
     }
 }
 
+/// Every local file that some script of some `package.json` in the repository
+/// starts with `node` or a similar program, found the way the rules above
+/// follow a script (through `npm run`, `concurrently`, `cd dir && ...`). The
+/// loader rules use it to tell a file that runs on every start from one that
+/// only sits in the repository. Each script gets a fresh resolver, so the step
+/// budget of one cannot hide the files of the next.
+pub fn started_files(repo: &RepoIndex) -> HashSet<String> {
+    let mut files = HashSet::new();
+    for path in repo.manifest_paths() {
+        let Some(bytes) = repo.manifest(path) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(bytes);
+        let Ok(root) = jsonc::parse_json(&text) else {
+            continue;
+        };
+        let own_dir = dir_of(path).to_string();
+        let manifest = manifest_of(&root);
+        let scripts = manifest.scripts.clone();
+        for (name, script) in &scripts {
+            let mut resolver = Resolver::new(repo, &own_dir, manifest_of(&root));
+            let mut stack: Stack = vec![(own_dir.clone(), name.clone())];
+            let outcome = resolver.text(&own_dir, &script.value, 1, &mut stack);
+            files.extend(outcome.node_files);
+        }
+    }
+    files
+}
+
+/// The worst loader finding in the files a script starts, with the sentence
+/// that says so. A loader finding of MEDIUM or more in such a file raises the
+/// finding of the script to that level: the script is how the file runs.
+fn loader_in_files(ctx: &Ctx<'_>, files: &[String]) -> Option<(Severity, String)> {
+    let (file, level, rule) = files
+        .iter()
+        .filter_map(|file| {
+            ctx.repo
+                .loader_level(file)
+                .filter(|(level, _)| *level >= Severity::Medium)
+                .map(|(level, rule)| (file, level, rule))
+        })
+        .max_by_key(|(_, level, _)| *level)?;
+    Some((
+        level,
+        format!(
+            "; the file {} has a loader finding ({rule}, {level}), so the script runs it",
+            short(file)
+        ),
+    ))
+}
+
 /// Rule `run.npm-script-local-server`.
 pub fn run_script(ctx: &Ctx<'_>) -> Vec<Hit> {
     let mut hits = Vec::new();
@@ -2635,6 +2693,10 @@ pub fn run_script(ctx: &Ctx<'_>) -> Vec<Hit> {
         let mut severity = ctx.base;
         let mut reasons = Vec::new();
         reasons.extend(combination);
+        if let Some((level, note)) = loader_in_files(ctx, &outcome.node_files) {
+            severity = severity.max(level);
+            reasons.push(note.trim_start_matches("; ").to_string());
+        }
         if let Some(why) = problem {
             severity = severity.max(Severity::Medium);
             reasons.push(format!(
@@ -3084,5 +3146,29 @@ mod tests {
             &views,
         ));
         assert_eq!(hits[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn started_files_lists_what_every_script_runs() {
+        let root = br#"{"scripts": {"start": "node server/index.js", "dev": "npm run start",
+            "build": "cd web && npm run make", "lint": "eslint ."}}"#;
+        let web = br#"{"scripts": {"make": "node tools/make.js"}}"#;
+        let manifests: HashMap<String, Vec<u8>> = HashMap::from([
+            ("package.json".to_string(), root.to_vec()),
+            ("web/package.json".to_string(), web.to_vec()),
+        ]);
+        let repo = RepoIndex::new([
+            "package.json",
+            "web/package.json",
+            "server/index.js",
+            "web/tools/make.js",
+        ])
+        .with_manifests(manifests);
+
+        let files = started_files(&repo);
+
+        assert!(files.contains("server/index.js"), "{files:?}");
+        assert!(files.contains("web/tools/make.js"), "{files:?}");
+        assert_eq!(files.len(), 2, "{files:?}");
     }
 }
