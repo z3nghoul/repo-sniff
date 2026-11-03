@@ -10,31 +10,36 @@ files_scanned = 15
 file = "positive/data/strings.jsonc"
 line = 3
 rule = "deception.bidi-control"
-severity = "critical"
+severity = "medium"
+explanation_contains = "not executed as code"
 
 [[finding]]
 file = "positive/data/strings.jsonc"
 line = 5
 rule = "deception.bidi-control"
-severity = "critical"
+severity = "medium"
+explanation_contains = "not executed as code"
 
 [[finding]]
 file = "positive/data/test/fixtures/wpt/names.json"
 line = 3
 rule = "deception.bidi-control"
-severity = "critical"
+severity = "medium"
+explanation_contains = "not executed as code"
 
 [[finding]]
 file = "positive/data/urltestdata.json"
 line = 4
 rule = "deception.bidi-control"
-severity = "critical"
+severity = "medium"
+explanation_contains = "not executed as code"
 
 [[finding]]
 file = "positive/data/urltestdata.json"
 line = 9
 rule = "deception.bidi-control"
-severity = "critical"
+severity = "medium"
+explanation_contains = "not executed as code"
 
 [[finding]]
 file = "positive/exec/.devcontainer/devcontainer.json"
