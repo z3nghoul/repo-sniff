@@ -1,0 +1,11 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "demo-test-assignment",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "prepare": "npm run setup",
+    "setup": "node server/setup.js",
+    "start": "node server/index.js"
+  }
+}

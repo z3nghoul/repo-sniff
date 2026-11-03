@@ -126,7 +126,7 @@ Each in its own branch and pull request, fixtures approved first:
 - [ ] CI: `cargo-deny` or `cargo-audit` next to Dependabot
 - [ ] Review point: binary contents via `goblin` (imports, SHA-256, code signature, embedded URLs/IPs); optional VirusTotal hash lookup with the user's own key, never logged, with a note that a third party learns the hash
 - [ ] Benchmark on popular honest repositories (target: 0 critical); started here and extended in every later milestone
-- [ ] Real-sample test suite gated by `REPO_SNIFF_REAL_SAMPLES` (path to samples outside the repo; skipped when unset)
+- [x] Real-sample test suite gated by `REPO_SNIFF_REAL_SAMPLES` (path to samples outside the repo; skipped when unset)
 
 ## Milestone 3 — Report and scoring
 
