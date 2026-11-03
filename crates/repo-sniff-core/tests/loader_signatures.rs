@@ -273,3 +273,31 @@ fn a_failed_regular_expression_scales_linearly() {
         "50k pairs {small:.3}s, 200k pairs {large:.3}s"
     );
 }
+
+#[test]
+fn a_script_over_the_whole_read_limit_still_gets_the_line_rules_as_a_stream() {
+    // Past 32 MiB the loader analysis is skipped and the file is listed as too
+    // large (the scan is inconclusive), but the line rules still read it as a
+    // stream and find what is in it.
+    let rle = '\u{202B}';
+    let mut text = String::from("// header\n");
+    text.push_str(&format!("var a = \"{rle}\" + b.trim();\n"));
+    text.push_str("var x = 1;\0\n");
+    let filler = format!("{}\n", "x".repeat(1023));
+    while text.len() < 33 * 1024 * 1024 {
+        text.push_str(&filler);
+    }
+    let report = scan_files(&[("huge.js", text.into_bytes())], Limits::default());
+
+    let rules: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(rules.contains(&"deception.bidi-control"), "{rules:?}");
+    assert!(rules.contains(&"deception.nul-byte-in-script"), "{rules:?}");
+    assert!(!report.is_complete());
+    assert!(
+        report
+            .skipped
+            .iter()
+            .all(|s| s.path.to_string_lossy() == "huge.js")
+    );
+    assert_eq!(report.inconclusive_count(), 1);
+}
