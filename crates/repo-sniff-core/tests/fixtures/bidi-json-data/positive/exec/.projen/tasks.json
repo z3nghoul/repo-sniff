@@ -1,0 +1,4 @@
+{
+  "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
+  "tasks": {"build": {"steps": [{"exec": "echo ‮./x.sh"}]}}
+}

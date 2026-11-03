@@ -131,8 +131,7 @@ fn control_beside_name(line: &str) -> bool {
 }
 
 /// Base names of JSON files whose strings a tool runs or hands to a shell:
-/// package managers and task runners, deploy and build configuration, hooks of
-/// editors and coding agents.
+/// package managers and task runners, deploy and build configuration, hooks.
 const RUNS_STRINGS_BASENAMES: &[&str] = &[
     "package.json",
     "composer.json",
@@ -140,6 +139,9 @@ const RUNS_STRINGS_BASENAMES: &[&str] = &[
     "deno.jsonc",
     "bower.json",
     "project.json",
+    "rust-project.json",
+    "workspace.json",
+    "angular.json",
     "nx.json",
     "turbo.json",
     "lerna.json",
@@ -151,37 +153,31 @@ const RUNS_STRINGS_BASENAMES: &[&str] = &[
     "nodemon.json",
     "devbox.json",
     "app.json",
-    "renovate.json",
-    "renovate.json5",
-    ".renovaterc.json",
-    ".releaserc.json",
-    ".lintstagedrc.json",
-    ".huskyrc.json",
-    "lighthouserc.json",
-    ".mcp.json",
+    "lefthook.json",
+    "simple-git-hooks.json",
+    "cloudbuild.json",
+    "railway.json",
+    "nixpacks.json",
+    "opencode.json",
     "devcontainer.json",
-    ".devcontainer.json",
-];
-
-/// Folders whose JSON files are all read by a tool that runs commands.
-const RUNS_STRINGS_FOLDERS: &[&str] = &[
-    ".vscode",
-    ".devcontainer",
-    ".claude",
-    ".cursor",
-    ".windsurf",
-    ".codex",
-    ".gemini",
-    ".zed",
-    ".codesandbox",
-    ".idea",
+    "tasks.json",
+    "launch.json",
+    "settings.json",
+    "mcp.json",
+    "run.json",
 ];
 
 /// Whether `slash_path` is a JSON file (`.json`, `.jsonc`) that is data, not
 /// something a tool runs: a bidi control in one of its string values is not a
-/// deception about code. The list of files that run strings is on purpose long,
-/// and a file on it keeps the rule's level whatever its folder (a `test/` or
-/// `fixtures/` path lowers nothing).
+/// deception about code.
+///
+/// A file is data only when nothing says a tool reads it for commands. The
+/// test is structural, not a list of products, so a tool that did not exist
+/// when this was written is covered: a folder or a file whose name starts with
+/// a dot (editor, agent, hook and CI configuration), a configuration name
+/// (`*rc.json`, `*.config.json`), a name that holds `hooks` or `compose`, and
+/// the names above. The path does not lower the level (a `test/` or `fixtures/`
+/// folder is judged like any other).
 pub(crate) fn is_data_json(slash_path: &str) -> bool {
     let lower = slash_path.to_lowercase();
     let mut parts: Vec<&str> = lower.split('/').collect();
@@ -191,8 +187,17 @@ pub(crate) fn is_data_json(slash_path: &str) -> bool {
     if !(name.ends_with(".json") || name.ends_with(".jsonc")) {
         return false;
     }
-    !RUNS_STRINGS_BASENAMES.contains(&name)
-        && !parts.iter().any(|p| RUNS_STRINGS_FOLDERS.contains(p))
+    let stem = name.trim_end_matches('c').trim_end_matches(".json");
+    let configuration = name.starts_with('.')
+        || stem.ends_with("rc")
+        || stem.ends_with(".config")
+        || name.contains("hooks")
+        || name.contains("compose")
+        || RUNS_STRINGS_BASENAMES.contains(&name);
+    !configuration
+        && !parts
+            .iter()
+            .any(|p| p.starts_with('.') && *p != "." && *p != "..")
 }
 
 /// The 1-based numbers of the lines of a JSON document whose bidi controls
@@ -370,14 +375,20 @@ mod tests {
             "test/fixtures/PACKAGE.JSON",
             ".vscode/tasks.json",
             "x/.vscode/launch.json",
-            ".vscode/settings.json",
-            ".devcontainer/devcontainer.json",
             ".devcontainer/sub/devcontainer.json",
             ".devcontainer.json",
-            ".claude/settings.json",
-            "composer.json",
-            "deno.jsonc",
-            "vercel.json",
+            ".roo/mcp.json",
+            ".kiro/settings/mcp.json",
+            ".release-it.json",
+            ".projen/tasks.json",
+            "lefthook.json",
+            "mcp.json",
+            "x/tasks.json",
+            "tsconfig.config.json",
+            "lint.config.jsonc",
+            "babelrc.json",
+            "git-hooks.json",
+            "docker-compose.json",
             "app.code-workspace",
             "notes.txt",
         ] {
@@ -387,7 +398,8 @@ mod tests {
             "test/fixtures/wpt/url/resources/urltestdata.json",
             "data.json",
             "a/tsconfig.jsonc",
-            "vscode/tasks.json",
+            "vscode/data.json",
+            "./data.json",
         ] {
             assert!(is_data_json(path), "{path}");
         }

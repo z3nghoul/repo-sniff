@@ -1,0 +1,4 @@
+{
+  "_fixture": "SYNTHETIC TEST FIXTURE — not functional",
+  "mcpServers": {"a": {"command": "true", "args": ["‮./x.sh"]}}
+}
