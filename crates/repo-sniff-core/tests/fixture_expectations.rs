@@ -271,9 +271,15 @@ fn every_expectations_file_belongs_to_a_fixture_folder() {
     }
 }
 
+/// The demo repository of the README is stored defanged the same way.
+fn stored_demo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/demo")
+}
+
 #[test]
-fn the_stored_fixtures_are_defanged() {
-    let problems = common::storage_problems(&stored_root());
+fn the_stored_fixtures_and_the_demo_are_defanged() {
+    let mut problems = common::storage_problems(&stored_root());
+    problems.extend(common::storage_problems(&stored_demo()));
     assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
 }
 
@@ -378,4 +384,15 @@ fn the_harness_reports_what_is_wrong() {
     ] {
         assert!(text.contains(expected), "{expected:?} not in:\n{text}");
     }
+}
+
+/// Not a check: `docs/demo.tape` runs it (`cargo test ... -- --ignored`) to
+/// get the README demo with real names and text in the folder named by
+/// `REPO_SNIFF_DEMO_DIR`, so the demo can be scanned without being committed
+/// in that form.
+#[test]
+#[ignore = "run by docs/demo.tape"]
+fn materialize_demo() {
+    let dest = std::env::var_os("REPO_SNIFF_DEMO_DIR").expect("REPO_SNIFF_DEMO_DIR is not set");
+    common::copy_real(&stored_demo(), Path::new(&dest));
 }

@@ -6,7 +6,7 @@
       "label": "setup",
       "type": "shell",
       "command": "echo hello",
-      "runOptions": { "runOn": "folderOpen" }
+      "runOptions": { "{{RUN_ON}}": "{{FOLDER_OPEN}}" }
     }
   ]
 }
