@@ -394,6 +394,29 @@ fn materializing_restores_invisible_characters_new_words_and_generated_lines() {
 }
 
 #[test]
+fn a_marker_right_after_a_brace_is_still_a_marker() {
+    let stored = tempfile::tempdir().unwrap();
+    fs::write(
+        stored.path().join("a.js"),
+        "catch(e){{{EVAL}}(e)}{{{MIN_FUNCS_1}}\n",
+    )
+    .unwrap();
+    let real = common::materialize(stored.path());
+    let text = fs::read_to_string(real.path().join("a.js")).unwrap();
+    let eval = ["ev", "al"].concat();
+    assert_eq!(
+        text,
+        format!(
+            "catch(e){{{eval}(e)}}{{function f0(a){{if(a>0){{return a-0;}}return a+0;}}var v0=f0(0);\n"
+        )
+    );
+
+    fs::write(stored.path().join("b.js"), "{{{NO_SUCH_MARKER}}\n").unwrap();
+    let result = std::panic::catch_unwind(|| common::materialize(stored.path()));
+    assert!(result.is_err(), "an unknown marker after a brace must fail");
+}
+
+#[test]
 fn the_harness_reports_what_is_wrong() {
     let parent = tempfile::tempdir().unwrap();
     let dir = parent.path().join("family");

@@ -223,8 +223,8 @@ fn expand_generators(data: &[u8]) -> Vec<u8> {
                 at = end + 2;
             }
             _ => {
-                out.extend_from_slice(&data[at..start + 2]);
-                at = start + 2;
+                out.extend_from_slice(&data[at..start + 1]);
+                at = start + 1;
             }
         }
     }
@@ -245,7 +245,7 @@ fn leftover_marker(data: &[u8]) -> Option<String> {
         if name_len > 0 && data[end..].starts_with(b"}}") {
             return Some(String::from_utf8_lossy(&data[start..end + 2]).into_owned());
         }
-        at = start + 2;
+        at = start + 1;
     }
     None
 }
