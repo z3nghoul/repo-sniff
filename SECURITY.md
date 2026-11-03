@@ -1,10 +1,10 @@
-# Security policy
+# security policy
 
+How to report a weakness in repo-sniff itself, and what counts as one.
 repo-sniff reads untrusted code on purpose, so the scanner itself is a
-target. Reports about weaknesses in repo-sniff are welcome and taken
-seriously.
+target; such reports are welcome and taken seriously.
 
-## Reporting a vulnerability
+## reporting a vulnerability
 
 Please **do not open a public issue** for a vulnerability.
 
@@ -15,14 +15,15 @@ repository and choose **Report a vulnerability**. Include:
 - what you found and why it matters;
 - the smallest repository, file or command that reproduces it (a synthetic
   one, not real malware);
-- the repo-sniff version or commit and your operating system.
+- the repo-sniff version (`repo-sniff --version`) or commit and your
+  operating system.
 
 This is a small open-source project maintained by one person, so replies are
 best effort. I aim to acknowledge a report within 7 days and will keep you
 informed about the fix. Reporters are credited in the release notes unless
 they prefer to stay anonymous.
 
-## What counts as a vulnerability
+## what counts as a vulnerability
 
 Problems where a scanned repository, or a third-party file the scanner loads,
 can attack or mislead the scanner:
@@ -47,20 +48,26 @@ can attack or mislead the scanner:
 - **Supply chain:** a weakness in the CI workflows, release process or
   dependency pinning.
 
-## What does not count
+The guarantees these break are listed in
+[docs/DETECTIONS.md](docs/DETECTIONS.md#5-scanner-hardening).
 
-- A malicious repository that repo-sniff does not flag. That is a missed
-  detection, not a vulnerability: please open a normal issue or pull request
-  with a synthetic fixture. The honest list of blind spots is in
-  [docs/DETECTIONS.md](docs/DETECTIONS.md).
-- A false positive on a legitimate repository (a normal issue as well).
+## what does not count
 
-## Supported versions
+These are normal issues, with their own templates:
+
+- A malicious repository that repo-sniff does not flag is a missed detection:
+  open a [missed detection](https://github.com/z3nghoul/repo-sniff/issues/new?template=missed-detection.yml)
+  issue or a pull request with a synthetic fixture. The known gaps of every
+  rule are in [docs/DETECTIONS.md](docs/DETECTIONS.md).
+- A finding on a legitimate repository is a
+  [false positive](https://github.com/z3nghoul/repo-sniff/issues/new?template=false-positive.yml).
+
+## supported versions
 
 Until 1.0 only the latest commit on `main` and the latest release receive
 fixes.
 
-## Safe testing
+## safe testing
 
 Please test against synthetic files you created yourself. Do not send real
 malware samples, and do not run repo-sniff against repositories you have no
