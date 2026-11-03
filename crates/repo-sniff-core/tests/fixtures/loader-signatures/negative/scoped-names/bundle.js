@@ -2,7 +2,7 @@
 const axios = require("axios");
 
 function download(url) {
-  const content = axios.get(url);
+  const content = {{AXIOS_GET}}(url);
   return content;
 }
 

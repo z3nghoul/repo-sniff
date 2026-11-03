@@ -57,6 +57,7 @@ pub const MARKERS: &[(&str, &[&str])] = &[
     ("MARSHAL", &["mar", "shal"]),
     ("CTOR_CHAIN", &["construc", "tor.construc", "tor"]),
     ("RUN_IN_NEW_CONTEXT", &["run", "InNew", "Context"]),
+    ("AXIOS_GET", &["ax", "ios.get"]),
 ];
 
 /// Marker names and the character they stand for, by its exact name in the
