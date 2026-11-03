@@ -1,4 +1,8 @@
-# repo-sniff
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/z3nghoul/repo-sniff/main/docs/assets/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/z3nghoul/repo-sniff/main/docs/assets/banner-light.svg">
+  <img alt="repo-sniff: static analysis, never executes code, written in Rust" src="https://raw.githubusercontent.com/z3nghoul/repo-sniff/main/docs/assets/banner-dark.svg" width="100%">
+</picture>
 
 ![repo-sniff scanning a demo project and rust-lang/cargo](docs/demo.gif)
 
