@@ -5,3 +5,4 @@
 # Fixtures must reach the tests byte for byte: some rules depend on CRLF
 # line endings or on invisible characters, so git must never convert them.
 crates/repo-sniff-core/tests/fixtures/** -text
+crates/repo-sniff/tests/fixtures/** -text
