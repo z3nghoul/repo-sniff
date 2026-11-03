@@ -62,6 +62,7 @@ obfuscation" is CRITICAL. Scoring uses three axes:
 | Detection | Level | ATT&CK | Rule |
 |---|---|---|---|
 | `.vscode/tasks.json` or `*.code-workspace` with a task using `"runOn": "folderOpen"` (parsed as JSONC, so comments, line breaks and `\u` escapes cannot hide it; the per-OS `windows`/`linux`/`osx` overrides are checked too; a file of that name that is a symbolic link to a file in the repository is judged by the file it points at, found the way NTFS and APFS find it (either separator, any case), as VS Code follows it, and the finding says so; a target too large to read whole lists the link as too large, and a target the check cannot read (another link, outside the repository, missing) or whose text does not name one file for certain (not valid UTF-8, or read as different files by Unix and Windows) lists it as unreadable, so in both cases the scan is inconclusive; at most 64 MiB is read through links in one scan, and further links that need their target are listed as too large) | HIGH, with network or shell CRITICAL | — | `ide.vscode-folder-open-task` |
+| `.vscode/tasks.json` or `*.code-workspace` that cannot be parsed: VS Code's own parser is forgiving and may still accept it, so the file is reported for a manual look ("review it by hand") instead of being skipped | HIGH if the text mentions both `runOn` and `folderOpen`, MEDIUM otherwise (the words may hide behind escapes) | — | `ide.vscode-folder-open-task` |
 | `.vscode/settings.json` overriding the interpreter, terminal or environment | HIGH | — | — |
 | `Directory.Build.props` / `Directory.Build.targets`, custom MSBuild tasks (Visual Studio evaluates them on project load) | HIGH | T1127.001 | — |
 | .NET analyzers / source generators shipped as DLLs in the repo (a binary runs inside the IDE) | CRITICAL | — | — |
@@ -327,3 +328,96 @@ inconclusive scan. How binary files affect that:
 - The `.git` folder at the root is listed as `git metadata, not analyzed` and
   does not change the status; a nested `.git` folder makes the scan
   inconclusive.
+
+In full:
+
+| Status | Meaning |
+|---|---|
+| 0 | Nothing reached the `--fail-on` threshold, and the scan was not inconclusive (files it did not analyze are listed in the report) |
+| 1 | The scan found something at or above the threshold |
+| 2 | The scan could not run (bad target, clone failure, wrong options) |
+| 3 | Nothing reached the threshold, but the scan was **inconclusive**: the file limit was reached, a file was too large or could not be read, a line of a large file was too long to analyze, a nested `.git` repository was not read, or an executable binary was not reported by any rule |
+
+A scan that could not vouch for what it looked at is never reported as clean:
+the report ends with `Scan: INCONCLUSIVE`, says why, and the exit status is 3
+even with `--fail-on none`; findings at the threshold still take precedence
+(exit 1). Images, archives, symlinks that no check had to read and the root
+`.git` folder are listed and do not change the status. This makes
+`repo-sniff scan . --fail-on high` usable as a CI check without mistaking
+"nothing found in what was read" for "safe".
+
+## 7. How the scanner protects you
+
+`repo-sniff` does not run code from the scanned repository: no install, no
+build, no scripts. It reads files. That is a design rule, not a promise of
+absolute safety. The scanner parses hostile input, so it can have bugs, and a
+clean result never proves that a repository is harmless.
+
+What it does to protect you:
+
+- **Cloning.** Remote repositories are cloned over `https` only, shallowly,
+  by a `git` that runs with an empty environment, an empty configuration and
+  an empty home directory. No filter, credential helper or fsmonitor from
+  your own or the system's git configuration runs, hooks and templates are
+  off, symlinks are written as plain files (the scanner then reads them as links
+  from the clone's own index), and submodules are not fetched.
+  There are no interactive prompts. Your git credentials are never used: a
+  private repository fails with a message saying so (see
+  [Private repositories](../README.md#self-scan-and-private-repositories)).
+- **Secrets.** A token pasted into a URL (`https://TOKEN@host/...`) is hidden
+  in the notice, the report and error messages. A URL whose password holds
+  an unescaped `/`, `?` or `#` is refused before anything is sent (curl would
+  take part of it for the host), and so is an scp-like address with any user
+  (`deploy:TOKEN@host:path`), which is an ssh target.
+- **Reading.** Symlinks are listed, not followed, with one exception: a
+  symlinked VS Code tasks file or `.code-workspace` is judged through the
+  regular file inside the repository it points at. If that target cannot be
+  read for certain (a link to another link, a name that differs between Unix
+  and Windows, a path through a directory link, a target over the limit), the
+  link is listed as unreadable and the scan is inconclusive. File names and
+  text taken from the repository are cleaned before they are printed, so a
+  hostile repository cannot paint over the report.
+- **Limits.** The work is bounded. The walk stops after 100,000 files. A file
+  over 100 MiB is not read. A file over 5 MiB is read as a stream, line by
+  line, and only the line rules look at it; a line over 16 MiB is not
+  analyzed. Reads through symlinks are capped at 64 MiB per scan. Reaching
+  the file limit, a file or line over its limit and the symlink cap each make
+  the scan inconclusive instead of passing silently.
+- **Honesty.** A scan is never reported as clean when it cannot vouch for what
+  it looked at: the report says `INCONCLUSIVE` and the exit status is 3 (see
+  [Exit status and binary files](#6-exit-status-and-binary-files)).
+
+## 8. Analysis layers
+
+In the order of [ROADMAP.md](../ROADMAP.md):
+
+1. **Automatic execution** (milestone 2, in progress): IDE settings (VS Code
+   settings, devcontainer, `.idea` run configurations, `.envrc`), committed
+   virtual environments, MSBuild props and targets and .NET analyzers shipped
+   as DLLs, npm lifecycle scripts, `setup.py` and build backends, other
+   ecosystem hooks (Dockerfile, composer, Gemfile, `binding.gyp`, Maven),
+   build scripts (`build.rs`, `.vcxproj` build events, CMake, Makefile,
+   Gradle), GitHub Actions workflows, `.git/config` of a local repository,
+   suspicious files (password-protected archives, data after an image),
+   third-party submodules, human deception (zero-width characters,
+   homoglyphs, README advice to disable the antivirus).
+2. **Report and scoring** (milestone 3): colored output, JSON, a risk score
+   on three axes (trigger, capability, concealment), a correlation pass, and
+   `.repo-sniff.toml` filters and exclusions.
+3. **SARIF, GitHub Action, release binaries** (milestone 4).
+4. **Capabilities and AST** (milestone 7): tree-sitter for Python,
+   JavaScript, C/C++ and more; process spawning, persistence, injection,
+   credential theft, exfiltration. Risk comes from *combinations* of
+   capabilities, not from single matches.
+5. **Obfuscation** (milestone 8): entropy, long base64/hex blobs, minified
+   code among normal sources, recursive decoding.
+6. **Dependencies** (milestone 9): typosquatting, known vulnerabilities via
+   OSV, known malicious packages, lockfiles that resolve outside the registry.
+7. **Later**: comparing what a README claims with what the code can do.
+
+How rules are built. Rules are built into the binary, so adding one means a
+rebuild. Line rules are plain TOML (`engine = "line-regex"`), so a pattern can
+be added without touching the engine. Most structural checks (JSONC, `.pth`
+files, file headers) are Rust functions with one signature,
+`fn(&Ctx) -> Vec<Hit>`, registered by rule id; their TOML entry carries the
+metadata and the file globs.
