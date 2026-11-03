@@ -1,3 +1,3 @@
 // SYNTHETIC TEST FIXTURE — not functional
-var fso = new ActiveXObject("Scripting.FileSystemObject");
+var fso = new {{ACTIVEX}}("Scripting.FileSystemObject");
 var name = fso.GetTempName();

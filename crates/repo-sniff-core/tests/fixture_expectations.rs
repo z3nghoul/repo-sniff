@@ -272,6 +272,42 @@ fn every_expectations_file_belongs_to_a_fixture_folder() {
 }
 
 #[test]
+fn the_stored_fixtures_are_defanged() {
+    let problems = common::storage_problems(&stored_root());
+    assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
+}
+
+#[test]
+fn the_storage_check_names_a_raw_fixture() {
+    let stored = tempfile::tempdir().unwrap();
+    let write = |relative: &str, contents: &str| {
+        let path = stored.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    // Built from pieces so this file stays free of the words as well.
+    write(
+        "positive/raw.js",
+        &format!("{}(x)\n", ["ev", "al"].concat()),
+    );
+    write("positive/.vscode/notes.txt", "text\n");
+    write("positive/tasks.json", "{}\n");
+    write("positive/ok.js", "{{EVAL}}(x)\n");
+    write("positive/ok.json.fixture", "{}\n");
+
+    let text = common::storage_problems(stored.path()).join("\n");
+    for expected in [
+        "positive/raw.js: contains {{EVAL}} written out",
+        "positive/.vscode: folder starts with a dot",
+        "positive/tasks.json: needs the .fixture suffix",
+    ] {
+        assert!(text.contains(expected), "{expected:?} not in:\n{text}");
+    }
+    assert!(!text.contains("ok.js"), "{text}");
+    assert!(!text.contains("ok.json.fixture"), "{text}");
+}
+
+#[test]
 fn materializing_restores_names_and_text_and_rejects_unknown_markers() {
     let stored = tempfile::tempdir().unwrap();
     let write = |relative: &str, contents: &str| {

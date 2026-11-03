@@ -4,13 +4,13 @@ const vm = require("vm");
 
 async function viaFetch(url) {
   const code = await (await fetch(url)).text();
-  new Function(code)();
+  new {{FUNCTION}}(code)();
 }
 
 async function viaFunction(url) {
   const res = await fetch(url);
   const body = await res.text();
-  Function("return " + body)();
+  {{FUNCTION}}("return " + body)();
 }
 
 function viaHttps(url) {

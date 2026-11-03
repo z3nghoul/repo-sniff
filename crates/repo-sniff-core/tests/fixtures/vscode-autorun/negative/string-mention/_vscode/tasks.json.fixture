@@ -1,0 +1,2 @@
+// SYNTHETIC TEST FIXTURE — not functional
+{"tasks":[{"label":"{{RUN_ON}} {{FOLDER_OPEN}} is disabled here","command":"echo"}]}

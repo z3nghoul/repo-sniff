@@ -1,0 +1,9 @@
+// SYNTHETIC TEST FIXTURE — not functional
+{
+ "tasks": [{
+  "runOptions": {
+   "{{RUN_ON}}":
+     "{{FOLDER_OPEN}}"
+  }
+ }]
+}

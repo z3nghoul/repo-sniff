@@ -2,7 +2,7 @@
 const axios = require("axios");
 
 function load(url) {
-  axios.get(url).then((r) => eval(r.data));
+  axios.get(url).then((r) => {{EVAL}}(r.data));
 }
 
 module.exports = load;

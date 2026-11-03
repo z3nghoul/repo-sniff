@@ -185,3 +185,71 @@ pub fn copy_real(src: &Path, dest: &Path) {
         }
     }
 }
+
+/// Where in `data` the text of a marker stands raw, as a word of its own.
+fn raw_marker_text(data: &[u8]) -> Option<&'static str> {
+    let word = |b: u8| b.is_ascii_alphanumeric();
+    for (name, pieces) in MARKERS {
+        let text = marker_text(pieces);
+        let text = text.as_bytes();
+        for at in data
+            .windows(text.len())
+            .enumerate()
+            .filter(|(_, w)| *w == text)
+            .map(|(at, _)| at)
+        {
+            let before = at.checked_sub(1).map(|i| data[i]);
+            let after = data.get(at + text.len()).copied();
+            let ends_ok = !before.is_some_and(word)
+                && if *name == "HEX_PREFIX" {
+                    data[at + text.len()..]
+                        .iter()
+                        .take(4)
+                        .filter(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                        .count()
+                        == 4
+                } else {
+                    !after.is_some_and(word)
+                };
+            if ends_ok {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// What breaks the storage conventions in the stored tree `src`: a folder
+/// that starts with a dot, a file that needs [`SUFFIX`] and lacks it, or a
+/// word that should be a marker.
+pub fn storage_problems(src: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, problems: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let shown = path.strip_prefix(root).unwrap().display().to_string();
+            if kind.is_dir() {
+                if name.starts_with('.') {
+                    problems.push(format!("{shown}: folder starts with a dot"));
+                }
+                walk(root, &path, problems);
+            } else if kind.is_file() {
+                if !name.ends_with(SUFFIX) && needs_suffix(&name) {
+                    problems.push(format!("{shown}: needs the {SUFFIX} suffix"));
+                }
+                let data = fs::read(&path).unwrap();
+                if !data.contains(&0)
+                    && !name.ends_with(".expected.toml")
+                    && let Some(raw) = raw_marker_text(&data)
+                {
+                    problems.push(format!("{shown}: contains {{{{{raw}}}}} written out"));
+                }
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    walk(src, src, &mut problems);
+    problems
+}

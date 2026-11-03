@@ -1,6 +1,0 @@
-// SYNTHETIC TEST FIXTURE — not functional
-{
-"tasks": [{
-"runOptions": {"runOn": "folderOpen"}
-}]
-}

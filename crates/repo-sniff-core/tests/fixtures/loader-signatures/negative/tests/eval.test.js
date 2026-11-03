@@ -2,9 +2,9 @@
 const axios = require("axios");
 jest.mock("axios");
 
-test("eval of a literal", () => {
-  expect(eval("1 + 1")).toBe(2);
+test("{{EVAL}} of a literal", () => {
+  expect({{EVAL}}("1 + 1")).toBe(2);
   axios.get.mockResolvedValue({ data: "x" });
   const code = "2 + 2";
-  expect(eval(code)).toBe(4);
+  expect({{EVAL}}(code)).toBe(4);
 });

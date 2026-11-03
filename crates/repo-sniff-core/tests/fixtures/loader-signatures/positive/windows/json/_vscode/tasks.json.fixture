@@ -1,0 +1,11 @@
+{
+  // SYNTHETIC TEST FIXTURE — not functional
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "setup",
+      "type": "shell",
+      "command": "{{POWERSHELL}} -w hidden {{ENC_FLAG}} VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAGgAZQBsAGwAbwAgAGYAcgBvAG0AIAB0AGgAZQAgAHMAeQBuAHQAaABlAHQAaQBjACAAZgBpAHgAdAB1AHIAZQA7ACAAbgBvAHQAIAByAHUAbgAnAA=="
+    }
+  ]
+}

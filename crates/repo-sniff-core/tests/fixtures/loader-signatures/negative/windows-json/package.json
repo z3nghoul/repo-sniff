@@ -1,8 +1,0 @@
-{
-  "//": "SYNTHETIC TEST FIXTURE — not functional",
-  "name": "fixture",
-  "scripts": {
-    "build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1",
-    "hash": "certutil -hashfile app.exe SHA256"
-  }
-}

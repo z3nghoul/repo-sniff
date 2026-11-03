@@ -1,5 +1,5 @@
 // SYNTHETIC TEST FIXTURE — not functional
-function _0x5923(){const _0x57d93e=['log','hello','fixture','push','shift','length'];_0x5923=function(){return _0x57d93e;};return _0x5923();}
-(function(_0x4dcd76,_0x502349){const _0xba1702=_0x4dcd76();while(!![]){try{const _0x3b486b=parseInt(_0x4c0a(0x1a1))/0x1+parseInt(_0x4c0a(0x1a2))/0x2;if(_0x3b486b===_0x502349)break;else _0xba1702['push'](_0xba1702['shift']());}catch(_0x4be1c4){_0xba1702['push'](_0xba1702['shift']());}}}(_0x5923,0x3e8));
-function _0x4c0a(_0x1aae15,_0x28dfcd){const _0x2b6d1f=_0x5923();return _0x4c0a=function(_0xdeb60c,_0x594927){_0xdeb60c=_0xdeb60c-0x1a1;return _0x2b6d1f[_0xdeb60c];},_0x4c0a(_0x1aae15,_0x28dfcd);}
-const _0x3f1d2a=_0x4c0a;console[_0x3f1d2a(0x1a1)](_0x3f1d2a(0x1a2));
+function {{HEX_PREFIX}}5923(){const {{HEX_PREFIX}}57d93e=['log','hello','fixture','push','shift','length'];{{HEX_PREFIX}}5923=function(){return {{HEX_PREFIX}}57d93e;};return {{HEX_PREFIX}}5923();}
+(function({{HEX_PREFIX}}4dcd76,{{HEX_PREFIX}}502349){const {{HEX_PREFIX}}ba1702={{HEX_PREFIX}}4dcd76();while(!![]){try{const {{HEX_PREFIX}}3b486b=parseInt({{HEX_PREFIX}}4c0a(0x1a1))/0x1+parseInt({{HEX_PREFIX}}4c0a(0x1a2))/0x2;if({{HEX_PREFIX}}3b486b==={{HEX_PREFIX}}502349)break;else {{HEX_PREFIX}}ba1702['push']({{HEX_PREFIX}}ba1702['shift']());}catch({{HEX_PREFIX}}4be1c4){{{HEX_PREFIX}}ba1702['push']({{HEX_PREFIX}}ba1702['shift']());}}}({{HEX_PREFIX}}5923,0x3e8));
+function {{HEX_PREFIX}}4c0a({{HEX_PREFIX}}1aae15,{{HEX_PREFIX}}28dfcd){const {{HEX_PREFIX}}2b6d1f={{HEX_PREFIX}}5923();return {{HEX_PREFIX}}4c0a=function({{HEX_PREFIX}}deb60c,{{HEX_PREFIX}}594927){{{HEX_PREFIX}}deb60c={{HEX_PREFIX}}deb60c-0x1a1;return {{HEX_PREFIX}}2b6d1f[{{HEX_PREFIX}}deb60c];},{{HEX_PREFIX}}4c0a({{HEX_PREFIX}}1aae15,{{HEX_PREFIX}}28dfcd);}
+const {{HEX_PREFIX}}3f1d2a={{HEX_PREFIX}}4c0a;console[{{HEX_PREFIX}}3f1d2a(0x1a1)]({{HEX_PREFIX}}3f1d2a(0x1a2));
