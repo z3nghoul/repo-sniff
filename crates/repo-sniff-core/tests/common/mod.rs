@@ -229,7 +229,14 @@ pub fn storage_problems(src: &Path) -> Vec<String> {
             let kind = entry.file_type().unwrap();
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let shown = path.strip_prefix(root).unwrap().display().to_string();
+            // `/` on every OS, like the paths in reports.
+            let shown = path
+                .strip_prefix(root)
+                .unwrap()
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             if kind.is_dir() {
                 if name.starts_with('.') {
                     problems.push(format!("{shown}: folder starts with a dot"));
