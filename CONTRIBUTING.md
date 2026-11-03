@@ -162,7 +162,8 @@ replaced. Scanning a stored folder directly gives different results. The test
 `docs/demo/` and fails, naming the file, on a written-out marker word, a
 folder that starts with a dot or an executable file without `.fixture`. The
 same applies to `docs/demo/`, which `docs/demo.tape` materializes before
-scanning it.
+scanning it, and to the fixtures of the CLI in
+`crates/repo-sniff/tests/fixtures/`, checked by `tests/cli_json.rs`.
 
 The Python startup families scan each case on its own and keep their
 `expectations.tsv` inside the folder with their own tests.

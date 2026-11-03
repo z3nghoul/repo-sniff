@@ -56,11 +56,20 @@ Scan: complete (every file was read)
 |---|---|
 | `--fail-on <SEVERITY>` | Exit with status 1 if any finding is at least this severe: `info`, `low`, `medium`, `high` (default) or `critical`. `none` never fails because of findings. |
 | `--ref <REF>` | Branch or tag to scan. Only for remote repositories; the default branch is used otherwise. |
+| `--json` | Print the report as one JSON document on stdout, for scripts and AI agents. The exit status does not change. |
 
 Scan a specific branch or tag of a remote repository:
 
 ```sh
 repo-sniff scan https://github.com/owner/repo --ref v1.2.3
+```
+
+A JSON report for a script or an agent; text from the scanned repository in
+it is escaped, bounded and listed in `untrusted.fields`
+([docs/JSON.md](docs/JSON.md)):
+
+```sh
+repo-sniff scan ./some-project --json | jq '.status, .counts'
 ```
 
 Build from source instead of installing:
@@ -198,7 +207,7 @@ re-run it are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
   ([#54](https://github.com/z3nghoul/repo-sniff/issues/54)).
 - A payload renamed to `*.pth` while the package is built is not seen
   ([#11](https://github.com/z3nghoul/repo-sniff/issues/11)).
-- There is no risk score, JSON, SARIF or GitHub Action yet.
+- There is no risk score, SARIF or GitHub Action yet.
 
 Every open hardening item is in the
 [issue tracker](https://github.com/z3nghoul/repo-sniff/issues?q=is%3Aissue%20is%3Aopen%20label%3Ahardening).
@@ -232,7 +241,7 @@ that skipped such paths would be blind to it.
 - Milestone 2, in progress: the rest of automatic execution (IDE settings,
   .NET and MSBuild, Python install hooks, build scripts, GitHub Actions,
   human deception).
-- Milestone 3: colored output, JSON, a risk score on three axes, `.repo-sniff.toml` exclusions.
+- Milestone 3, started: JSON output is done; colored output, a risk score on three axes and `.repo-sniff.toml` exclusions are next.
 - Milestone 4: SARIF, a GitHub Action and release binaries.
 - Milestone 6: a terminal UI and localization.
 - Milestones 7 to 9: capabilities and AST, obfuscation decoding, dependencies.
