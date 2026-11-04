@@ -171,7 +171,8 @@ fn skip_rank(reason: &SkipReason) -> u8 {
     }
 }
 
-fn skip_text(reason: &SkipReason) -> String {
+/// What a skip reason means, in words; also `skipped[].detail` in JSON.
+pub fn skip_text(reason: &SkipReason) -> String {
     match reason {
         SkipReason::TooLarge { size } => format!("too large ({size} bytes)"),
         SkipReason::Symlink { .. } => "symlink, not followed".to_string(),
@@ -332,7 +333,9 @@ mod tests {
             column: None,
             span: None,
             snippet: None,
+            snippet_truncated: false,
             explanation: "because".to_string(),
+            explanation_truncated: false,
         }
     }
 

@@ -1,10 +1,12 @@
 mod clone;
 mod fail_on;
+mod json;
 mod redact;
 mod report;
 mod target;
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -65,7 +67,22 @@ enum Command {
         /// the repository's default branch is scanned.
         #[arg(long = "ref", value_name = "REF")]
         git_ref: Option<String>,
+
+        /// Print the report as one JSON document on stdout (schema in
+        /// docs/JSON.md); progress and errors go to stderr. The exit status
+        /// is the same as for the text report.
+        #[arg(long)]
+        json: bool,
     },
+}
+
+/// What was asked for, carried to the report.
+struct Request<'a> {
+    /// The target as typed.
+    raw_target: &'a str,
+    git_ref: Option<&'a str>,
+    fail_on: FailOn,
+    json: bool,
 }
 
 fn main() -> ExitCode {
@@ -88,11 +105,19 @@ fn run() -> Result<ExitCode> {
             target,
             fail_on,
             git_ref,
-        } => scan(&target, git_ref.as_deref(), fail_on),
+            json,
+        } => scan(&Request {
+            raw_target: &target,
+            git_ref: git_ref.as_deref(),
+            fail_on,
+            json,
+        }),
     }
 }
 
-fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<ExitCode> {
+fn scan(request: &Request<'_>) -> Result<ExitCode> {
+    let raw_target = request.raw_target;
+    let git_ref = request.git_ref;
     match Target::parse(raw_target) {
         Target::Local(path) => {
             if git_ref.is_some() {
@@ -112,7 +137,7 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
                     redact_path(&root.to_string_lossy())
                 );
             }
-            scan_dir(&root, &HashSet::new(), raw_target, fail_on)
+            scan_dir(&root, &HashSet::new(), raw_target, request)
         }
         Target::Remote(url) => {
             clone::validate(&url, git_ref)?;
@@ -126,7 +151,7 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
                 Some(git_ref) => format!("{} (ref {git_ref})", redact_credentials(raw_target)),
                 None => redact_credentials(raw_target),
             };
-            scan_dir(checkout.path(), &checkout.symlinks, &label, fail_on)
+            scan_dir(checkout.path(), &checkout.symlinks, &label, request)
         }
     }
 }
@@ -134,17 +159,36 @@ fn scan(raw_target: &str, git_ref: Option<&str>, fail_on: FailOn) -> Result<Exit
 /// Scans `root`. `links` lists files that the repository records as symbolic
 /// links although they are plain files on disk (a clone, see
 /// `clone::Checkout`); it is empty for a local folder, whose links are real.
+/// `label` names the target in the text report; the JSON report takes the
+/// target and the ref from `request`, as separate fields.
 fn scan_dir(
     root: &Path,
     links: &HashSet<PathBuf>,
     label: &str,
-    fail_on: FailOn,
+    request: &Request<'_>,
 ) -> Result<ExitCode> {
     let rules = builtin_rules().context("failed to load built-in rules")?;
     let report = repo_sniff_core::scan_with_links(root, &rules, Limits::default(), links);
-    print!("{}", report::render(&report, label));
+    let text = if request.json {
+        let target = json::ScanTarget {
+            raw: request.raw_target,
+            git_ref: request.git_ref,
+        };
+        let mut document = json::render(&report, &target, request.fail_on)
+            .context("failed to write the JSON report")?;
+        document.push('\n');
+        document
+    } else {
+        report::render(&report, label)
+    };
+    // One write of the finished report: an error leaves no half document.
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+        .context("failed to print the report")?;
 
-    Ok(ExitCode::from(exit_status(&report, fail_on)))
+    Ok(ExitCode::from(exit_status(&report, request.fail_on)))
 }
 
 /// The exit status for a finished scan: findings at the threshold come first,
@@ -178,7 +222,9 @@ mod tests {
             column: None,
             span: None,
             snippet: None,
+            snippet_truncated: false,
             explanation: String::new(),
+            explanation_truncated: false,
         }
     }
 

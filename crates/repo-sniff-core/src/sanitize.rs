@@ -29,6 +29,11 @@ pub fn display_path(path: &Path) -> String {
 /// Returns `text` with every dangerous character replaced by a visible
 /// `\u{XXXX}` escape, cut to about `max_chars` characters (`...` marks the cut).
 pub fn display_safe(text: &str, max_chars: usize) -> String {
+    display_safe_cut(text, max_chars).0
+}
+
+/// `display_safe`, and whether the text was cut.
+pub fn display_safe_cut(text: &str, max_chars: usize) -> (String, bool) {
     escape(text, max_chars, is_unsafe)
 }
 
@@ -36,16 +41,21 @@ pub fn display_safe(text: &str, max_chars: usize) -> String {
 /// also escapes characters that are invisible or change the layout without
 /// being control characters, so a snippet shows exactly what is in the file.
 pub fn snippet_safe(text: &str, max_chars: usize) -> String {
+    snippet_safe_cut(text, max_chars).0
+}
+
+/// `snippet_safe`, and whether the text was cut.
+pub fn snippet_safe_cut(text: &str, max_chars: usize) -> (String, bool) {
     escape(text, max_chars, |ch| is_unsafe(ch) || is_invisible(ch))
 }
 
-fn escape(text: &str, max_chars: usize, needs_escape: impl Fn(char) -> bool) -> String {
+fn escape(text: &str, max_chars: usize, needs_escape: impl Fn(char) -> bool) -> (String, bool) {
     let mut out = String::new();
     let mut count = 0;
     for ch in text.chars() {
         if count >= max_chars {
             out.push_str("...");
-            break;
+            return (out, true);
         }
         if needs_escape(ch) {
             let escaped = format!("\\u{{{:04X}}}", ch as u32);
@@ -56,7 +66,7 @@ fn escape(text: &str, max_chars: usize, needs_escape: impl Fn(char) -> bool) -> 
             count += 1;
         }
     }
-    out
+    (out, false)
 }
 
 /// Control characters (which include ESC, newline and carriage return), plus
@@ -158,6 +168,18 @@ mod tests {
     fn long_text_is_truncated() {
         assert_eq!(display_safe("abcdefghij", 4), "abcd...");
         assert_eq!(display_safe("abcd", 4), "abcd");
+    }
+
+    #[test]
+    fn the_cut_variants_say_whether_the_text_was_cut() {
+        assert_eq!(display_safe_cut("abcd", 4), ("abcd".to_string(), false));
+        assert_eq!(display_safe_cut("abcde", 4), ("abcd...".to_string(), true));
+        // Text that ends in `...` of its own is not taken for a cut.
+        assert_eq!(display_safe_cut("a...", 4), ("a...".to_string(), false));
+        assert_eq!(
+            snippet_safe_cut("\u{200B}xyz", 8),
+            ("\\u{200B}...".to_string(), true)
+        );
     }
 
     #[test]

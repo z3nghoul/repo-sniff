@@ -141,7 +141,7 @@ Infrastructure:
 ## milestone 3: report and scoring
 
 - [ ] Colored terminal report: colors added only after sanitizing; `NO_COLOR` and non-TTY output respected
-- [ ] JSON output through `serde` only; repository text in it is bounded and marked as untrusted, because AI agents may read it (prompt injection)
+- [x] JSON output through `serde` only; repository text in it is bounded and marked as untrusted, because AI agents may read it (prompt injection) ([#122](https://github.com/z3nghoul/repo-sniff/issues/122), schema in [docs/JSON.md](docs/JSON.md)); repository text in explanations gets a field of its own in [#123](https://github.com/z3nghoul/repo-sniff/issues/123)
 - [ ] Rule metadata tags for the trigger, capability and concealment axes
 - [ ] Risk score on three axes: trigger, capability, concealment
 - [ ] Correlation pass after the scan: all findings plus the repository index in, raised or combined findings out

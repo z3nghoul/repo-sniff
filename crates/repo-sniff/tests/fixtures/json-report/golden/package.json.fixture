@@ -1,0 +1,8 @@
+{
+  "//": "SYNTHETIC TEST FIXTURE — not functional",
+  "name": "fixture",
+  "homepage": "https://example.invalid/",
+  "scripts": {
+    "postinstall": "node scripts/setup.js"
+  }
+}

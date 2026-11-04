@@ -6,6 +6,17 @@ to upgrade.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `--json` prints the report as one JSON document on stdout (schema version 1,
+  described in [docs/JSON.md](docs/JSON.md)); progress and errors go to stderr
+  and the exit status is the same as for the text report. Text from the
+  scanned repository is escaped as in the text report, cut to a limit (named
+  in `truncated_fields`) and listed in `untrusted.fields` with a notice that
+  it is data, not instructions, for AI agents that read the report (#122).
+
 ## [0.1.0] - 2026-11-03
 
 First release. `repo-sniff scan <TARGET>` scans a local directory or an https
@@ -116,6 +127,7 @@ open at this release (each item is an open issue):
 - There is no risk score, JSON or SARIF output, GitHub Action or TUI yet; see
   [ROADMAP.md](ROADMAP.md).
 
+[Unreleased]: https://github.com/z3nghoul/repo-sniff/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/z3nghoul/repo-sniff/releases/tag/v0.1.0
 
   [ROADMAP.md](ROADMAP.md#where-we-are).
